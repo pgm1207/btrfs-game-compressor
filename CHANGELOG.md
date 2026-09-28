@@ -10,6 +10,19 @@ The version advertised in the README: every feature described there is now in th
 released archive. It is a superset of 0.1.0, which was tagged before the ratio
 work and the packaging cleanup landed.
 
+### Note for users who installed before this release
+
+The repository owner changed from `pablogonz12` to `pgm1207`. A copy installed
+before then has the old path compiled into its self-update, so it still follows the
+old URL. GitHub redirects that to the same repository today, so updates keep
+working — but if the old username were ever reused by someone else, the redirect
+would stop. To repoint an older install, run the installer again from the current
+URL (or `--self-update`), which rewrites the copy in place:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/pgm1207/btrfs-game-compressor/main/install.sh | sh
+```
+
 ### Added
 
 - A **community ratio table** of 225 measured games (`ratios/games.json`,
