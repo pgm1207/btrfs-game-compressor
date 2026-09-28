@@ -40,9 +40,19 @@ check: syntax lint test
 syntax:
 	@bash -n $(PROG) && echo "syntax: ok"
 
+# Show every ShellCheck finding, but only fail on real errors. The script has a
+# number of deliberate informational/style notes (literal backticks in printf,
+# colour escapes in a format string, an intentionally split word list) that CI
+# already treats as non-fatal, and this target matches that policy.
 lint:
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -s bash $(PROG) && echo "shellcheck: ok"; \
+		shellcheck -s bash -e SC1091 $(PROG) || true; \
+		if shellcheck -s bash -e SC1091 -S error $(PROG); then \
+			echo "shellcheck: ok (no errors)"; \
+		else \
+			echo "shellcheck: errors found" >&2; \
+			exit 1; \
+		fi; \
 	else \
 		echo "shellcheck: not installed, skipping"; \
 	fi
