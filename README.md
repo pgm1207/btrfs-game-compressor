@@ -1,7 +1,8 @@
 # btrfs-game-compressor
 
 **Reclaim 15–40% of your game library on Btrfs — losslessly, with no change in game
-quality and essentially no performance cost.**
+quality and essentially no performance cost. Unusually compressible titles reach 90%
+(`MechHavoc`), measured with `compsize`.**
 
 [![CI](https://github.com/pablogonz12/btrfs-game-compressor/actions/workflows/ci.yml/badge.svg)](https://github.com/pablogonz12/btrfs-game-compressor/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
