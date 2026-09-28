@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # One-line installer:
-#   curl -fsSL https://raw.githubusercontent.com/pablogonz12/btrfs-game-compressor/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/pgm1207/btrfs-game-compressor/main/install.sh | sh
 #
 # Verifies and installs a tagged release archive into a directory on PATH.
 # No build is needed; installation only writes the selected executable.
@@ -9,7 +9,7 @@
 set -eu
 
 PROG="btrfs-game-compressor"
-REPO="${BTRFS_GAME_COMPRESSOR_REPO:-pablogonz12/btrfs-game-compressor}"
+REPO="${BTRFS_GAME_COMPRESSOR_REPO:-pgm1207/btrfs-game-compressor}"
 # Empty means "follow the latest release"; see the resolution below.
 VERSION="${BTRFS_GAME_COMPRESSOR_VERSION:-}"
 

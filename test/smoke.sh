@@ -1552,7 +1552,7 @@ check_contains "--submit-ratios needs a terminal" "needs a terminal to confirm" 
 out=$(GH_LOG="$GHLOG" PATH="$WORK/gh-bin:$PATH" "$PROG" --submit-ratios --yes 2>&1); rc=$?
 check_rc "--submit-ratios --yes opens the submission" 0 "$rc"
 check_contains "--submit-ratios reports the issue" "issues/1" "$out"
-if grep -q "issue create --repo pablogonz12/btrfs-game-compressor" "$GHLOG"; then
+if grep -q "issue create --repo pgm1207/btrfs-game-compressor" "$GHLOG"; then
     ok "--submit-ratios asks gh to create the issue on the right repo"
 else
     bad "--submit-ratios asks gh to create the issue on the right repo" "$(cat "$GHLOG" 2>/dev/null)"

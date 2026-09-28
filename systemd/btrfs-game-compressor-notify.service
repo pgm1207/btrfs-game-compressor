@@ -1,6 +1,6 @@
 [Unit]
 Description=Notify when Steam games on Btrfs are worth re-compressing
-Documentation=https://github.com/pablogonz12/btrfs-game-compressor
+Documentation=https://github.com/pgm1207/btrfs-game-compressor
 # The check itself is read-only, but it must not fire while a game is mid-write
 # during a Steam update, so it waits for the network to settle first.
 After=network-online.target

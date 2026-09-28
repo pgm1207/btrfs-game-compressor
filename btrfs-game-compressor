@@ -7,7 +7,7 @@
 VERSION="0.1.1"
 PROGNAME="btrfs-game-compressor"
 # Owner/repo used by --self-update and --check-update to find the latest release.
-REPO="${BTRFS_GAME_COMPRESSOR_REPO:-pablogonz12/btrfs-game-compressor}"
+REPO="${BTRFS_GAME_COMPRESSOR_REPO:-pgm1207/btrfs-game-compressor}"
 
 # Sizes must parse identically regardless of user locale: a German/Spanish
 # locale makes du(1) print "1,4G", which awk would read as 1.4 -> 1.

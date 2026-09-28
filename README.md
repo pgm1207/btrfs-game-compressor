@@ -4,7 +4,7 @@
 quality and essentially no performance cost. Unusually compressible titles reach 90%
 (`MechHavoc`), measured with `compsize`.**
 
-[![CI](https://github.com/pablogonz12/btrfs-game-compressor/actions/workflows/ci.yml/badge.svg)](https://github.com/pablogonz12/btrfs-game-compressor/actions/workflows/ci.yml)
+[![CI](https://github.com/pgm1207/btrfs-game-compressor/actions/workflows/ci.yml/badge.svg)](https://github.com/pgm1207/btrfs-game-compressor/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-any%20Linux%20with%20Btrfs-informational)](#requirements)
 [![Shell](https://img.shields.io/badge/shell-bash%204%2B-4EAA25)](#requirements)
@@ -76,14 +76,14 @@ libraries: 1   games: 225   pending: 12   compressed: 213   low-yield: 0
 One install for every distribution, and it keeps itself up to date:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/pablogonz12/btrfs-game-compressor/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/pgm1207/btrfs-game-compressor/main/install.sh | sh
 ```
 
 ## Quick start
 
 ```sh
 # 1. Install (any Linux; SteamOS included)
-curl -fsSL https://raw.githubusercontent.com/pablogonz12/btrfs-game-compressor/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/pgm1207/btrfs-game-compressor/main/install.sh | sh
 
 # 2. Look, don't touch
 btrfs-game-compressor --status
@@ -325,7 +325,7 @@ distribution and updates itself. Cloning the repo is only for contributing.
 ### Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/pablogonz12/btrfs-game-compressor/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/pgm1207/btrfs-game-compressor/main/install.sh | sh
 ```
 
 It downloads the latest release archive, verifies it against the release's
@@ -339,7 +339,7 @@ partition.
 If you prefer to read a script before running it (a good habit), download it first:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/pablogonz12/btrfs-game-compressor/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/pgm1207/btrfs-game-compressor/main/install.sh -o install.sh
 less install.sh          # read it
 sh install.sh
 ```
@@ -917,7 +917,7 @@ btrfs-game-compressor --submit-ratios
 It shows exactly what will be sent, asks once, and opens an issue with your
 measurements. The payload is game names, zstd level, saving and sample count — no
 paths, no host details. A maintainer merges it. There is also a
-[ratio submission issue form](https://github.com/pablogonz12/btrfs-game-compressor/issues/new?template=ratio_submission.yml)
+[ratio submission issue form](https://github.com/pgm1207/btrfs-game-compressor/issues/new?template=ratio_submission.yml)
 for pasting the output by hand.
 
 Nothing is uploaded automatically: the data moves only through a pull request or issue
