@@ -66,12 +66,15 @@ ratios-doc:
 	@tmp=GAMES.md.tmp; \
 		if ./$(PROG) --render-ratios > "$$tmp"; then \
 			mv "$$tmp" GAMES.md; \
-			echo "GAMES.md regenerated from ratios/games.json"; \
 		else \
 			rm -f "$$tmp"; \
 			echo "ratios-doc: could not render the table; GAMES.md left untouched" >&2; \
 			exit 1; \
 		fi
+	@# Refresh the full game list embedded in README.md between its markers, from
+	@# the GAMES.md we just wrote, so the README cannot drift from the JSON.
+	@awk '/<!-- GAME-LIST-START -->/ { print; while ((getline l < "GAMES.md") > 0) if (l ~ /^\|/) print l; skip=1; next } /<!-- GAME-LIST-END -->/ { skip=0 } !skip { print }' README.md > README.md.tmp && mv README.md.tmp README.md
+	@echo "GAMES.md and the README game list regenerated from ratios/games.json"
 
 install:
 	@install -d $(DESTDIR)$(BINDIR)

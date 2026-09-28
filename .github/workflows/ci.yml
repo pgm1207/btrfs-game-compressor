@@ -50,14 +50,14 @@ jobs:
       - name: Behavioural tests
         run: ./test/smoke.sh
 
-      # GAMES.md is generated from ratios/games.json. If a contributor edits the
-      # JSON and forgets `make ratios-doc`, the browsable table silently lies;
-      # this fails the build instead.
-      - name: Generated GAMES.md is current
+      # GAMES.md and the game list embedded in README.md are generated from
+      # ratios/games.json. If a contributor edits the JSON and forgets
+      # `make ratios-doc`, the browsable list silently lies; this fails instead.
+      - name: Generated game lists are current
         run: |
           make ratios-doc
-          if ! git diff --exit-code -- GAMES.md; then
-            echo "::error::GAMES.md is out of date; run 'make ratios-doc' and commit it"
+          if ! git diff --exit-code -- GAMES.md README.md; then
+            echo "::error::GAMES.md or the README game list is out of date; run 'make ratios-doc' and commit it"
             exit 1
           fi
 

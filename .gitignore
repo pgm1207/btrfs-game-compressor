@@ -1,8 +1,9 @@
 # build artifacts
 dist/
 *.tar.gz
-# transient file from `make ratios-doc`
+# transient files from `make ratios-doc`
 GAMES.md.tmp
+README.md.tmp
 
 # nothing from a real install should ever land here
 *.db
