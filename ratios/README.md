@@ -77,10 +77,22 @@ Then commit the changed files and open a pull request. Run `make ratios-merge
 FILE=my-ratios.json DRY_RUN=1` first if you want to see the result without writing
 it. (The merge tool needs `python3`; the tool itself does not.)
 
-### No git? Open an issue instead
+### No checkout? `--submit-ratios`
 
-There is a **"Submit compression ratios"** issue template: generate the file, then
-paste the whole `--export-ratios` output into the issue. A maintainer merges it.
+If you have the [GitHub CLI](https://cli.github.com) (`gh`) installed and logged in:
+
+```sh
+btrfs-game-compressor --submit-ratios
+```
+
+It shows exactly what will be sent, asks once, and opens an issue with your
+measurements. The payload is the same `--export-ratios` document — game names, zstd
+level, saving and sample count, nothing about you. A maintainer merges it.
+
+### Or paste it by hand
+
+The **"Submit compression ratios"** issue template does the same thing manually:
+generate the file, then paste the whole `--export-ratios` output into the issue.
 
 ### Doing it by hand
 

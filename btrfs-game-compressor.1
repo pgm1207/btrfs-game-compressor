@@ -126,9 +126,18 @@ the optional systemd user units. It asks for confirmation at a terminal, refuses
 when the script is owned by a package manager, and never deletes the user's
 configuration or compression history.
 .TP
+.B \-\-submit\-ratios
+Offer this machine's measured savings back to the project by opening a GitHub
+issue containing the same document \fB\-\-export\-ratios\fR emits: game names, the
+zstd level, the saving, and the sample count and range. No paths, host details or
+other personal data are included, nothing is sent without confirmation, and it
+requires the optional \fBgh\fR command from the GitHub CLI, logged in as the user.
+A maintainer merges the submission, so the shared table cannot be poisoned by an
+unreviewed client.
+.TP
 .B \-\-yes
-With \fB\-\-uninstall\fR, skip the confirmation prompt. It does not override the
-package\-manager refusal.
+With \fB\-\-uninstall\fR or \fB\-\-submit\-ratios\fR, skip the confirmation prompt.
+It does not override the package\-manager refusal.
 .TP
 .B \-\-notify
 Send a desktop notification for games in \fBUPDATED\fR or \fBUNCOMPRESSED\fR state.

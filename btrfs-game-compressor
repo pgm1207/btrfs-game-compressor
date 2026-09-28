@@ -73,6 +73,7 @@ OPT_RENDER=0
 OPT_CHECK_UPDATE=0
 OPT_SELF_UPDATE=0
 OPT_UNINSTALL=0
+OPT_SUBMIT_RATIOS=0
 OPT_YES=0
 RATIOS_QUERY=""
 RATIOS_IMPORT_FILE=""
@@ -126,8 +127,10 @@ OPTIONS
                           this copy (use pacman/brew/nix instead)
         --uninstall       remove the tool, its manpage and its systemd units;
                           asks first, and never touches your history
-        --yes             with --uninstall, do not ask (still refuses a
-                          package-managed copy)
+        --submit-ratios   offer your measured savings back to the project by
+                          opening a GitHub issue with them (needs 'gh', asks
+                          first, and never sends anything on its own)
+        --yes             with --uninstall or --submit-ratios, do not ask
         --json            with --status/--benchmark/--ratios, emit JSON
         --notify          send a desktop notice for actionable pending games
         --no-color        disable ANSI colors (also honours \$NO_COLOR)
@@ -209,6 +212,7 @@ parse_args() {
             --check-update) OPT_CHECK_UPDATE=1 ;;
             --self-update) OPT_SELF_UPDATE=1 ;;
             --uninstall)   OPT_UNINSTALL=1 ;;
+            --submit-ratios) OPT_SUBMIT_RATIOS=1 ;;
             --yes|-y)      OPT_YES=1 ;;
             --json)        OPT_JSON=1 ;;
             --notify)      OPT_NOTIFY=1 ;;
@@ -243,6 +247,7 @@ parse_args() {
         "OPT_CHECK_UPDATE:--check-update:0"
         "OPT_SELF_UPDATE:--self-update:0"
         "OPT_UNINSTALL:--uninstall:0"
+        "OPT_SUBMIT_RATIOS:--submit-ratios:0"
     )
     local entry var flag jsonok selected="" selected_flag="" selected_json=0 count=0
     for entry in "${modes[@]}"; do
@@ -269,8 +274,8 @@ parse_args() {
         echo "$PROGNAME: --pending only applies to --status or --dry-run" >&2
         exit 2
     fi
-    if [ "$OPT_YES" -eq 1 ] && [ "$OPT_UNINSTALL" -ne 1 ]; then
-        echo "$PROGNAME: --yes only applies to --uninstall" >&2
+    if [ "$OPT_YES" -eq 1 ] && [ "$OPT_UNINSTALL" -ne 1 ] && [ "$OPT_SUBMIT_RATIOS" -ne 1 ]; then
+        echo "$PROGNAME: --yes only applies to --uninstall or --submit-ratios" >&2
         exit 2
     fi
 
@@ -2368,6 +2373,72 @@ cmd_import_ratios() {
     return 0
 }
 
+# Offer the measured table back to the project. This is deliberately explicit:
+# nothing is ever uploaded on its own, and running the command only opens a
+# GitHub issue containing the same document --export-ratios produces, using the
+# user's own `gh` login. A maintainer merges it, so the shared table cannot be
+# poisoned by an unreviewed client. The payload is game names, zstd level,
+# saving and sample count only -- no paths and no host details.
+cmd_submit_ratios() {
+    local export_file body_file count answer
+    if ! command -v gh >/dev/null 2>&1; then
+        printf '%s: --submit-ratios needs the GitHub CLI (gh).\n' "$PROGNAME" >&2
+        printf 'Install it, or contribute by hand from a checkout:\n' >&2
+        printf '  %s --export-ratios > my-ratios.json\n' "$PROGNAME" >&2
+        printf '  make ratios-merge FILE=my-ratios.json\n' >&2
+        printf 'Or paste the output into the "Submit compression ratios" issue form.\n' >&2
+        return 1
+    fi
+    export_file=$(mktemp "${TMPDIR:-/tmp}/bgc-submit.XXXXXX") || return 1
+    if ! cmd_export_ratios > "$export_file" 2>/dev/null || [ ! -s "$export_file" ]; then
+        printf 'No measured games to submit yet. Compress something first.\n'
+        rm -f "$export_file"
+        return 0
+    fi
+    count=$(grep -c '"pct"' "$export_file" 2>/dev/null || echo 0)
+    printf 'About to open a GitHub issue on %s with %s measured game(s).\n' \
+        "$REPO" "${count:-0}"
+    printf 'It contains game names, zstd level, saving, samples and range only:\n'
+    printf 'no paths, no host details, nothing about you.\n'
+    if [ "$OPT_YES" -ne 1 ]; then
+        if [ ! -t 0 ]; then
+            printf '\n%s: --submit-ratios needs a terminal to confirm (or --yes).\n' "$PROGNAME" >&2
+            printf 'The document is at %s if you would rather submit it yourself.\n' "$export_file" >&2
+            return 1
+        fi
+        printf '\nContinue? [y/N] '
+        read -r answer || answer=""
+        case "$answer" in
+            [Yy]*) ;;
+            *) printf 'aborted.\n'; rm -f "$export_file"; return 0 ;;
+        esac
+    fi
+
+    if ! gh auth status >/dev/null 2>&1; then
+        printf '%s: gh is not logged in. Run:  gh auth login\n' "$PROGNAME" >&2
+        rm -f "$export_file"
+        return 1
+    fi
+    body_file="${export_file}.body"
+    {
+        printf 'Submitted with `%s %s --submit-ratios` on `%s`.\n\n' \
+            "$PROGNAME" "$VERSION" "${PLATFORM:-other}"
+        printf '```json\n'
+        cat "$export_file"
+        printf '\n```\n'
+    } > "$body_file" 2>/dev/null
+    if gh issue create --repo "$REPO" \
+        --title "[ratios] submission from $PROGNAME $VERSION" \
+        --body-file "$body_file"; then
+        printf 'Thanks! A maintainer will merge it; see ratios/README.md.\n'
+        rm -f "$export_file" "$body_file"
+        return 0
+    fi
+    printf '%s: the issue could not be created; nothing was sent.\n' "$PROGNAME" >&2
+    rm -f "$export_file" "$body_file"
+    return 1
+}
+
 # --- Self-update -----------------------------------------------------------
 #
 # The tool updates itself from its own GitHub releases. Three rules keep that
@@ -2799,6 +2870,11 @@ fi
 
 if [ "$OPT_UNINSTALL" -eq 1 ]; then
     cmd_uninstall
+    exit $?
+fi
+
+if [ "$OPT_SUBMIT_RATIOS" -eq 1 ]; then
+    cmd_submit_ratios
     exit $?
 fi
 

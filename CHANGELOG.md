@@ -50,6 +50,11 @@ never published.
   min/max widening, then regenerate `GAMES.md` and the README list. A "Submit
   compression ratios" issue form covers people without a checkout. Nothing is
   ever uploaded automatically.
+- `--submit-ratios` to offer your measurements back in one command: it shows
+  exactly what will be sent (the same document `--export-ratios` produces — no
+  paths or host details), asks once, and opens a GitHub issue through the user's
+  own `gh` login. A maintainer merges it, so the shared table cannot be poisoned
+  by an unreviewed client, and nothing is sent without confirmation.
 - `--notify` for optional read-only desktop notifications about actionable games.
 - A **watch-only** systemd user timer (`systemd/`, installed with `make service`)
   that runs `--notify` twice a day. It reads the library and sends a notification;

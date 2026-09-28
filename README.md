@@ -484,7 +484,8 @@ btrfs-game-compressor --notify
 | `--check-update` | report whether a newer release exists, change nothing |
 | `--self-update` | update this copy in place, verifying the release `SHA256SUMS` |
 | `--uninstall` | remove the tool, manpage and systemd units; keeps history |
-| `--yes` | with `--uninstall`, do not ask |
+| `--submit-ratios` | open a GitHub issue offering your measured savings (needs `gh`) |
+| `--yes` | with `--uninstall` or `--submit-ratios`, do not ask |
 | `--notify` | send a read-only desktop notification for changed games |
 | `--balance` | offer to rebalance each library's mount; reports and confirms, never unattended |
 
@@ -905,10 +906,19 @@ python3 ratios/merge.py ratios/games.json my-ratios.json --dry-run   # ...or pre
 
 `make ratios-merge` averages your samples into any existing row (weighted by sample
 count), widens `min`/`max`, adds games the table has not seen, and regenerates
-`GAMES.md` and the list above. Then commit and open a pull request. **No git setup?**
-Paste the `--export-ratios` output into the
-[ratio submission issue](https://github.com/pablogonz12/btrfs-game-compressor/issues/new?template=ratio_submission.yml),
-and a maintainer merges it.
+`GAMES.md` and the list above. Then commit and open a pull request.
+
+**No checkout? One command offers it for you** (needs the GitHub CLI, logged in):
+
+```sh
+btrfs-game-compressor --submit-ratios
+```
+
+It shows exactly what will be sent, asks once, and opens an issue with your
+measurements. The payload is game names, zstd level, saving and sample count — no
+paths, no host details. A maintainer merges it. There is also a
+[ratio submission issue form](https://github.com/pablogonz12/btrfs-game-compressor/issues/new?template=ratio_submission.yml)
+for pasting the output by hand.
 
 Nothing is uploaded automatically: the data moves only through a pull request or issue
 you can read. See [`ratios/README.md`](ratios/README.md) for the format and rules.

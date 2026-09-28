@@ -1521,6 +1521,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+group "Submit ratios"
+
+# --submit-ratios is explicit and opt-in: it opens a GitHub issue through the
+# user's own gh login. A fake gh proves the command without touching GitHub.
+GHLOG="$WORK/gh-issue.log"
+mkdir -p "$WORK/gh-bin"
+cat > "$WORK/gh-bin/gh" <<'GH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$GH_LOG"
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then exit 0; fi
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+    echo "https://github.com/example/repo/issues/1"
+    exit 0
+fi
+exit 0
+GH
+chmod +x "$WORK/gh-bin/gh"
+
+SUBSTATE="$HOME/.local/state/btrfs-game-compressor/compressed_games.db"
+mkdir -p "$(dirname "$SUBSTATE")"
+printf '# hdr\n/libs/SubmitGame|SubmitGame|100|2.00GiB|1.00GiB|1 GB|1024|2048|1024\n' > "$SUBSTATE"
+
+out=$(PATH="$WORK/gh-bin:$PATH" "$PROG" --submit-ratios < /dev/null 2>&1); rc=$?
+check_rc "--submit-ratios previews and refuses without a terminal" 1 "$rc"
+check_contains "--submit-ratios says what it would send" "About to open a GitHub issue" "$out"
+check_contains "--submit-ratios needs a terminal" "needs a terminal to confirm" "$out"
+
+: > "$GHLOG"
+out=$(GH_LOG="$GHLOG" PATH="$WORK/gh-bin:$PATH" "$PROG" --submit-ratios --yes 2>&1); rc=$?
+check_rc "--submit-ratios --yes opens the submission" 0 "$rc"
+check_contains "--submit-ratios reports the issue" "issues/1" "$out"
+if grep -q "issue create --repo pablogonz12/btrfs-game-compressor" "$GHLOG"; then
+    ok "--submit-ratios asks gh to create the issue on the right repo"
+else
+    bad "--submit-ratios asks gh to create the issue on the right repo" "$(cat "$GHLOG" 2>/dev/null)"
+fi
+: > "$SUBSTATE"
+
+# ---------------------------------------------------------------------------
 group "TUI source hygiene"
 
 # The main loop runs at top level, not inside a function, so a stray `local`
