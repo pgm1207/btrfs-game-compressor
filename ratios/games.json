@@ -1,0 +1,1808 @@
+{
+  "schema": 1,
+  "description": "Community-measured per-game compression ratios. Keys are the zstd level used, because the ratio of a game depends on the level, not only on the game. A 'pct' is the measured saving (uncompressed - on-disk) / uncompressed, as a percentage. 'samples' is how many independent measurements were averaged, so a reader can weigh confidence.",
+  "measured_with": "btrfs filesystem defragment -czstd -L <level> + btrfs-compsize",
+  "updated": "2026-09-28",
+  "games": {
+    "9 Kings": {
+      "zstd1": {
+        "pct": 41.4,
+        "samples": 2,
+        "min": 40.5,
+        "max": 42.2
+      }
+    },
+    "A Short Hike": {
+      "zstd1": {
+        "pct": 26.5,
+        "samples": 2,
+        "min": 24.0,
+        "max": 29.1
+      }
+    },
+    "ARSONATE": {
+      "zstd1": {
+        "pct": 44.8,
+        "samples": 2,
+        "min": 42.9,
+        "max": 46.7
+      }
+    },
+    "Alabaster Dawn": {
+      "zstd1": {
+        "pct": 55.8,
+        "samples": 2,
+        "min": 55.2,
+        "max": 56.4
+      }
+    },
+    "Along the Edge": {
+      "zstd1": {
+        "pct": 16.7,
+        "samples": 2,
+        "min": 16.3,
+        "max": 17.2
+      }
+    },
+    "Ape Out": {
+      "zstd1": {
+        "pct": 23.7,
+        "samples": 2,
+        "min": 23.4,
+        "max": 24.0
+      }
+    },
+    "Arco": {
+      "zstd1": {
+        "pct": 0.6,
+        "samples": 2,
+        "min": 0.3,
+        "max": 0.8
+      }
+    },
+    "Astro Prospector": {
+      "zstd1": {
+        "pct": 62.1,
+        "samples": 2,
+        "min": 56.2,
+        "max": 68.0
+      }
+    },
+    "Away": {
+      "zstd1": {
+        "pct": 60.9,
+        "samples": 2,
+        "min": 54.4,
+        "max": 67.5
+      }
+    },
+    "BALLxPIT": {
+      "zstd1": {
+        "pct": 42.0,
+        "samples": 2,
+        "min": 36.5,
+        "max": 47.4
+      }
+    },
+    "Baba Is You": {
+      "zstd1": {
+        "pct": 16.6,
+        "samples": 2,
+        "min": 16.5,
+        "max": 16.7
+      }
+    },
+    "BackToBed": {
+      "zstd1": {
+        "pct": 42.6,
+        "samples": 2,
+        "min": 41.6,
+        "max": 43.6
+      }
+    },
+    "Backpack Hero": {
+      "zstd1": {
+        "pct": 61.6,
+        "samples": 2,
+        "min": 59.1,
+        "max": 64.0
+      }
+    },
+    "Balatro": {
+      "zstd1": {
+        "pct": 7.9,
+        "samples": 2,
+        "min": 7.9,
+        "max": 7.9
+      }
+    },
+    "BerryBerryBerry": {
+      "zstd1": {
+        "pct": 35.3,
+        "samples": 2,
+        "min": 33.8,
+        "max": 36.8
+      }
+    },
+    "Bitburner": {
+      "zstd1": {
+        "pct": 62.6,
+        "samples": 2,
+        "min": 61.6,
+        "max": 63.6
+      }
+    },
+    "Blanc": {
+      "zstd1": {
+        "pct": 14.8,
+        "samples": 2,
+        "min": 13.5,
+        "max": 16.0
+      }
+    },
+    "Blasphemous": {
+      "zstd1": {
+        "pct": 11.3,
+        "samples": 2,
+        "min": 11.1,
+        "max": 11.6
+      }
+    },
+    "Bread & Fred": {
+      "zstd1": {
+        "pct": 54.6,
+        "samples": 2,
+        "min": 50.8,
+        "max": 58.4
+      }
+    },
+    "Brotato": {
+      "zstd1": {
+        "pct": 22.0,
+        "samples": 2,
+        "min": 18.1,
+        "max": 25.8
+      }
+    },
+    "Calm Down, Stalin": {
+      "zstd1": {
+        "pct": 38.1,
+        "samples": 2,
+        "min": 24.6,
+        "max": 51.7
+      }
+    },
+    "Carrion": {
+      "zstd1": {
+        "pct": 18.6,
+        "samples": 2,
+        "min": 18.3,
+        "max": 18.9
+      }
+    },
+    "Caveblazers": {
+      "zstd1": {
+        "pct": 33.3,
+        "samples": 2,
+        "min": 30.3,
+        "max": 36.4
+      }
+    },
+    "Caves of Qud": {
+      "zstd1": {
+        "pct": 26.2,
+        "samples": 2,
+        "min": 25.4,
+        "max": 27.0
+      }
+    },
+    "Celeste": {
+      "zstd1": {
+        "pct": 21.9,
+        "samples": 2,
+        "min": 21.2,
+        "max": 22.6
+      }
+    },
+    "Chained Echoes": {
+      "zstd1": {
+        "pct": 17.7,
+        "samples": 2,
+        "min": 17.4,
+        "max": 17.9
+      }
+    },
+    "Chants of Sennaar": {
+      "zstd1": {
+        "pct": 11.0,
+        "samples": 2,
+        "min": 10.2,
+        "max": 11.9
+      }
+    },
+    "Chef Knight": {
+      "zstd1": {
+        "pct": 61.8,
+        "samples": 2,
+        "min": 61.1,
+        "max": 62.5
+      }
+    },
+    "Click the Button": {
+      "zstd1": {
+        "pct": 39.6,
+        "samples": 2,
+        "min": 33.5,
+        "max": 45.6
+      }
+    },
+    "Closer the Distance": {
+      "zstd1": {
+        "pct": 53.8,
+        "samples": 2,
+        "min": 53.1,
+        "max": 54.5
+      }
+    },
+    "CloverPit": {
+      "zstd1": {
+        "pct": 62.3,
+        "samples": 2,
+        "min": 59.4,
+        "max": 65.3
+      }
+    },
+    "Cocoon": {
+      "zstd1": {
+        "pct": 34.8,
+        "samples": 2,
+        "min": 33.6,
+        "max": 35.9
+      }
+    },
+    "CodeTerraform": {
+      "zstd1": {
+        "pct": 21.1,
+        "samples": 2,
+        "min": 21.0,
+        "max": 21.2
+      }
+    },
+    "Coffee Talk": {
+      "zstd1": {
+        "pct": 51.2,
+        "samples": 2,
+        "min": 47.9,
+        "max": 54.5
+      }
+    },
+    "Confidential Killings": {
+      "zstd1": {
+        "pct": 15.4,
+        "samples": 2,
+        "min": 14.4,
+        "max": 16.3
+      }
+    },
+    "Control": {
+      "zstd1": {
+        "pct": 50.8,
+        "samples": 2,
+        "min": 48.1,
+        "max": 53.5
+      }
+    },
+    "Craftomation101": {
+      "zstd1": {
+        "pct": 4.2,
+        "samples": 2,
+        "min": 4.2,
+        "max": 4.2
+      }
+    },
+    "Crop Rotation": {
+      "zstd1": {
+        "pct": 6.1,
+        "samples": 2,
+        "min": 5.5,
+        "max": 6.7
+      }
+    },
+    "Crown Siege": {
+      "zstd1": {
+        "pct": 49.6,
+        "samples": 2,
+        "min": 46.1,
+        "max": 53.2
+      }
+    },
+    "Crownhold": {
+      "zstd1": {
+        "pct": 29.4,
+        "samples": 2,
+        "min": 23.5,
+        "max": 35.3
+      }
+    },
+    "Cryptark": {
+      "zstd1": {
+        "pct": 22.6,
+        "samples": 2,
+        "min": 22.5,
+        "max": 22.7
+      }
+    },
+    "Cult of the Lamb": {
+      "zstd1": {
+        "pct": 14.7,
+        "samples": 2,
+        "min": 14.7,
+        "max": 14.7
+      }
+    },
+    "CultOfPiN": {
+      "zstd1": {
+        "pct": 19.9,
+        "samples": 2,
+        "min": 16.2,
+        "max": 23.6
+      }
+    },
+    "DELTARUNE": {
+      "zstd1": {
+        "pct": 16.2,
+        "samples": 2,
+        "min": 14.7,
+        "max": 17.7
+      }
+    },
+    "DREDGE": {
+      "zstd1": {
+        "pct": 12.0,
+        "samples": 2,
+        "min": 9.8,
+        "max": 14.3
+      }
+    },
+    "Database Detective": {
+      "zstd1": {
+        "pct": 83.6,
+        "samples": 2,
+        "min": 83.0,
+        "max": 84.1
+      }
+    },
+    "Dave the Diver": {
+      "zstd1": {
+        "pct": 15.0,
+        "samples": 2,
+        "min": 15.0,
+        "max": 15.0
+      }
+    },
+    "Dead Cells": {
+      "zstd1": {
+        "pct": 5.2,
+        "samples": 2,
+        "min": 5.2,
+        "max": 5.2
+      }
+    },
+    "Dead Estate": {
+      "zstd1": {
+        "pct": 5.6,
+        "samples": 2,
+        "min": 5.0,
+        "max": 6.2
+      }
+    },
+    "Death's Door": {
+      "zstd1": {
+        "pct": 47.2,
+        "samples": 2,
+        "min": 47.2,
+        "max": 47.2
+      }
+    },
+    "DemonLordJustABlock": {
+      "zstd1": {
+        "pct": 78.6,
+        "samples": 2,
+        "min": 78.3,
+        "max": 78.9
+      }
+    },
+    "Desktop Explorer": {
+      "zstd1": {
+        "pct": 50.9,
+        "samples": 2,
+        "min": 50.6,
+        "max": 51.3
+      }
+    },
+    "Disco Elysium": {
+      "zstd1": {
+        "pct": 6.3,
+        "samples": 2,
+        "min": 6.3,
+        "max": 6.3
+      }
+    },
+    "Dispatch": {
+      "zstd1": {
+        "pct": 0.0,
+        "samples": 2,
+        "min": 0.0,
+        "max": 0.0
+      }
+    },
+    "Divide by sheep": {
+      "zstd1": {
+        "pct": 10.2,
+        "samples": 2,
+        "min": 4.1,
+        "max": 16.4
+      }
+    },
+    "Dokimon": {
+      "zstd1": {
+        "pct": 10.4,
+        "samples": 2,
+        "min": 7.8,
+        "max": 13.0
+      }
+    },
+    "Dome Keeper": {
+      "zstd1": {
+        "pct": 18.7,
+        "samples": 2,
+        "min": 14.3,
+        "max": 23.1
+      }
+    },
+    "Don't Let It Starve": {
+      "zstd1": {
+        "pct": 30.0,
+        "samples": 2,
+        "min": 16.6,
+        "max": 43.4
+      }
+    },
+    "Donut County": {
+      "zstd1": {
+        "pct": 36.1,
+        "samples": 2,
+        "min": 27.8,
+        "max": 44.4
+      }
+    },
+    "Dorfromantik": {
+      "zstd1": {
+        "pct": 29.9,
+        "samples": 2,
+        "min": 28.1,
+        "max": 31.6
+      }
+    },
+    "Down in Bermuda": {
+      "zstd1": {
+        "pct": 12.1,
+        "samples": 2,
+        "min": 8.5,
+        "max": 15.7
+      }
+    },
+    "Downwell": {
+      "zstd1": {
+        "pct": 15.9,
+        "samples": 2,
+        "min": 7.3,
+        "max": 24.4
+      }
+    },
+    "Dungeons & Degenerate Gamblers": {
+      "zstd1": {
+        "pct": 6.0,
+        "samples": 2,
+        "min": 3.9,
+        "max": 8.1
+      }
+    },
+    "Duskers": {
+      "zstd1": {
+        "pct": 50.1,
+        "samples": 2,
+        "min": 47.5,
+        "max": 52.7
+      }
+    },
+    "Dwarf Eat Mountain": {
+      "zstd1": {
+        "pct": 22.4,
+        "samples": 2,
+        "min": 16.5,
+        "max": 28.2
+      }
+    },
+    "Dwarf Fortress": {
+      "zstd1": {
+        "pct": 0.0,
+        "samples": 2,
+        "min": 0.0,
+        "max": 0.0
+      }
+    },
+    "Emily is Away 3": {
+      "zstd1": {
+        "pct": 53.2,
+        "samples": 2,
+        "min": 44.4,
+        "max": 61.9
+      }
+    },
+    "Enter the Gungeon": {
+      "zstd1": {
+        "pct": 16.3,
+        "samples": 2,
+        "min": 10.6,
+        "max": 22.1
+      }
+    },
+    "Exit the Gungeon": {
+      "zstd1": {
+        "pct": 27.8,
+        "samples": 2,
+        "min": 25.9,
+        "max": 29.8
+      }
+    },
+    "FAITH": {
+      "zstd1": {
+        "pct": 3.3,
+        "samples": 2,
+        "min": 3.1,
+        "max": 3.5
+      }
+    },
+    "FEED IT": {
+      "zstd1": {
+        "pct": 53.8,
+        "samples": 2,
+        "min": 52.0,
+        "max": 55.5
+      }
+    },
+    "FEED THE QUEEN": {
+      "zstd1": {
+        "pct": 20.7,
+        "samples": 2,
+        "min": 13.4,
+        "max": 27.9
+      }
+    },
+    "Factorio": {
+      "zstd1": {
+        "pct": 23.7,
+        "samples": 2,
+        "min": 21.0,
+        "max": 26.3
+      }
+    },
+    "Fallout Shelter": {
+      "zstd1": {
+        "pct": 14.8,
+        "samples": 2,
+        "min": 10.6,
+        "max": 18.9
+      }
+    },
+    "Felvidek": {
+      "zstd1": {
+        "pct": 17.2,
+        "samples": 2,
+        "min": 17.1,
+        "max": 17.4
+      }
+    },
+    "Forage Wizard": {
+      "zstd1": {
+        "pct": 82.7,
+        "samples": 2,
+        "min": 82.3,
+        "max": 83.2
+      }
+    },
+    "Forager": {
+      "zstd1": {
+        "pct": 11.2,
+        "samples": 2,
+        "min": 9.3,
+        "max": 13.1
+      }
+    },
+    "Fortune Mill": {
+      "zstd1": {
+        "pct": 39.6,
+        "samples": 2,
+        "min": 35.9,
+        "max": 43.2
+      }
+    },
+    "GRIS": {
+      "zstd1": {
+        "pct": 64.1,
+        "samples": 2,
+        "min": 62.5,
+        "max": 65.6
+      }
+    },
+    "Gamblers Table": {
+      "zstd1": {
+        "pct": 31.5,
+        "samples": 2,
+        "min": 24.1,
+        "max": 38.9
+      }
+    },
+    "Gambonanza": {
+      "zstd1": {
+        "pct": 49.7,
+        "samples": 2,
+        "min": 44.6,
+        "max": 54.8
+      }
+    },
+    "GeckoGods": {
+      "zstd1": {
+        "pct": 49.1,
+        "samples": 2,
+        "min": 48.2,
+        "max": 50.0
+      }
+    },
+    "Gladiabots": {
+      "zstd1": {
+        "pct": 57.9,
+        "samples": 2,
+        "min": 57.9,
+        "max": 57.9
+      }
+    },
+    "Gnorp": {
+      "zstd1": {
+        "pct": 11.3,
+        "samples": 2,
+        "min": 10.8,
+        "max": 11.9
+      }
+    },
+    "GoNNER": {
+      "zstd1": {
+        "pct": 57.5,
+        "samples": 2,
+        "min": 56.5,
+        "max": 58.4
+      }
+    },
+    "Gorogoa": {
+      "zstd1": {
+        "pct": 9.3,
+        "samples": 2,
+        "min": 6.0,
+        "max": 12.6
+      }
+    },
+    "Graveyard Keeper": {
+      "zstd1": {
+        "pct": 63.4,
+        "samples": 2,
+        "min": 62.9,
+        "max": 63.9
+      }
+    },
+    "Gravity Circuit": {
+      "zstd1": {
+        "pct": 0.0,
+        "samples": 2,
+        "min": 0.0,
+        "max": 0.0
+      }
+    },
+    "Great God Grove": {
+      "zstd1": {
+        "pct": 34.3,
+        "samples": 2,
+        "min": 33.3,
+        "max": 35.3
+      }
+    },
+    "Greedy_Greedy_Gnomes": {
+      "zstd1": {
+        "pct": 34.2,
+        "samples": 2,
+        "min": 18.0,
+        "max": 50.5
+      }
+    },
+    "Grey Hack": {
+      "zstd1": {
+        "pct": 73.4,
+        "samples": 2,
+        "min": 71.4,
+        "max": 75.3
+      }
+    },
+    "Grimm": {
+      "zstd1": {
+        "pct": 36.2,
+        "samples": 2,
+        "min": 35.9,
+        "max": 36.5
+      }
+    },
+    "Hacknet": {
+      "zstd1": {
+        "pct": 27.6,
+        "samples": 2,
+        "min": 27.2,
+        "max": 28.0
+      }
+    },
+    "Hades": {
+      "zstd1": {
+        "pct": 9.1,
+        "samples": 2,
+        "min": 9.1,
+        "max": 9.1
+      }
+    },
+    "Hades II": {
+      "zstd1": {
+        "pct": 0.0,
+        "samples": 2,
+        "min": 0.0,
+        "max": 0.0
+      }
+    },
+    "Happy Wheels": {
+      "zstd1": {
+        "pct": 41.8,
+        "samples": 2,
+        "min": 40.8,
+        "max": 42.7
+      }
+    },
+    "Hats and Hand Grenades": {
+      "zstd1": {
+        "pct": 7.5,
+        "samples": 2,
+        "min": 4.9,
+        "max": 10.1
+      }
+    },
+    "He is coming": {
+      "zstd1": {
+        "pct": 57.2,
+        "samples": 2,
+        "min": 51.6,
+        "max": 62.7
+      }
+    },
+    "Hellslave": {
+      "zstd1": {
+        "pct": 2.5,
+        "samples": 2,
+        "min": 0.6,
+        "max": 4.5
+      }
+    },
+    "HenryStickmin": {
+      "zstd1": {
+        "pct": 3.5,
+        "samples": 2,
+        "min": 3.4,
+        "max": 3.5
+      }
+    },
+    "Hindsight": {
+      "zstd1": {
+        "pct": 47.7,
+        "samples": 2,
+        "min": 44.5,
+        "max": 50.9
+      }
+    },
+    "Hollow Knight": {
+      "zstd1": {
+        "pct": 75.0,
+        "samples": 2,
+        "min": 75.0,
+        "max": 75.0
+      }
+    },
+    "Horripilant": {
+      "zstd1": {
+        "pct": 15.3,
+        "samples": 2,
+        "min": 12.3,
+        "max": 18.2
+      }
+    },
+    "Hotline Miami 2": {
+      "zstd1": {
+        "pct": 10.8,
+        "samples": 2,
+        "min": 10.5,
+        "max": 11.1
+      }
+    },
+    "Hue": {
+      "zstd1": {
+        "pct": 61.2,
+        "samples": 2,
+        "min": 60.7,
+        "max": 61.8
+      }
+    },
+    "Hylics": {
+      "zstd1": {
+        "pct": 10.5,
+        "samples": 2,
+        "min": 10.1,
+        "max": 11.0
+      }
+    },
+    "HyperLightDrifter": {
+      "zstd1": {
+        "pct": 11.3,
+        "samples": 2,
+        "min": 11.2,
+        "max": 11.4
+      }
+    },
+    "ITTA": {
+      "zstd1": {
+        "pct": 25.0,
+        "samples": 2,
+        "min": 22.2,
+        "max": 27.8
+      }
+    },
+    "IdolsOfAsh": {
+      "zstd1": {
+        "pct": 28.5,
+        "samples": 2,
+        "min": 20.1,
+        "max": 36.9
+      }
+    },
+    "Intravenous": {
+      "zstd1": {
+        "pct": 0.4,
+        "samples": 2,
+        "min": 0.0,
+        "max": 0.7
+      }
+    },
+    "Iron Lung": {
+      "zstd1": {
+        "pct": 21.4,
+        "samples": 2,
+        "min": 17.1,
+        "max": 25.7
+      }
+    },
+    "Is This Seat Taken": {
+      "zstd1": {
+        "pct": 63.3,
+        "samples": 2,
+        "min": 58.8,
+        "max": 67.9
+      }
+    },
+    "It Has My Face": {
+      "zstd1": {
+        "pct": 42.8,
+        "samples": 2,
+        "min": 36.2,
+        "max": 49.4
+      }
+    },
+    "Just Ignore Them": {
+      "zstd1": {
+        "pct": 51.0,
+        "samples": 2,
+        "min": 50.5,
+        "max": 51.5
+      }
+    },
+    "KIDS": {
+      "zstd1": {
+        "pct": 71.2,
+        "samples": 2,
+        "min": 68.5,
+        "max": 73.9
+      }
+    },
+    "Kingdom": {
+      "zstd1": {
+        "pct": 17.0,
+        "samples": 2,
+        "min": 9.4,
+        "max": 24.5
+      }
+    },
+    "LISA": {
+      "zstd1": {
+        "pct": 3.6,
+        "samples": 2,
+        "min": 0.0,
+        "max": 7.1
+      }
+    },
+    "LISA The First": {
+      "zstd1": {
+        "pct": 7.8,
+        "samples": 2,
+        "min": 5.6,
+        "max": 10.1
+      }
+    },
+    "LUCKROT": {
+      "zstd1": {
+        "pct": 49.4,
+        "samples": 2,
+        "min": 49.0,
+        "max": 49.8
+      }
+    },
+    "Lil Gator Game": {
+      "zstd1": {
+        "pct": 12.6,
+        "samples": 2,
+        "min": 8.3,
+        "max": 16.8
+      }
+    },
+    "Limbo": {
+      "zstd1": {
+        "pct": 7.3,
+        "samples": 2,
+        "min": 3.6,
+        "max": 10.9
+      }
+    },
+    "Looking for Fael": {
+      "zstd1": {
+        "pct": 10.7,
+        "samples": 2,
+        "min": 8.1,
+        "max": 13.4
+      }
+    },
+    "Lootbound": {
+      "zstd1": {
+        "pct": 24.0,
+        "samples": 2,
+        "min": 20.8,
+        "max": 27.2
+      }
+    },
+    "Lossless Scaling": {
+      "zstd1": {
+        "pct": 77.8,
+        "samples": 2,
+        "min": 77.8,
+        "max": 77.8
+      }
+    },
+    "Lost Wiki Kozlovka": {
+      "zstd1": {
+        "pct": 30.9,
+        "samples": 2,
+        "min": 23.5,
+        "max": 38.3
+      }
+    },
+    "Luftrausers": {
+      "zstd1": {
+        "pct": 31.0,
+        "samples": 2,
+        "min": 29.0,
+        "max": 33.0
+      }
+    },
+    "M.O.L.E": {
+      "zstd1": {
+        "pct": 6.3,
+        "samples": 2,
+        "min": 3.6,
+        "max": 9.1
+      }
+    },
+    "MOLDRISE": {
+      "zstd1": {
+        "pct": 22.1,
+        "samples": 2,
+        "min": 22.1,
+        "max": 22.1
+      }
+    },
+    "MechHavoc": {
+      "zstd1": {
+        "pct": 90.0,
+        "samples": 2,
+        "min": 89.9,
+        "max": 90.0
+      }
+    },
+    "Megabonk": {
+      "zstd1": {
+        "pct": 57.3,
+        "samples": 2,
+        "min": 54.1,
+        "max": 60.5
+      }
+    },
+    "Melvor Idle": {
+      "zstd1": {
+        "pct": 57.9,
+        "samples": 2,
+        "min": 57.2,
+        "max": 58.5
+      }
+    },
+    "Mina the Hollower": {
+      "zstd1": {
+        "pct": 9.5,
+        "samples": 2,
+        "min": 9.1,
+        "max": 9.9
+      }
+    },
+    "Mind Scanners": {
+      "zstd1": {
+        "pct": 64.3,
+        "samples": 2,
+        "min": 60.7,
+        "max": 68.0
+      }
+    },
+    "Mindustry": {
+      "zstd1": {
+        "pct": 14.9,
+        "samples": 2,
+        "min": 14.0,
+        "max": 15.7
+      }
+    },
+    "Minit": {
+      "zstd1": {
+        "pct": 11.8,
+        "samples": 2,
+        "min": 9.0,
+        "max": 14.6
+      }
+    },
+    "Minutescape": {
+      "zstd1": {
+        "pct": 46.6,
+        "samples": 2,
+        "min": 37.7,
+        "max": 55.4
+      }
+    },
+    "Moldwasher": {
+      "zstd1": {
+        "pct": 59.7,
+        "samples": 2,
+        "min": 57.0,
+        "max": 62.4
+      }
+    },
+    "MonsterHunterRise": {
+      "zstd1": {
+        "pct": 0.0,
+        "samples": 2,
+        "min": 0.0,
+        "max": 0.0
+      }
+    },
+    "Monument Valley": {
+      "zstd1": {
+        "pct": 15.2,
+        "samples": 2,
+        "min": 8.8,
+        "max": 21.6
+      }
+    },
+    "Moonlighter": {
+      "zstd1": {
+        "pct": 50.0,
+        "samples": 2,
+        "min": 49.9,
+        "max": 50.1
+      }
+    },
+    "Moonrise Fall": {
+      "zstd1": {
+        "pct": 16.2,
+        "samples": 2,
+        "min": 13.4,
+        "max": 18.9
+      }
+    },
+    "Moonstone Island": {
+      "zstd1": {
+        "pct": 37.1,
+        "samples": 2,
+        "min": 32.9,
+        "max": 41.2
+      }
+    },
+    "Moventure": {
+      "zstd1": {
+        "pct": 63.3,
+        "samples": 2,
+        "min": 62.2,
+        "max": 64.4
+      }
+    },
+    "Mutazione": {
+      "zstd1": {
+        "pct": 12.3,
+        "samples": 2,
+        "min": 12.0,
+        "max": 12.5
+      }
+    },
+    "Necesse": {
+      "zstd1": {
+        "pct": 20.1,
+        "samples": 2,
+        "min": 19.2,
+        "max": 21.1
+      }
+    },
+    "Neon Abyss": {
+      "zstd1": {
+        "pct": 48.1,
+        "samples": 2,
+        "min": 45.8,
+        "max": 50.4
+      }
+    },
+    "Nerd Survivors": {
+      "zstd1": {
+        "pct": 69.8,
+        "samples": 2,
+        "min": 67.1,
+        "max": 72.5
+      }
+    },
+    "Neva": {
+      "zstd1": {
+        "pct": 63.3,
+        "samples": 2,
+        "min": 63.3,
+        "max": 63.3
+      }
+    },
+    "No, I'm not a Human": {
+      "zstd1": {
+        "pct": 56.6,
+        "samples": 2,
+        "min": 56.5,
+        "max": 56.7
+      }
+    },
+    "Nocturnal": {
+      "zstd1": {
+        "pct": 9.1,
+        "samples": 2,
+        "min": 7.8,
+        "max": 10.4
+      }
+    },
+    "Noita": {
+      "zstd1": {
+        "pct": 6.7,
+        "samples": 2,
+        "min": 6.7,
+        "max": 6.7
+      }
+    },
+    "ObraDinn": {
+      "zstd1": {
+        "pct": 52.9,
+        "samples": 2,
+        "min": 52.3,
+        "max": 53.5
+      }
+    },
+    "Oceaneers": {
+      "zstd1": {
+        "pct": 15.9,
+        "samples": 2,
+        "min": 11.4,
+        "max": 20.4
+      }
+    },
+    "Old Man's Journey": {
+      "zstd1": {
+        "pct": 11.0,
+        "samples": 2,
+        "min": 9.0,
+        "max": 12.9
+      }
+    },
+    "Ooo": {
+      "zstd1": {
+        "pct": 12.7,
+        "samples": 2,
+        "min": 7.9,
+        "max": 17.5
+      }
+    },
+    "OpenFront": {
+      "zstd1": {
+        "pct": 61.8,
+        "samples": 2,
+        "min": 61.8,
+        "max": 61.8
+      }
+    },
+    "Orb of Creation": {
+      "zstd1": {
+        "pct": 28.5,
+        "samples": 2,
+        "min": 26.3,
+        "max": 30.7
+      }
+    },
+    "Ori DE": {
+      "zstd1": {
+        "pct": 51.0,
+        "samples": 2,
+        "min": 51.0,
+        "max": 51.0
+      }
+    },
+    "Outer Wilds": {
+      "zstd1": {
+        "pct": 47.5,
+        "samples": 2,
+        "min": 47.0,
+        "max": 48.0
+      }
+    },
+    "P0": {
+      "zstd1": {
+        "pct": 75.4,
+        "samples": 2,
+        "min": 75.4,
+        "max": 75.4
+      }
+    },
+    "PapersPlease": {
+      "zstd1": {
+        "pct": 47.6,
+        "samples": 2,
+        "min": 41.4,
+        "max": 53.8
+      }
+    },
+    "Paradox Soul": {
+      "zstd1": {
+        "pct": 21.8,
+        "samples": 2,
+        "min": 15.0,
+        "max": 28.6
+      }
+    },
+    "Peglin": {
+      "zstd1": {
+        "pct": 42.1,
+        "samples": 2,
+        "min": 40.5,
+        "max": 43.7
+      }
+    },
+    "Pikuniku": {
+      "zstd1": {
+        "pct": 36.9,
+        "samples": 2,
+        "min": 32.5,
+        "max": 41.3
+      }
+    },
+    "Pilgrims": {
+      "zstd1": {
+        "pct": 39.6,
+        "samples": 2,
+        "min": 36.2,
+        "max": 43.1
+      }
+    },
+    "Pizza Hero": {
+      "zstd1": {
+        "pct": 48.7,
+        "samples": 2,
+        "min": 47.4,
+        "max": 50.0
+      }
+    },
+    "Pizza Tower": {
+      "zstd1": {
+        "pct": 25.0,
+        "samples": 2,
+        "min": 24.7,
+        "max": 25.3
+      }
+    },
+    "Poco": {
+      "zstd1": {
+        "pct": 64.9,
+        "samples": 2,
+        "min": 64.7,
+        "max": 65.2
+      }
+    },
+    "Pony Island": {
+      "zstd1": {
+        "pct": 60.7,
+        "samples": 2,
+        "min": 59.9,
+        "max": 61.5
+      }
+    },
+    "Press Any Button": {
+      "zstd1": {
+        "pct": 6.8,
+        "samples": 2,
+        "min": 3.0,
+        "max": 10.6
+      }
+    },
+    "Prison Architect": {
+      "zstd1": {
+        "pct": 4.2,
+        "samples": 2,
+        "min": 4.2,
+        "max": 4.2
+      }
+    },
+    "REPLACED": {
+      "zstd1": {
+        "pct": 24.3,
+        "samples": 2,
+        "min": 23.7,
+        "max": 25.0
+      }
+    },
+    "Rain World": {
+      "zstd1": {
+        "pct": 26.9,
+        "samples": 2,
+        "min": 26.9,
+        "max": 26.9
+      }
+    },
+    "Reventure": {
+      "zstd1": {
+        "pct": 62.6,
+        "samples": 2,
+        "min": 59.8,
+        "max": 65.5
+      }
+    },
+    "Rune Dice": {
+      "zstd1": {
+        "pct": 67.3,
+        "samples": 2,
+        "min": 63.4,
+        "max": 71.2
+      }
+    },
+    "Sable": {
+      "zstd1": {
+        "pct": 9.5,
+        "samples": 2,
+        "min": 9.5,
+        "max": 9.5
+      }
+    },
+    "Sandustry": {
+      "zstd1": {
+        "pct": 29.1,
+        "samples": 2,
+        "min": 20.0,
+        "max": 38.3
+      }
+    },
+    "Scavland": {
+      "zstd1": {
+        "pct": 5.4,
+        "samples": 2,
+        "min": 4.9,
+        "max": 5.9
+      }
+    },
+    "Sea of Stars": {
+      "zstd1": {
+        "pct": 13.2,
+        "samples": 2,
+        "min": 13.0,
+        "max": 13.3
+      }
+    },
+    "Slay the Spire 2": {
+      "zstd1": {
+        "pct": 39.5,
+        "samples": 2,
+        "min": 36.9,
+        "max": 42.1
+      }
+    },
+    "Slime Rancher 2": {
+      "zstd1": {
+        "pct": 12.2,
+        "samples": 2,
+        "min": 10.8,
+        "max": 13.5
+      }
+    },
+    "Slots & Diapers": {
+      "zstd1": {
+        "pct": 27.2,
+        "samples": 2,
+        "min": 25.0,
+        "max": 29.4
+      }
+    },
+    "Sludge Life": {
+      "zstd1": {
+        "pct": 42.0,
+        "samples": 2,
+        "min": 40.1,
+        "max": 43.8
+      }
+    },
+    "Sol Cesto": {
+      "zstd1": {
+        "pct": 17.1,
+        "samples": 2,
+        "min": 7.8,
+        "max": 26.5
+      }
+    },
+    "Stacklands": {
+      "zstd1": {
+        "pct": 53.2,
+        "samples": 2,
+        "min": 50.6,
+        "max": 55.7
+      }
+    },
+    "Stardew Valley": {
+      "zstd1": {
+        "pct": 24.4,
+        "samples": 2,
+        "min": 20.3,
+        "max": 28.5
+      }
+    },
+    "Storyteller": {
+      "zstd1": {
+        "pct": 9.4,
+        "samples": 2,
+        "min": 8.2,
+        "max": 10.7
+      }
+    },
+    "Super Meat Boy": {
+      "zstd1": {
+        "pct": 22.5,
+        "samples": 2,
+        "min": 15.7,
+        "max": 29.3
+      }
+    },
+    "TOEM": {
+      "zstd1": {
+        "pct": 40.2,
+        "samples": 2,
+        "min": 39.6,
+        "max": 40.9
+      }
+    },
+    "TPH": {
+      "zstd1": {
+        "pct": 47.1,
+        "samples": 2,
+        "min": 47.1,
+        "max": 47.1
+      }
+    },
+    "Terraria": {
+      "zstd1": {
+        "pct": 17.4,
+        "samples": 2,
+        "min": 14.5,
+        "max": 20.2
+      }
+    },
+    "Thank Goodness You're Here!": {
+      "zstd1": {
+        "pct": 15.8,
+        "samples": 2,
+        "min": 14.1,
+        "max": 17.6
+      }
+    },
+    "The Binding of Isaac Rebirth": {
+      "zstd1": {
+        "pct": 2.6,
+        "samples": 2,
+        "min": 2.3,
+        "max": 2.9
+      }
+    },
+    "The Children of Clay": {
+      "zstd1": {
+        "pct": 43.8,
+        "samples": 2,
+        "min": 36.3,
+        "max": 51.3
+      }
+    },
+    "The Escapists": {
+      "zstd1": {
+        "pct": 18.7,
+        "samples": 2,
+        "min": 17.9,
+        "max": 19.5
+      }
+    },
+    "The Farmer Was Replaced": {
+      "zstd1": {
+        "pct": 48.2,
+        "samples": 2,
+        "min": 40.7,
+        "max": 55.6
+      }
+    },
+    "The Gardens Between": {
+      "zstd1": {
+        "pct": 38.5,
+        "samples": 2,
+        "min": 38.2,
+        "max": 38.7
+      }
+    },
+    "The Loopler": {
+      "zstd1": {
+        "pct": 48.5,
+        "samples": 2,
+        "min": 46.0,
+        "max": 51.0
+      }
+    },
+    "The Message from Deep Space": {
+      "zstd1": {
+        "pct": 45.8,
+        "samples": 2,
+        "min": 40.4,
+        "max": 51.2
+      }
+    },
+    "The White Door": {
+      "zstd1": {
+        "pct": 7.1,
+        "samples": 2,
+        "min": 2.7,
+        "max": 11.6
+      }
+    },
+    "The Wolf Among Us": {
+      "zstd1": {
+        "pct": 13.6,
+        "samples": 2,
+        "min": 12.7,
+        "max": 14.6
+      }
+    },
+    "Thronefall": {
+      "zstd1": {
+        "pct": 67.7,
+        "samples": 2,
+        "min": 67.7,
+        "max": 67.7
+      }
+    },
+    "Tiny Terry's Turbo Trip": {
+      "zstd1": {
+        "pct": 56.1,
+        "samples": 2,
+        "min": 54.5,
+        "max": 57.7
+      }
+    },
+    "Titan Souls": {
+      "zstd1": {
+        "pct": 2.5,
+        "samples": 2,
+        "min": 2.4,
+        "max": 2.5
+      }
+    },
+    "To the Moon Beachsode": {
+      "zstd1": {
+        "pct": 3.8,
+        "samples": 2,
+        "min": 3.7,
+        "max": 3.9
+      }
+    },
+    "Ultrapool": {
+      "zstd1": {
+        "pct": 64.3,
+        "samples": 2,
+        "min": 62.5,
+        "max": 66.2
+      }
+    },
+    "Unpacking": {
+      "zstd1": {
+        "pct": 63.4,
+        "samples": 2,
+        "min": 63.3,
+        "max": 63.5
+      }
+    },
+    "Untitled Goose Game": {
+      "zstd1": {
+        "pct": 49.2,
+        "samples": 2,
+        "min": 44.7,
+        "max": 53.7
+      }
+    },
+    "Valheim": {
+      "zstd1": {
+        "pct": 5.1,
+        "samples": 2,
+        "min": 5.1,
+        "max": 5.1
+      }
+    },
+    "Valiant Hearts": {
+      "zstd1": {
+        "pct": 3.6,
+        "samples": 2,
+        "min": 0.0,
+        "max": 7.1
+      }
+    },
+    "WHAT THE GOLF": {
+      "zstd1": {
+        "pct": 22.9,
+        "samples": 2,
+        "min": 20.5,
+        "max": 25.3
+      }
+    },
+    "Wall World": {
+      "zstd1": {
+        "pct": 83.0,
+        "samples": 2,
+        "min": 83.0,
+        "max": 83.0
+      }
+    },
+    "Webbed": {
+      "zstd1": {
+        "pct": 37.8,
+        "samples": 2,
+        "min": 32.4,
+        "max": 43.2
+      }
+    },
+    "Wizard with a Gun": {
+      "zstd1": {
+        "pct": 10.2,
+        "samples": 2,
+        "min": 7.1,
+        "max": 13.3
+      }
+    },
+    "WormsWMD": {
+      "zstd1": {
+        "pct": 64.2,
+        "samples": 2,
+        "min": 64.2,
+        "max": 64.2
+      }
+    },
+    "You Have to Win the Game": {
+      "zstd1": {
+        "pct": 46.2,
+        "samples": 2,
+        "min": 30.8,
+        "max": 61.5
+      }
+    },
+    "Zero Stress King": {
+      "zstd1": {
+        "pct": 25.0,
+        "samples": 2,
+        "min": 23.9,
+        "max": 26.1
+      }
+    },
+    "border pioneer": {
+      "zstd1": {
+        "pct": 25.2,
+        "samples": 2,
+        "min": 17.7,
+        "max": 32.6
+      }
+    },
+    "devildaggers": {
+      "zstd1": {
+        "pct": 10.7,
+        "samples": 2,
+        "min": 7.5,
+        "max": 13.8
+      }
+    },
+    "hotline_miami": {
+      "zstd1": {
+        "pct": 63.4,
+        "samples": 2,
+        "min": 63.3,
+        "max": 63.5
+      }
+    },
+    "lucid-blocks": {
+      "zstd1": {
+        "pct": 38.8,
+        "samples": 2,
+        "min": 35.2,
+        "max": 42.4
+      }
+    },
+    "missed messages": {
+      "zstd1": {
+        "pct": 38.7,
+        "samples": 2,
+        "min": 35.8,
+        "max": 41.5
+      }
+    },
+    "theendisnigh": {
+      "zstd1": {
+        "pct": 7.8,
+        "samples": 2,
+        "min": 1.6,
+        "max": 13.9
+      }
+    },
+    "worldbox": {
+      "zstd1": {
+        "pct": 39.8,
+        "samples": 2,
+        "min": 39.1,
+        "max": 40.6
+      }
+    },
+    "wtl": {
+      "zstd1": {
+        "pct": 68.3,
+        "samples": 2,
+        "min": 64.2,
+        "max": 72.3
+      }
+    }
+  }
+}

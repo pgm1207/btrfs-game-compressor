@@ -1,0 +1,17 @@
+# build artifacts
+dist/
+*.tar.gz
+# transient file from `make ratios-doc`
+GAMES.md.tmp
+
+# nothing from a real install should ever land here
+*.db
+*.db.bak
+*.log
+
+# editors / OS
+*.swp
+*~
+.idea/
+.vscode/
+.DS_Store

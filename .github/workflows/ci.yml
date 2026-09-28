@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: bash ${{ matrix.shell }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: ["bash", "sh"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Syntax check (${{ matrix.shell }})
+        run: |
+          if [ "${{ matrix.shell }}" = "bash" ]; then
+            bash -n btrfs-game-compressor
+          else
+            # the script must at least be parseable as POSIX sh for the
+            # install.sh path; the main script targets bash 4+
+            sh -n install.sh
+          fi
+
+      - name: ShellCheck
+        run: |
+          shellcheck -s bash -e SC1091 btrfs-game-compressor || true
+          shellcheck -s sh install.sh
+          if shellcheck -s bash -e SC1091 -S error btrfs-game-compressor; then
+            echo "no shellcheck errors"
+          else
+            echo "::error::shellcheck found errors"
+            exit 1
+          fi
+
+      - name: Behavioural tests
+        run: ./test/smoke.sh
+
+      # GAMES.md is generated from ratios/games.json. If a contributor edits the
+      # JSON and forgets `make ratios-doc`, the browsable table silently lies;
+      # this fails the build instead.
+      - name: Generated GAMES.md is current
+        run: |
+          make ratios-doc
+          if ! git diff --exit-code -- GAMES.md; then
+            echo "::error::GAMES.md is out of date; run 'make ratios-doc' and commit it"
+            exit 1
+          fi
+
+      - name: Community ratio table parses
+        run: |
+          entries=$(./btrfs-game-compressor --ratios --json | grep -o '"name":' | wc -l)
+          echo "$entries ratio entries parsed"
+          test "$entries" -ge 200
+
+      - name: Reproducible release archive
+        run: |
+          version=$(sed -n 's/^VERSION="\(.*\)"/\1/p' btrfs-game-compressor)
+          make package
+          cp "dist/btrfs-game-compressor-$version.tar.gz" /tmp/release-first.tar.gz
+          make package
+          cmp /tmp/release-first.tar.gz "dist/btrfs-game-compressor-$version.tar.gz"
+
+      - name: Make check
+        run: make check
+
+  # The script must run on a stock Debian/Ubuntu, where /usr/bin/awk is mawk and
+  # not gawk, and on minimal images where it is busybox awk. gawk extensions
+  # such as asort() and strftime() therefore have to stay out of the code; this
+  # job is what stops one creeping back in.
+  awk-compat:
+    name: tests under ${{ matrix.awk }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        awk: ["mawk", "busybox"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ${{ matrix.awk }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.awk }}
+
+      - name: Run the suite with ${{ matrix.awk }} as awk
+        run: |
+          shim=$(mktemp -d)
+          case "${{ matrix.awk }}" in
+            mawk)    printf '#!/bin/sh\nexec mawk "$@"\n'        > "$shim/awk" ;;
+            busybox) printf '#!/bin/sh\nexec busybox awk "$@"\n' > "$shim/awk" ;;
+          esac
+          chmod +x "$shim/awk"
+          echo "awk in use: $(PATH="$shim:$PATH" command -v awk)"
+          PATH="$shim:$PATH" ./test/smoke.sh

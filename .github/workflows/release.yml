@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag and build reproducible archive
+        run: |
+          version=$(sed -n 's/^VERSION="\(.*\)"/\1/p' btrfs-game-compressor)
+          test "$GITHUB_REF_NAME" = "v$version"
+          make package
+          cd dist
+          sha256sum "btrfs-game-compressor-$version.tar.gz" > SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/btrfs-game-compressor-$version.tar.gz" \
+            dist/SHA256SUMS \
+            --verify-tag --generate-notes

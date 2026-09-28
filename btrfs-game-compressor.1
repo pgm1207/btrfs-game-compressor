@@ -1,0 +1,309 @@
+.TH BTRFS\-GAME\-COMPRESSOR 1 "2026" "btrfs-game-compressor 0.1.0" "User Commands"
+.SH NAME
+btrfs\-game\-compressor \- compress Steam game libraries on Btrfs with ZSTD
+.SH SYNOPSIS
+.B btrfs\-game\-compressor
+.RI [ OPTIONS ]
+.br
+.B btrfs\-game\-compressor
+.SH DESCRIPTION
+.B btrfs\-game\-compressor
+discovers Steam game libraries that live on a Btrfs filesystem and compresses
+their contents with ZSTD by running
+.BR "btrfs filesystem defragment \-r \-czstd" .
+Most game assets are already-compressed archives, video and audio, so
+re\-compressing them typically reclaims a significant portion of a library with
+no effect on how Steam launches or verifies files.
+.PP
+Run with no arguments it starts an interactive terminal UI. The
+.BR \-\-status ", " \-\-dry\-run " and " \-\-library
+modes are non\-interactive, change nothing unexpected, and are safe to pipe or
+run from a script.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Show a usage summary and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.TP
+.BR \-s ", " \-\-status
+Print a non\-interactive report of every discovered game and its state, then
+exit. Requires no terminal.
+.TP
+.BR \-n ", " \-\-dry\-run
+List the games that a batch compression would process, without modifying
+anything.
+.TP
+.BR \-l ", " "\-\-library " \fIDIR\fR
+Register \fIDIR\fR as an extra game library and exit. Accepts either the library
+root or its \fBsteamapps/common\fR subdirectory. A warning is printed if the path
+is not on a Btrfs filesystem.
+.TP
+.B \-\-pending
+With \fB\-\-status\fR or \fB\-\-dry\-run\fR, restrict output to games that are not
+yet compressed.
+.TP
+.B \-\-no\-color
+Disable ANSI color output. The \fBNO_COLOR\fR environment variable has the same
+effect.
+.TP
+.B \-\-json
+With \fB\-\-status\fR or \fB\-\-ratios\fR, emit a JSON object (for \fB\-\-status\fR,
+the discovered libraries, game records, and a summary; for \fB\-\-ratios\fR, the
+table entries). This option requires \fB\-\-status\fR, \fB\-\-benchmark\fR or
+\fB\-\-ratios\fR.
+.TP
+.B \-\-history
+Print every recorded compression, newest first, with the size before and after
+and the space saved. This reads the state database directly and changes nothing.
+.TP
+.B \-\-stats
+Print a summary of the recorded compressions: how many games were measured, the
+total original and on-disk size, and the space reclaimed. Reads the state
+database and changes nothing.
+.TP
+.B \-\-benchmark
+Print the measured saving for each game, sorted from best to worst, followed by a
+summary: total size before and after, the overall ratio, the best single game,
+and how many games save more than 50%. Every figure is derived from recorded
+compsize measurements, so it describes real disks rather than an estimate. With
+.BR \-\-json ,
+the same data is emitted as JSON.
+.TP
+.B \-\-ratios \fR[\fIGAME\fR]
+Look up expected savings in the community table maintained in
+\fIratios/games.json\fR. With no argument the whole table is printed; with a game
+name, only that game's rows. Every row names the zstd level it was measured at,
+because a game's ratio is a property of \fI(game, level)\fR and a level\-1
+measurement must not be applied to a \fBzstd:6\fR library. The table is a hint
+only: a local \fB\-\-benchmark\fR measurement always wins, and none of the ratio
+modes ever compresses anything. The table is installed with the tool, so
+\fB\-\-ratios\fR works without a network connection or a git checkout. A
+first\-pass game the table expects to save under \fBmin_gain_pct\fR is flagged
+\fBlikely low yield\fR in \fB\-\-status\fR and \fB\-\-dry\-run\fR, as an advisory
+only: it is still listed and still compressed, because only a local pass can
+measure it. With \fB\-\-json\fR the entries are emitted as JSON.
+.TP
+.B \-\-export\-ratios
+Emit this machine's measured savings as a valid ratios document, ready to merge
+into \fIratios/games.json\fR and submit as a pull request. Repeated measurements
+of the same game at the same level are averaged into one row that also records
+the sample count and the min/max range. Nothing is uploaded; the output goes to
+standard output.
+.TP
+.B \-\-import\-ratios \fIFILE\fR
+Read \fIFILE\fR as a community ratios document and use it as a fallback hint for
+games this machine has not measured. The file is cached at
+\fI~/.config/btrfs\-game\-compressor/ratios_hint.json\fR. A file that parses to no
+entries is rejected, so a bad merge can never be cached as if it were a table.
+.TP
+.B \-\-render\-ratios
+Render the community table as a Markdown document on standard output. This is the
+maintainer command behind \fImake ratios\-doc\fR, which regenerates
+\fIGAMES.md\fR. It always reads the shipped \fIratios/games.json\fR and ignores
+any table imported with \fB\-\-import\-ratios\fR, so a maintainer's personal
+measurements can never leak into the committed document. It needs no tooling
+beyond the script itself.
+.TP
+.B \-\-check\-update
+Ask the release API whether a newer version exists and print the answer. This is
+read-only and changes nothing.
+.TP
+.B \-\-self\-update
+Download the latest release and install it over the running script, verifying the
+archive against the release's \fISHA256SUMS\fR first. It refuses when the script
+is owned by a package manager (a distro package under \fI/usr\fR, Homebrew, or
+Nix) and tells you to update through it instead, and it leaves the running copy
+untouched if the checksum does
+not match. The update takes effect on the next run. A newer release is also looked
+for automatically at most once a day (disable with the \fIauto_update\fR config
+file), or whenever the watch timer runs \fB\-\-notify\fR.
+.TP
+.B \-\-uninstall
+Remove the tool, its manpage, the community ratio table installed beside it, and
+the optional systemd user units. It asks for confirmation at a terminal, refuses
+when the script is owned by a package manager, and never deletes the user's
+configuration or compression history.
+.TP
+.B \-\-yes
+With \fB\-\-uninstall\fR, skip the confirmation prompt. It does not override the
+package\-manager refusal.
+.TP
+.B \-\-notify
+Send a desktop notification for games in \fBUPDATED\fR or \fBUNCOMPRESSED\fR state.
+This is read-only and does not start compression. Requires the optional
+\fBnotify-send\fR command from libnotify.
+.TP
+.B \-\-balance
+Offer to rebalance each Btrfs mount that holds a discovered library, by running
+.BR "btrfs balance start \-m" .
+This is a separate, slower operation from defragmentation: it evens out a
+degraded block-group allocation across the whole device, which is what actually
+returns the space of a fragmented SSD, and which should be run after a
+defragmentation pass rather than instead of one. Because of that scope, and
+because it rewrites the whole device, it is never implied by
+.BR \-\-dry\-run " or " \-\-status .
+This option only reports every mount it would touch and prints the exact
+command for it; it exits without running anything unless invoked from a terminal
+and confirmed with
+.BR y .
+Requires a terminal, and
+.B btrfs
+from
+.BR btrfs-progs .
+.SH INTERACTIVE KEYS
+.TP
+.BR "↑" ", " ↓ ", " k ", " j
+Move the cursor.
+.TP
+.BR "←" ", " → ", " h ", " l
+Previous or next page.
+.TP
+.B Space
+Toggle the checkbox on the highlighted game.
+.TP
+.B a
+Toggle every game on the current page.
+.TP
+.BR Enter ", " c
+Compress the highlighted game, or every checked game.
+.TP
+.B b
+Batch\-compress everything still pending.
+.TP
+.B f
+Search and filter the list.
+.TP
+.B v
+Show only games that still need compressing.
+.TP
+.B t
+Show compression statistics.
+.TP
+.B s
+Open settings: speed/throttle mode and library management.
+.TP
+.B q
+Quit.
+.SH GAME STATES
+.TP
+.B COMPRESSED
+Defragmented, with no modifications in its directory since.
+.TP
+.B UPDATED
+Previously compressed, but files changed afterwards. Worth re\-compressing.
+.TP
+.B UNCOMPRESSED
+Never compressed by this tool.
+.TP
+.B RUNNING
+A live process has a file open under the game's install directory, so the game
+is in use. It is held back, and re\-checked immediately before any write, so a
+game started during a batch is not rewritten underneath itself. Running games
+are also counted separately by
+.BR \-\-status .
+.PP
+Change detection is a recursive
+.B find \-newermt
+over the entire game directory, so updates deep inside a game's data tree are
+still detected. \fBProton*\fR, \fBSteamLinuxRuntime*\fR and the Steam shared
+folders are skipped automatically.
+.SH FILES
+.TP
+.I ~/.config/btrfs\-game\-compressor/custom_libraries.txt
+Extra library roots, one per line.
+.TP
+.I ~/.config/btrfs\-game\-compressor/throttle.conf
+\fB0\fR for full speed, \fB1\fR to wrap defragmentation in
+.BR "nice \-n 19 ionice \-c 2 \-n 7" .
+.TP
+.I ~/.config/btrfs\-game\-compressor/min_size_mib
+Installs holding less than this many MiB of file data are treated as empty
+download leftovers and skipped. \fB0\fR disables the filter.
+.TP
+.I ~/.config/btrfs\-game\-compressor/compress_level
+Zstd level passed to
+.BR "btrfs filesystem defragment \-L" .
+\fBauto\fR, the default, mirrors the level the library's mount point is configured
+with so that the library stays uniformly compressed; a value of \fB1\fR to \fB15\fR
+pins a level instead. \fBcompress\-force=\fR takes precedence over \fBcompress=\fR
+when a mount specifies both.
+.TP
+.I ~/.config/btrfs\-game\-compressor/min_gain_pct
+An updated game whose previous saving was less than this percentage of its size is
+reported as \fBLOW YIELD\fR and held back. Because both the cost of a
+defragmentation pass and its benefit scale with the size of the game, the
+percentage is the meaningful test: it does not matter whether a game is 100 MB or
+100 GB, only how well it compresses. \fB0\fR disables the test. Default \fB5\fR.
+.TP
+.I ~/.config/btrfs\-game\-compressor/min_gain_mib
+A second, independent \fBLOW YIELD\fR test for games whose predicted saving is
+trivially small, even when the ratio passes. \fB0\fR disables it. Default
+\fB32\fR.
+.TP
+.I ~/.config/btrfs\-game\-compressor/auto_update
+\fB1\fR (the default) lets the tool look for a newer release at most once a day;
+\fB0\fR disables the automatic check. \fB\-\-check\-update\fR and
+\fB\-\-self\-update\fR work regardless.
+.TP
+.I ~/.local/state/btrfs\-game\-compressor/compressed_games.db
+Which games have been compressed, when, and how much space that saved. The recorded
+sizes are what the \fBLOW YIELD\fR predictions are derived from, so a game is never
+judged before it has been compressed at least once. Records are keyed by escaped
+install path; legacy name-keyed records are ignored during the one-time migration.
+.SH REQUIREMENTS
+.BR bash " 4+, " btrfs\-progs ", " awk " and " coreutils .
+.B btrfs\-compsize
+is optional; without it savings figures are reported as \fBn/a\fR rather than
+being guessed. A game compressed without it is still remembered as compressed,
+so it is not re\-done on every run, but it contributes no figures to
+\fB\-\-stats\fR, \fB\-\-history\fR or \fB\-\-benchmark\fR.
+.B notify\-send
+from libnotify is optional and is needed only for \fB\-\-notify\fR.
+.PP
+The library's filesystem must be Btrfs and mounted with a \fBcompress=\fR or
+\fBcompress\-force=\fR option, otherwise new extents inherit no compression:
+.PP
+.RS
+.nf
+UUID=xxxx  /mnt/games  btrfs  compress=zstd,noatree  0  0
+.fi
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+A required command is missing, a path given to \fB\-\-library\fR does not exist,
+or interactive mode was requested without a terminal.
+.TP
+.B 2
+The command line could not be parsed.
+.SH EXAMPLES
+.TP
+.nf
+btrfs\-game\-compressor
+btrfs\-game\-compressor \-\-status
+btrfs\-game\-compressor \-\-status \-\-pending
+btrfs\-game\-compressor \-\-dry\-run
+btrfs\-game\-compressor \-\-library /mnt/games
+btrfs\-game\-compressor \-\-status \-\-no\-color | column \-t
+btrfs\-game\-compressor \-\-status \-\-json
+btrfs\-game\-compressor \-\-stats
+btrfs\-game\-compressor \-\-history
+btrfs\-game\-compressor \-\-benchmark
+btrfs\-game\-compressor \-\-ratios
+btrfs\-game\-compressor \-\-ratios "Factorio"
+btrfs\-game\-compressor \-\-export\-ratios
+btrfs\-game\-compressor \-\-notify
+btrfs\-game\-compressor \-\-balance
+.fi
+.SH SEE ALSO
+.BR btrfs (8),
+.BR compsize (8)
+.SH BUGS
+Report issues at https://github.com/pablogonz12/btrfs\-game\-compressor/issues
+.SH LICENSE
+MIT.

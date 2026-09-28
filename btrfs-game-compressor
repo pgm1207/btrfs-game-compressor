@@ -1,0 +1,3192 @@
+#!/bin/bash
+#
+# btrfs-game-compressor - interactive ZSTD compression manager for Steam
+# libraries living on Btrfs. Single file, no runtime deps beyond coreutils,
+# awk, btrfs-progs and (optionally) btrfs-compsize.
+
+VERSION="0.1.0"
+PROGNAME="btrfs-game-compressor"
+# Owner/repo used by --self-update and --check-update to find the latest release.
+REPO="${BTRFS_GAME_COMPRESSOR_REPO:-pablogonz12/btrfs-game-compressor}"
+
+# Sizes must parse identically regardless of user locale: a German/Spanish
+# locale makes du(1) print "1,4G", which awk would read as 1.4 -> 1.
+export LC_ALL=C
+
+CONFIG_DIR="$HOME/.config/btrfs-game-compressor"
+STATE_DIR="$HOME/.local/state/btrfs-game-compressor"
+STATE_FILE="$STATE_DIR/compressed_games.db"
+CUSTOM_LIBS_FILE="$CONFIG_DIR/custom_libraries.txt"
+THROTTLE_FILE="$CONFIG_DIR/throttle.conf"
+MIN_SIZE_FILE="$CONFIG_DIR/min_size_mib"
+LEVEL_FILE="$CONFIG_DIR/compress_level"
+GAIN_FILE="$CONFIG_DIR/min_gain_mib"
+PCT_FILE="$CONFIG_DIR/min_gain_pct"
+AUTO_UPDATE_FILE="$CONFIG_DIR/auto_update"
+# Throttle stamp for the automatic check: its mtime is the last time the tool
+# looked for a newer release.
+UPDATE_STAMP="$STATE_DIR/last_update_check"
+# Community ratios imported with --import-ratios. Used only as a hint for games
+# this machine has never measured; never overrides a real local measurement.
+RATIOS_CACHE="$CONFIG_DIR/ratios_hint.json"
+
+# The state file starts with a comment line carrying the format version. It
+# exists so a future release can recognise and migrate older records instead of
+# silently discarding them, which is what happened when the key changed from the
+# game name to the install path: every game looked uncompressed again and the
+# whole library had to be re-done. Comments start with '#' and absolute paths
+# start with '/', so the two can never be confused.
+STATE_HEADER="# btrfs-game-compressor state v2"
+STATE_VERSION=2
+
+# Column budgets, in characters, for the name fields of the fixed-width tables.
+# LC_ALL=C is forced, so ${#s} counts bytes rather than characters; these are
+# therefore upper bounds, and truncate_name backs off to a character boundary.
+TUI_NAME_WIDTH=51
+STATUS_NAME_WIDTH=40
+
+# --- Colors ---
+BOLD="\e[1m"
+DIM="\e[2m"
+CYAN="\e[1;36m"
+GREEN="\e[1;32m"
+YELLOW="\e[1;33m"
+MAGENTA="\e[1;35m"
+RED="\e[1;31m"
+RESET="\e[0m"
+
+# --- Options ---
+OPT_STATUS=0
+OPT_DRY_RUN=0
+OPT_NO_COLOR=0
+OPT_PENDING_ONLY=0
+OPT_BALANCE=0
+OPT_JSON=0
+OPT_NOTIFY=0
+OPT_HISTORY=0
+OPT_STATS=0
+OPT_BENCHMARK=0
+OPT_EXPORT=0
+OPT_RATIOS=0
+OPT_IMPORT=0
+OPT_RENDER=0
+OPT_CHECK_UPDATE=0
+OPT_SELF_UPDATE=0
+OPT_UNINSTALL=0
+OPT_YES=0
+RATIOS_QUERY=""
+RATIOS_IMPORT_FILE=""
+TUI_ACTIVE=0
+MIN_SIZE_MIB=1
+SKIPPED_STUB_COUNT=0
+SKIPPED_STUB_NAMES=()
+COMPRESS_LEVEL=auto
+MIN_GAIN_MIB=32
+MIN_GAIN_PCT=5
+AUTO_UPDATE=1
+PLATFORM=other
+
+# Game install paths that a live process currently has mapped.
+declare -A RUNNING_DIRS=()
+
+usage() {
+    cat <<EOF
+$PROGNAME $VERSION - compress your Steam game library on Btrfs with ZSTD
+
+USAGE
+    $PROGNAME [OPTIONS]
+    $PROGNAME                      launch the interactive TUI
+
+OPTIONS
+    -h, --help            show this help and exit
+    -V, --version         print version and exit
+    -s, --status          print a non-interactive compression report and exit
+    -n, --dry-run         list what would be compressed, change nothing
+    -l, --library DIR     add DIR as a game library, then exit
+                           (accepts the library root or its steamapps/common)
+        --pending         with --status/--dry-run, only show pending games
+        --history         print the recorded compression history and exit
+        --stats           print a savings summary from the history and exit
+        --benchmark       measure real savings per game from recorded data
+                          (add --json for machine-readable output)
+        --ratios [GAME]   look up expected savings in the community table
+                          (add --json for machine-readable output)
+        --export-ratios   emit your measured ratios as JSON, ready to
+                          contribute to ratios/games.json in the repo
+        --import-ratios FILE
+                          read a ratios JSON file and use it as a fallback
+                          hint for games you have not measured yourself
+        --render-ratios   render the community table as Markdown and exit
+                          (maintainer command behind 'make ratios-doc')
+        --balance         offer to run 'btrfs balance start -m' on each
+                          library's mount point; needs a terminal
+        --check-update    report whether a newer release exists, change nothing
+        --self-update     download and install the latest release, verifying
+                          its SHA256SUMS; refuses when a package manager owns
+                          this copy (use pacman/brew/nix instead)
+        --uninstall       remove the tool, its manpage and its systemd units;
+                          asks first, and never touches your history
+        --yes             with --uninstall, do not ask (still refuses a
+                          package-managed copy)
+        --json            with --status/--benchmark/--ratios, emit JSON
+        --notify          send a desktop notice for actionable pending games
+        --no-color        disable ANSI colors (also honours \$NO_COLOR)
+
+EXAMPLES
+    $PROGNAME                        interactive mode
+    $PROGNAME --status               one-shot report (safe for scripts/CI)
+    $PROGNAME --dry-run --pending    what is still waiting to be compressed
+    $PROGNAME --library /mnt/games   register a library outside Steam's VDF
+    $PROGNAME --balance              finish the job with a filesystem balance
+    $PROGNAME --stats                how much space has been reclaimed
+    $PROGNAME --history              every recorded compression, newest first
+    $PROGNAME --benchmark            measured savings per game, sorted
+    $PROGNAME --ratios               the whole community table
+    $PROGNAME --ratios "Factorio"    what the table expects for one game
+    $PROGNAME --status --json        machine-readable report
+    $PROGNAME --notify               read-only desktop update notice
+    $PROGNAME --check-update         is a newer release available?
+    $PROGNAME --self-update          update this copy in place
+    $PROGNAME --status | column -t   pipe the report somewhere
+
+FILES
+    $CONFIG_DIR
+        custom_libraries.txt   extra library roots, one per line
+        throttle.conf          0 = full speed, 1 = nice/ionice eco mode
+        auto_update            1 = check for a newer release once a day (default)
+    $STATE_DIR
+        compressed_games.db    what has been compressed, and when
+
+REQUIREMENTS
+    btrfs filesystem must be mounted with a compress= option (zstd recommended).
+    btrfs-progs is required. btrfs-compsize is optional but without it the
+    savings figures cannot be measured and are reported as n/a.
+EOF
+}
+
+version() {
+    printf '%s %s\n' "$PROGNAME" "$VERSION"
+}
+
+disable_colors() {
+    BOLD="" DIM="" CYAN="" GREEN="" YELLOW="" MAGENTA="" RED="" RESET=""
+}
+
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help)     usage; exit 0 ;;
+            -V|--version)  version; exit 0 ;;
+            -s|--status)   OPT_STATUS=1 ;;
+            -n|--dry-run)  OPT_DRY_RUN=1 ;;
+            -l|--library)
+                if [ -z "$2" ]; then
+                    echo "$PROGNAME: --library requires a directory" >&2
+                    exit 2
+                fi
+                add_library_cli "$2"
+                exit 0 ;;
+            --pending)     OPT_PENDING_ONLY=1 ;;
+            --history)     OPT_HISTORY=1 ;;
+            --stats)       OPT_STATS=1 ;;
+            --benchmark)   OPT_BENCHMARK=1 ;;
+            --export-ratios) OPT_EXPORT=1 ;;
+            --ratios)
+                OPT_RATIOS=1
+                # Optional game name: only consume it if it is not another flag.
+                case "${2:-}" in
+                    ""|-*) ;;
+                    *) RATIOS_QUERY="$2"; shift ;;
+                esac ;;
+            --import-ratios)
+                if [ -z "${2:-}" ]; then
+                    echo "$PROGNAME: --import-ratios requires a JSON file" >&2
+                    exit 2
+                fi
+                OPT_IMPORT=1; RATIOS_IMPORT_FILE="$2"; shift ;;
+            --render-ratios) OPT_RENDER=1 ;;
+            --balance)     OPT_BALANCE=1 ;;
+            --check-update) OPT_CHECK_UPDATE=1 ;;
+            --self-update) OPT_SELF_UPDATE=1 ;;
+            --uninstall)   OPT_UNINSTALL=1 ;;
+            --yes|-y)      OPT_YES=1 ;;
+            --json)        OPT_JSON=1 ;;
+            --notify)      OPT_NOTIFY=1 ;;
+            --no-color)    OPT_NO_COLOR=1 ;;
+            --)            shift; break ;;
+            -*)            echo "$PROGNAME: unknown option '$1'" >&2
+                           echo "Try '$PROGNAME --help'." >&2
+                           exit 2 ;;
+            *)             echo "$PROGNAME: unexpected argument '$1'" >&2
+                           echo "Try '$PROGNAME --help'." >&2
+                           exit 2 ;;
+        esac
+        shift
+    done
+
+    # Modes that run on their own and then exit. They are listed once here, with
+    # the flag that opts in and whether --json is meaningful for that mode, so a
+    # new mode cannot be added without stating its combination rules.
+    #   name          flag variable              allows --json  human name
+    local -a modes=(
+        "OPT_STATUS:--status:1"
+        "OPT_DRY_RUN:--dry-run:0"
+        "OPT_BALANCE:--balance:0"
+        "OPT_NOTIFY:--notify:0"
+        "OPT_HISTORY:--history:0"
+        "OPT_STATS:--stats:0"
+        "OPT_BENCHMARK:--benchmark:1"
+        "OPT_EXPORT:--export-ratios:0"
+        "OPT_RATIOS:--ratios:1"
+        "OPT_IMPORT:--import-ratios:0"
+        "OPT_RENDER:--render-ratios:0"
+        "OPT_CHECK_UPDATE:--check-update:0"
+        "OPT_SELF_UPDATE:--self-update:0"
+        "OPT_UNINSTALL:--uninstall:0"
+    )
+    local entry var flag jsonok selected="" selected_flag="" selected_json=0 count=0
+    for entry in "${modes[@]}"; do
+        var="${entry%%:*}"; entry="${entry#*:}"
+        flag="${entry%%:*}"; jsonok="${entry##*:}"
+        if [ "${!var}" -eq 1 ]; then
+            count=$(( count + 1 ))
+            [ "$count" -eq 1 ] && { selected="$var"; selected_flag="$flag"; selected_json="$jsonok"; }
+        fi
+    done
+    if [ "$count" -gt 1 ]; then
+        echo "$PROGNAME: these modes cannot be combined: $selected_flag and another mode" >&2
+        echo "          Run one at a time. See '$PROGNAME --help'." >&2
+        exit 2
+    fi
+    # --notify is a background mode: it must be the only thing asked for, so a
+    # timer can never accidentally trigger a report or a write alongside it.
+    if [ "$OPT_JSON" -eq 1 ] && { [ "$count" -eq 0 ] || [ "$selected_json" -eq 0 ]; }; then
+        echo "$PROGNAME: --json requires --status, --benchmark or --ratios" >&2
+        exit 2
+    fi
+    # --balance rewrites a whole filesystem; it can never ride along silently.
+    if [ "$OPT_PENDING_ONLY" -eq 1 ] && [ "$OPT_STATUS" -ne 1 ] && [ "$OPT_DRY_RUN" -ne 1 ]; then
+        echo "$PROGNAME: --pending only applies to --status or --dry-run" >&2
+        exit 2
+    fi
+    if [ "$OPT_YES" -eq 1 ] && [ "$OPT_UNINSTALL" -ne 1 ]; then
+        echo "$PROGNAME: --yes only applies to --uninstall" >&2
+        exit 2
+    fi
+
+    if [ "$OPT_NO_COLOR" -eq 1 ] || [ -n "$NO_COLOR" ]; then
+        disable_colors
+    fi
+}
+
+# Percent-encode fields stored in the pipe-delimited state database. Encode %
+# first so the escape sequences themselves remain unambiguous.
+encode_field() {
+    local value="${1//%/%25}"
+    value="${value//|/%7C}"
+    value="${value//$'\n'/%0A}"
+    value="${value//$'\r'/%0D}"
+    printf '%s' "$value"
+}
+
+decode_field() {
+    DECODED_FIELD="${1//%0D/$'\r'}"
+    DECODED_FIELD="${DECODED_FIELD//%0A/$'\n'}"
+    DECODED_FIELD="${DECODED_FIELD//%7C/|}"
+    DECODED_FIELD="${DECODED_FIELD//%25/%}"
+}
+
+# Quote an arbitrary Bash string as one JSON string value. Bytes outside the
+# JSON control range (including UTF-8) pass through unchanged.
+json_quote() {
+    JSON_INPUT="$1" awk 'BEGIN {
+        s = ENVIRON["JSON_INPUT"]
+        printf "\""
+        for (i = 1; i <= length(s); i++) {
+            c = substr(s, i, 1)
+            if (c == "\"") printf "\\\""
+            else if (c == "\\") printf "\\\\"
+            else {
+                escaped = 0
+                for (j = 1; j < 32; j++) {
+                    if (c == sprintf("%c", j)) {
+                        printf "\\u%04x", j
+                        escaped = 1
+                        break
+                    }
+                }
+                if (!escaped) printf "%s", c
+            }
+        }
+        printf "\""
+    }'
+}
+
+# Tokenize quoted VDF strings and return values associated with a "path" key.
+# Escaped quotes and backslashes are decoded, unlike grep-based extraction.
+parse_vdf_libraries() {
+    awk '
+        function emit(token) {
+            if (previous == "path") print token
+            previous = token
+        }
+        {
+            line = $0
+            in_string = 0; escaped = 0; token = ""
+            for (i = 1; i <= length(line); i++) {
+                c = substr(line, i, 1)
+                if (!in_string) {
+                    if (c == "\"") { in_string = 1; token = "" }
+                } else if (escaped) {
+                    if (c == "\\" || c == "\"") token = token c
+                    else token = token "\\" c
+                    escaped = 0
+                } else if (c == "\\") escaped = 1
+                else if (c == "\"") { emit(token); in_string = 0 }
+                else token = token c
+            }
+        }
+    ' "$1"
+}
+
+add_library_cli() {
+    local new_path="$1"
+    new_path="${new_path/#\~/$HOME}"
+    if [ -d "$new_path/steamapps/common" ]; then
+        new_path="$new_path/steamapps/common"
+    fi
+    if [ ! -d "$new_path" ]; then
+        echo "$PROGNAME: '$new_path' is not a directory" >&2
+        exit 1
+    fi
+    local fs_type
+    fs_type=$(stat -f -c %T "$new_path" 2>/dev/null || true)
+    if [ "$fs_type" != "btrfs" ]; then
+        echo "$PROGNAME: warning: '$new_path' is on '$fs_type', not btrfs" >&2
+    fi
+    mkdir -p "$CONFIG_DIR"
+    touch "$CUSTOM_LIBS_FILE"
+    if grep -qxF "$new_path" "$CUSTOM_LIBS_FILE" 2>/dev/null; then
+        echo "Already registered: $new_path"
+        return 0
+    fi
+    echo "$new_path" >> "$CUSTOM_LIBS_FILE"
+    echo "Registered: $new_path"
+}
+
+init_paths() {
+    mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+    touch "$STATE_FILE" "$CUSTOM_LIBS_FILE"
+    # The version header is written lazily, by the first real state_upsert, so a
+    # read-only run (--status, --dry-run) still leaves the state file untouched.
+    [ -f "$THROTTLE_FILE" ] || echo "0" > "$THROTTLE_FILE"
+    [ -f "$MIN_SIZE_FILE" ] || echo "1" > "$MIN_SIZE_FILE"
+    [ -f "$LEVEL_FILE" ] || echo "auto" > "$LEVEL_FILE"
+    [ -f "$GAIN_FILE" ] || echo "32" > "$GAIN_FILE"
+    [ -f "$PCT_FILE" ] || echo "5" > "$PCT_FILE"
+    [ -f "$AUTO_UPDATE_FILE" ] || echo "1" > "$AUTO_UPDATE_FILE"
+}
+
+load_config() {
+    MIN_SIZE_MIB=1
+    COMPRESS_LEVEL=auto
+    MIN_GAIN_MIB=32
+    MIN_GAIN_PCT=5
+    AUTO_UPDATE=1
+    local val
+
+    if [ -f "$MIN_SIZE_FILE" ]; then
+        read -r val < "$MIN_SIZE_FILE" 2>/dev/null || val=""
+        if [[ "${val:-}" =~ ^[0-9]+$ ]]; then
+            MIN_SIZE_MIB="$val"
+        elif [ -n "${val:-}" ]; then
+            echo "$PROGNAME: ignoring invalid value in $MIN_SIZE_FILE (expected a whole number of MiB)" >&2
+        fi
+    fi
+
+    if [ -f "$LEVEL_FILE" ]; then
+        read -r val < "$LEVEL_FILE" 2>/dev/null || val=""
+        if [ "${val:-auto}" = "auto" ]; then
+            COMPRESS_LEVEL=auto
+        elif [[ "${val:-}" =~ ^[0-9]+$ ]] && [ "$val" -ge 1 ] && [ "$val" -le 15 ]; then
+            COMPRESS_LEVEL="$val"
+        elif [ -n "${val:-}" ]; then
+            echo "$PROGNAME: ignoring invalid value in $LEVEL_FILE (expected 'auto' or 1-15)" >&2
+        fi
+    fi
+
+    if [ -f "$GAIN_FILE" ]; then
+        read -r val < "$GAIN_FILE" 2>/dev/null || val=""
+        if [[ "${val:-}" =~ ^[0-9]+$ ]]; then
+            MIN_GAIN_MIB="$val"
+        elif [ -n "${val:-}" ]; then
+            echo "$PROGNAME: ignoring invalid value in $GAIN_FILE (expected a whole number of MiB)" >&2
+        fi
+    fi
+
+    if [ -f "$PCT_FILE" ]; then
+        read -r val < "$PCT_FILE" 2>/dev/null || val=""
+        if [[ "${val:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            MIN_GAIN_PCT="$val"
+        elif [ -n "${val:-}" ]; then
+            echo "$PROGNAME: ignoring invalid value in $PCT_FILE (expected a percentage)" >&2
+        fi
+    fi
+
+    if [ -f "$AUTO_UPDATE_FILE" ]; then
+        read -r val < "$AUTO_UPDATE_FILE" 2>/dev/null || val=""
+        case "${val:-1}" in
+            0) AUTO_UPDATE=0 ;;
+            1) AUTO_UPDATE=1 ;;
+            *) echo "$PROGNAME: ignoring invalid value in $AUTO_UPDATE_FILE (expected 0 or 1)" >&2 ;;
+        esac
+    fi
+}
+
+require_dependencies() {
+    local missing=0 dep
+    for dep in awk find sed stat du date grep sort cut mktemp mv; do
+        if ! command -v "$dep" >/dev/null 2>&1; then
+            echo "$PROGNAME: required command not found: $dep" >&2
+            missing=1
+        fi
+    done
+    if [ "$missing" -eq 1 ]; then
+        exit 1
+    fi
+    return 0
+}
+
+require_btrfs() {
+    if ! command -v btrfs >/dev/null 2>&1; then
+        echo "$PROGNAME: 'btrfs' not found, cannot defragment." >&2
+        echo "          Install btrfs-progs (apt: 'btrfs-progs', pacman: 'btrfs-progs')." >&2
+        exit 1
+    fi
+    return 0
+}
+
+detect_platform() {
+    local os_release="${BTRFS_GAME_COMPRESSOR_OS_RELEASE:-/etc/os-release}"
+    local id="" variant="" id_like=""
+    if [ -r "$os_release" ]; then
+        id=$(sed -n 's/^ID=//p' "$os_release" 2>/dev/null | tr -d '"' | head -n 1)
+        variant=$(sed -n 's/^VARIANT_ID=//p' "$os_release" 2>/dev/null | tr -d '"' | head -n 1)
+        id_like=$(sed -n 's/^ID_LIKE=//p' "$os_release" 2>/dev/null | tr -d '"' | head -n 1)
+    fi
+    case "$id" in
+        steamos)   PLATFORM="steamos" ;;
+        cachyos)   PLATFORM="cachyos" ;;
+        bazzite)   PLATFORM="bazzite" ;;
+        fedora)    PLATFORM="fedora" ;;
+        arch)      PLATFORM="arch" ;;
+        ubuntu)    PLATFORM="ubuntu" ;;
+        debian)    PLATFORM="debian" ;;
+        opensuse*|sled*) PLATFORM="opensuse" ;;
+        *)         PLATFORM="other" ;;
+    esac
+    # ID_LIKE fallback for derivatives (e.g. Pop!_OS -> ubuntu, EndeavourOS -> arch)
+    if [ "$PLATFORM" = "other" ] && [ -n "$id_like" ]; then
+        case "$id_like" in
+            *ubuntu*)  PLATFORM="ubuntu" ;;
+            *debian*)  PLATFORM="debian" ;;
+            *fedora*)  PLATFORM="fedora" ;;
+            *arch*)    PLATFORM="arch" ;;
+            *opensuse*|*sled*) PLATFORM="opensuse" ;;
+        esac
+    fi
+    [ "$variant" = "steamdeck" ] && PLATFORM="steamdeck"
+    return 0
+}
+
+is_removable_media() {
+    local mp
+    mp=$(findmnt -no MAJ:MIN --target "${1:-/}" 2>/dev/null || true)
+    [ -n "$mp" ] || return 1
+    [ "$(cat "/sys/dev/block/$mp/removable" 2>/dev/null || echo 0)" = "1" ]
+}
+
+suggested_level() {
+    if is_removable_media "${1:-/}"; then
+        echo 6
+    else
+        echo 3
+    fi
+}
+
+# Parse a comma-separated mount option list and echo the zstd level it implies.
+# Fails when the options do not enable zstd.
+# btrfs spells the option 'compress-force' (hyphen); both it and the
+# 'compress' form are honoured, and compress-force takes precedence.
+parse_zstd_level() {
+    local opts="${1:-}" spec chosen="" level
+    [ -n "$opts" ] || return 1
+
+    for spec in $(printf '%s' "$opts" | tr ',' ' '); do
+        case "$spec" in
+            compress-force=zstd|compress-force=zstd:*) chosen="$spec" ;;
+        esac
+    done
+    if [ -z "$chosen" ]; then
+        for spec in $(printf '%s' "$opts" | tr ',' ' '); do
+            case "$spec" in
+                compress=zstd|compress=zstd:*) chosen="$spec" ;;
+            esac
+        done
+    fi
+    [ -n "$chosen" ] || return 1
+
+    level="${chosen#*:}"
+    [ "$level" = "$chosen" ] && level=3
+    case "$level" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s' "$level"
+}
+
+# Echo the zstd level in effect for the filesystem containing $1.
+mount_zstd_level() {
+    local opts
+    opts=$(findmnt -no OPTIONS --target "${1:-/}" 2>/dev/null || true)
+    parse_zstd_level "$opts"
+}
+
+# Resolve the level to hand to 'btrfs filesystem defragment -L'.
+# A configured level always wins; 'auto' mirrors the filesystem's own level
+# so that a library stays uniformly compressed.
+effective_level() {
+    local target="${1:-/}"
+    if [ "$COMPRESS_LEVEL" != "auto" ]; then
+        printf '%s' "$COMPRESS_LEVEL"
+        return 0
+    fi
+    local mount_lvl
+    mount_lvl=$(mount_zstd_level "$target" || true)
+    printf '%s' "${mount_lvl:-3}"
+}
+
+check_compress_mount() {
+    local lib="$1" mountpoint opts level
+    mountpoint=$(findmnt -no TARGET --target "$lib" 2>/dev/null || true)
+    [ -z "$mountpoint" ] && return 0
+    opts=$(findmnt -no OPTIONS --target "$lib" 2>/dev/null || true)
+    level=$(mount_zstd_level "$lib" || true)
+    [ -n "$level" ] && return 0
+
+    case ",$opts," in
+        *,compress-force=*,*|*,compress=*,*)
+            echo "$PROGNAME: warning: '$mountpoint' compresses, but not with zstd." >&2
+            ;;
+        *)
+            echo "$PROGNAME: warning: '$mountpoint' has no compress= mount option." >&2
+            echo "                Nothing written here will be compressed until you enable it:" >&2
+            ;;
+    esac
+    if [ "$COMPRESS_LEVEL" = "auto" ]; then
+        echo "                defragment will still use zstd level $(suggested_level "$lib") for this run." >&2
+    else
+        echo "                defragment will still use zstd level $COMPRESS_LEVEL for this run." >&2
+    fi
+    echo "                Persist it across reboots with a matching mount option, e.g.:" >&2
+    echo "                  compress-force=zstd:$(suggested_level "$lib")" >&2
+    return 0
+}
+
+cleanup() {
+    if [ "$TUI_ACTIVE" -eq 1 ]; then
+        tput cnorm 2>/dev/null
+        printf '\033[?25h' 2>/dev/null
+    fi
+}
+trap cleanup EXIT INT TERM
+
+# State variables
+CURRENT_PAGE=1
+PAGE_SIZE=15
+FILTER_QUERY=""
+VIEW_PENDING_ONLY=0
+CURSOR_POS=0
+NEEDS_FULL_CLEAR=1
+COMPSIZE_OK=-1
+declare -A CHECKED_STATE
+declare -A STATE_MAP
+declare -A STATE_RATIO
+# Legacy, name-keyed records recovered from older state files. These MUST be
+# declared associative: a plain `ARR=()` is an indexed array, and bash then
+# evaluates a string subscript as an arithmetic expression, so
+# `LEGACY_REC["$name"]` silently collapses every game into index 0 and the last
+# record wins for all of them.
+declare -A LEGACY_MAP
+declare -A LEGACY_RATIO
+declare -A LEGACY_REC
+# Community table values, keyed by game name, for games this machine has not
+# measured. Display-only; never decides whether something is compressed.
+# HINT_LOW[name] is 1 when the hinted saving is under min_gain_pct, so a first
+# pass through a game the table already knows is a poor investment can be advised
+# against without ever blocking it (a local measurement still has to be made).
+declare -A HINT_RATIO
+declare -A HINT_LOW
+
+KEY=""
+
+read_input() {
+    KEY=""
+    local lead="" final=""
+    if ! IFS= read -rsn1 KEY 2>/dev/null; then
+        KEY=""
+        return 1
+    fi
+    if [ "$KEY" = $'\x1b' ]; then
+        if read -rsn1 -t 0.25 lead 2>/dev/null; then
+            case "$lead" in
+                "["|"O") read -rsn1 -t 0.25 final 2>/dev/null ;;
+                *) final="$lead" ;;
+            esac
+            KEY="$KEY$lead$final"
+        fi
+    fi
+    return 0
+}
+
+drain_pending_input() {
+    local junk=""
+    while read -rsn1 -t 0.05 junk 2>/dev/null; do :; done
+    return 0
+}
+
+to_mib() {
+    local val="$1"
+    echo "$val" | awk '{
+        n = $1; gsub(/[^0-9.]/, "", n);
+        u = toupper($0);
+        if (index(u, "G")) print int(n * 1024);
+        else if (index(u, "M")) print int(n);
+        else if (index(u, "K")) print int(n / 1024);
+        else if (index(u, "T")) print int(n * 1024 * 1024);
+        else print int(n / (1024*1024));
+    }'
+}
+
+game_index_by_path() {
+    local want="$1" i
+    for i in "${!GAMES_PATH[@]}"; do
+        if [ "${GAMES_PATH[$i]}" = "$want" ]; then
+            echo "$i"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Emits four fields: total file bytes, file count, whether anything is newer
+# than the reference timestamp, and a human-readable size. The last field is
+# produced here because this awk is already running; formatting it per game
+# later would mean forking one more process for every game in the library.
+scan_game_dir() {
+    local target="$1" since="${2:-0}"
+    find "$target" \( -type f -printf 'f %s %T@\n' \) -o \( -type d -printf 'd 0 %T@\n' \) 2>/dev/null |
+        awk -v since="$since" '
+            $1 == "f" { bytes += $2; files++ }
+            $3 + 0 > since + 0 { newer = 1 }
+            END {
+                hum = bytes + 0
+                if (hum < 1024) {
+                    human = sprintf("%dB", hum)
+                } else {
+                    units = "KMGTPE"
+                    i = 0
+                    while (hum >= 1024 && i < 5) { hum /= 1024; i++ }
+                    human = sprintf("%.1f%c", hum, substr(units, i, 1))
+                }
+                printf "%d %d %d %s\n", bytes + 0, files + 0, newer + 0, human
+            }
+        '
+}
+
+is_ignored() {
+    case "$1" in
+        SteamLinuxRuntime*|"Steamworks Shared"|"Steam Controller Configs"|Proton*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Populate RUNNING_DIRS with the install paths that a live process has
+# mapped, so that a pass never defragments a game somebody is playing.
+#
+# This deliberately does NOT read Steam's appmanifest StateFlags. It is an
+# undocumented bit field, and the two most credible public references disagree
+# about which bit means "running": Lutris documents StateAppRunning as 64, while
+# the reverse-engineered Valve SDK header (SteamStructs/EAppState.h) says 8192.
+# Guessing wrong in one direction compresses a live game, so instead of
+# interpreting the field, this asks the kernel a question that has only one
+# answer - does any live process have files from that directory mapped in?
+#
+# Reading /proc/<pid>/maps rather than /proc/<pid>/exe matters: a Proton game
+# is a Windows binary executed by wine, so its /proc/exe points at the wine
+# loader and never at the game. The loader does map the game's own files though,
+# so this catches native and Proton games alike.
+#
+# One awk pass over /proc, so the cost does not scale with the library size.
+discover_running_games() {
+    RUNNING_DIRS=()
+    [ "${#LIBS[@]}" -gt 0 ] || return 0
+
+    local pids="" pid libs
+    for pid in /proc/[0-9]*; do
+        pid=${pid#/proc/}
+        pids="$pids $pid"
+    done
+    [ -n "$pids" ] || return 0
+
+    libs=$(printf '%s\n' "${LIBS[@]}")
+
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        RUNNING_DIRS["$dir"]=1
+    done < <(awk -v pids="$pids" -v libs="$libs" '
+        BEGIN {
+            np = split(pids, P, " ")
+            nl = split(libs, L, "\n")
+            for (i = 1; i <= np; i++) {
+                path = "/proc/" P[i] "/maps"
+                while ((getline line < path) > 0) {
+                    # /proc/PID/maps escapes whitespace and backslashes in
+                    # filenames. Decode those before comparing with library
+                    # paths supplied by the user and filesystem.
+                    gsub(/\\134/, "\\\\", line)
+                    gsub(/\\040/, " ", line)
+                    gsub(/\\011/, "\t", line)
+                    gsub(/\\012/, "\n", line)
+                    # The path is at the end of a maps line. Require a slash
+                    # after the library root so /mnt/games does not also match
+                    # /mnt/games2, then emit the full install directory path.
+                    for (j = 1; j <= nl; j++) {
+                        pref = L[j] "/"
+                        if (index(line, pref) == 0) continue
+                        rest = substr(line, index(line, pref) + length(pref))
+                        split(rest, seg, "/")
+                        game = L[j] "/" seg[1]
+                        if (!(game in seen)) {
+                            seen[game] = 1
+                            print game
+                        }
+                    }
+                }
+                close(path)
+            }
+        }' 2>/dev/null)
+    return 0
+}
+
+game_is_running() {
+    # An empty subscript is a hard error in bash, not a lookup miss, so the
+    # empty name has to be rejected before it reaches the array.
+    local path="${1:-}"
+    [ -n "$path" ] || return 1
+    [ -n "${RUNNING_DIRS["$path"]:-}" ]
+}
+
+get_cmd_prefix() {
+    local mode
+    mode=$(cat "$THROTTLE_FILE" 2>/dev/null || echo "0")
+    if [ "$mode" = "1" ]; then
+        echo "nice -n 19 ionice -c 2 -n 7"
+    else
+        echo ""
+    fi
+}
+
+compress_directory() {
+    local target="$1" prefix level
+    prefix=$(get_cmd_prefix)
+    level=$(effective_level "$target")
+    if [ -n "$prefix" ]; then
+        $prefix btrfs filesystem defragment -r -czstd -L "$level" "$target"
+    else
+        btrfs filesystem defragment -r -czstd -L "$level" "$target"
+    fi
+}
+
+run_compsize() {
+    if [ "$EUID" -eq 0 ]; then
+        compsize "$@" 2>/dev/null
+    else
+        sudo -n compsize "$@" 2>/dev/null
+    fi
+}
+
+check_compsize() {
+    if [ "$COMPSIZE_OK" -ne -1 ]; then
+        return
+    fi
+    if command -v compsize >/dev/null 2>&1; then
+        COMPSIZE_OK=1
+    else
+        COMPSIZE_OK=0
+        echo -e "${YELLOW}Warning: 'compsize' not found - savings stats will be unavailable.${RESET}" >&2
+    fi
+}
+
+ensure_sudo() {
+    check_compsize
+    if [ "$COMPSIZE_OK" -eq 1 ] && [ "$EUID" -ne 0 ]; then
+        if ! sudo -n true 2>/dev/null; then
+            echo -e "${YELLOW}sudo access is required for compsize (measuring real compression)...${RESET}"
+            sudo -v
+        fi
+    fi
+}
+
+# Copy the current state aside before it is replaced. Cheap insurance: a bad
+# record or an interrupted write should never cost the user their whole history.
+# The path is derived from STATE_FILE at call time rather than fixed at startup,
+# so it always sits next to the file actually being written.
+backup_state() {
+    [ -s "$STATE_FILE" ] || return 0
+    cp -p "$STATE_FILE" "${STATE_FILE}.bak" 2>/dev/null || true
+    return 0
+}
+
+state_upsert() {
+    local key="$1" rec="$2"
+    local tmp
+    tmp=$(mktemp "$STATE_DIR/.games.db.XXXXXX" 2>/dev/null) || return 1
+    # Preserve the header (which carries no '|' and so never matches a key) and
+    # any other comment, while replacing the record for this key.
+    if ! awk -F'|' -v k="$key" '/^#/ { print; next } $1 != k' \
+            "$STATE_FILE" > "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! grep -q '^#' "$tmp" 2>/dev/null; then
+        # Never write a file without its version header, or the next release
+        # cannot tell which format it is reading.
+        local tmp2="${tmp}.hdr"
+        printf '%s\n' "$STATE_HEADER" > "$tmp2" 2>/dev/null && cat "$tmp" >> "$tmp2" 2>/dev/null && mv -f "$tmp2" "$tmp" 2>/dev/null
+        rm -f "$tmp2"
+    fi
+    printf '%s\n' "$rec" >> "$tmp"
+    backup_state
+    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    return 0
+}
+
+save_summary_record() {
+    local name="$1"
+    local path="$2"
+    # Initialised empty: the script itself does not run with `set -u`, but the
+    # test harness does, and an unset local referenced before assignment makes
+    # the whole suite abort.
+    local after_raw="" after_total="" a_pct="" a_disk="" a_uncomp=""
+    local u_mib=0 d_mib=0 s_mib=0 saved_str="" record=0
+
+    name="${name//|/ }"
+    local state_path
+    state_path=$(encode_field "$path")
+
+    if [ "$COMPSIZE_OK" -eq 1 ]; then
+        after_raw=$(run_compsize "$path" || true)
+        after_total=$(echo "$after_raw" | grep "^TOTAL" || true)
+    fi
+
+    if [ -n "$after_total" ]; then
+        a_disk=$(echo "$after_total" | awk '{print $3}')
+        a_uncomp=$(echo "$after_total" | awk '{print $4}')
+
+        u_mib=$(to_mib "$a_uncomp")
+        d_mib=$(to_mib "$a_disk")
+        s_mib=$(( u_mib - d_mib ))
+        if [ "$s_mib" -lt 0 ]; then s_mib=0; fi
+
+        a_pct="$(awk -v u="$u_mib" -v d="$d_mib" 'BEGIN {
+            if (u > 0) printf "%.1f%%", (u - d) * 100 / u;
+            else print "0.0%"
+        }')"
+
+        if [ "$s_mib" -ge 1024 ]; then
+            saved_str="$(awk -v m="$s_mib" 'BEGIN {printf "%.2f GB", m/1024}')"
+        else
+            saved_str="${s_mib} MB"
+        fi
+        record=1
+    else
+        local du_val
+        du_val=$(du -sh "$path" 2>/dev/null | awk '{print $1}')
+        a_uncomp="${du_val:-Desc}"
+        a_disk="${du_val:-Desc}"
+        saved_str="n/a"
+        a_pct="n/a"
+        u_mib=0
+        d_mib=0
+        s_mib=0
+    fi
+
+    # A successful defragmentation is remembered even when compsize could not
+    # measure it (compsize absent, or it failed on this tree). The zeroed
+    # trailing fields mark the record as unmeasured: every statistics reader
+    # skips a record whose uncompressed size is 0, but the presence of the
+    # record still stops the game being re-compressed on every single run.
+    if [ "$record" -eq 1 ]; then
+        state_upsert "$state_path" "$(printf '%s|%s|%s|%s|%s|%s|%s|%s|%s' \
+            "$state_path" "$name" "$(date +%s)" "$a_uncomp" "$a_disk" "$saved_str" "$s_mib" "$u_mib" "$d_mib")"
+    else
+        state_upsert "$state_path" "$(printf '%s|%s|%s|%s|%s|%s|%s|%s|%s' \
+            "$state_path" "$name" "$(date +%s)" "$a_uncomp" "$a_disk" "n/a" 0 0 0)"
+    fi
+
+    printf "%s\n" "$a_uncomp|$a_disk|$saved_str|$a_pct"
+}
+
+# Keep state writes behind a successful defragmentation result. Callers may
+# capture the summary, but a failed btrfs command must never advance history.
+compress_and_record() {
+    local name="$1" path="$2"
+    compress_directory "$path" || return $?
+    save_summary_record "$name" "$path"
+}
+
+print_summary_block() {
+    local name="$1" b_disk="$2" result="$3"
+    local a_uncomp a_disk saved_str a_pct
+    IFS='|' read -r a_uncomp a_disk saved_str a_pct <<< "$result"
+    echo "--------------------------------------------------------------------------------"
+    printf "  %-20s %s\n" "Game:" "$name"
+    printf "  %-20s %s\n" "Original Size:" "$a_uncomp"
+    printf "  %-20s %s\n" "Size Before:" "$b_disk"
+    printf "  %-20s %s\n" "Size After (ZSTD):" "$a_disk"
+    printf "  %-20s %b\n" "Space Saved:" "${GREEN}${saved_str}${RESET} (${a_pct:-0.0%} saved)"
+    echo "--------------------------------------------------------------------------------"
+}
+
+# The state file records, per install path:
+#   escaped-path|name|compressed-at|uncompressed|disk|saved|savedMiB|uncompMiB|diskMiB
+# The trailing figures are only present once the game has actually been measured
+# with compsize, so they are what lets us predict whether re-compressing after an
+# update is worth the time. A leading '#' comment carries the format version.
+#
+# Older releases keyed records by game name only (8 fields with measurements,
+# or 2 fields with just a timestamp). Those are captured into LEGACY_* rather
+# than discarded, and matched to a path once the libraries are known, so an
+# upgrade does not cost the user their whole compression history.
+load_state() {
+    STATE_MAP=()
+    STATE_RATIO=()
+    LEGACY_MAP=()
+    LEGACY_RATIO=()
+    LEGACY_REC=()
+    local -a fields
+    local key name ts u_mib d_mib state_line
+    while IFS= read -r state_line; do
+        case "$state_line" in
+            '#'*|'') continue ;;
+        esac
+        IFS='|' read -r -a fields <<< "$state_line"
+        if [ "${#fields[@]}" -ge 9 ]; then
+            decode_field "${fields[0]}"
+            key="$DECODED_FIELD"; ts="${fields[2]}"
+            u_mib="${fields[7]}"; d_mib="${fields[8]}"
+            [ -n "$key" ] || continue
+            STATE_MAP["$key"]="$ts"
+            if [ -n "${u_mib:-}" ] && [ "${u_mib:-0}" -gt 0 ] 2>/dev/null; then
+                STATE_RATIO["$key"]=$(awk -v u="$u_mib" -v d="${d_mib:-0}" \
+                    'BEGIN { printf "%.6f", (u - d) / u }')
+            fi
+            continue
+        fi
+        # Legacy name-keyed forms. The last line for a name wins, which mirrors
+        # how the old state_upsert replaced by name.
+        name="${fields[0]:-}"
+        [ -n "$name" ] || continue
+        ts="${fields[1]:-0}"
+        LEGACY_MAP["$name"]="$ts"
+        if [ "${#fields[@]}" -ge 8 ]; then
+            # name|ts|uncomp|disk|saved|savedMiB|uncompMiB|diskMiB
+            LEGACY_REC["$name"]="${fields[2]}|${fields[3]}|${fields[4]}|${fields[5]}|${fields[6]}|${fields[7]}"
+            u_mib="${fields[6]:-0}"; d_mib="${fields[7]:-0}"
+            if [ "${u_mib:-0}" -gt 0 ] 2>/dev/null; then
+                LEGACY_RATIO["$name"]=$(awk -v u="$u_mib" -v d="${d_mib:-0}" \
+                    'BEGIN { printf "%.6f", (u - d) / u }')
+            fi
+        fi
+    done < "$STATE_FILE"
+}
+
+# After discovery, turn any legacy name-keyed record that is now matched to
+# exactly one install path into a v2, path-keyed record, then drop the legacy
+# lines. A name shared by several installs is deliberately left alone: there is
+# no way to know which copy the old record described, and guessing would apply
+# one game's history to another.
+persist_legacy_migration() {
+    [ "$#" -gt 0 ] || return 0
+    local pair name path rec
+    local -A name_count=() migrated=()
+    for pair in "$@"; do
+        name="${pair%%$'\t'*}"
+        name_count["$name"]=$(( ${name_count["$name"]:-0} + 1 ))
+    done
+    for pair in "$@"; do
+        name="${pair%%$'\t'*}"; path="${pair#*$'\t'}"
+        [ -n "$name" ] && [ -n "$path" ] || continue
+        [ "${name_count["$name"]:-0}" -eq 1 ] || continue
+        rec="${LEGACY_REC["$name"]:-| |n/a|n/a|0|0|0}"
+        state_upsert "$(encode_field "$path")" \
+            "$(printf '%s|%s|%s|%s' "$(encode_field "$path")" "$name" "${LEGACY_MAP["$name"]:-0}" "$rec")"
+        migrated["$name"]=1
+    done
+    [ "${#migrated[@]}" -gt 0 ] || return 0
+
+    # Drop only the legacy lines that were actually migrated. A legacy name that
+    # could not be matched with certainty (shared by several installs, or with
+    # no matching directory at all) is kept, so a later run can still use it.
+    local tmp="${STATE_FILE}.mig" drop_list=""
+    for name in "${!migrated[@]}"; do
+        drop_list="$drop_list$name"$'\n'
+    done
+    awk -F'|' -v drop="$drop_list" '
+        BEGIN { n = split(drop, D, "\n"); for (i = 1; i <= n; i++) if (D[i] != "") skip[D[i]] = 1 }
+        /^#/ { print; next }
+        NF >= 9 { print; next }
+        { if ($1 in skip) next; print }
+    ' "$STATE_FILE" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    backup_state
+    mv -f "$tmp" "$STATE_FILE" 2>/dev/null
+    rm -f "$tmp"
+    return 0
+}
+
+discover_data() {
+    VDF_FILES=(
+        "$HOME/.local/share/Steam/steamapps/libraryfolders.vdf"
+        "$HOME/.local/share/Steam/config/libraryfolders.vdf"
+        "$HOME/.steam/steam/steamapps/libraryfolders.vdf"
+        "$HOME/.steam/steam/config/libraryfolders.vdf"
+        "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/libraryfolders.vdf"
+        "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/config/libraryfolders.vdf"
+    )
+
+    RAW_LIBS=()
+    for vdf in "${VDF_FILES[@]}"; do
+        if [ -f "$vdf" ]; then
+        while IFS= read -r p; do
+            [ -d "$p/steamapps/common" ] && RAW_LIBS+=("$p/steamapps/common")
+        done < <(parse_vdf_libraries "$vdf")
+        fi
+    done
+
+    [ -d "$HOME/.local/share/Steam/steamapps/common" ] && RAW_LIBS+=("$HOME/.local/share/Steam/steamapps/common")
+
+    if [ -s "$CUSTOM_LIBS_FILE" ]; then
+        while IFS= read -r c_path; do
+            [ -d "$c_path" ] && RAW_LIBS+=("$c_path")
+        done < "$CUSTOM_LIBS_FILE"
+    fi
+
+    declare -A seen_libs
+    LIBS=()
+    for lib in "${RAW_LIBS[@]}"; do
+        [ -d "$lib" ] || continue
+        [ -n "${seen_libs[$lib]}" ] && continue
+        local fs_type
+        fs_type=$(stat -f -c %T "$lib" 2>/dev/null || true)
+        if [ "$fs_type" = "btrfs" ]; then
+            LIBS+=("$lib")
+            seen_libs["$lib"]=1
+        fi
+    done
+
+    load_state
+
+    GAMES_NAME=()
+    GAMES_PATH=()
+    GAMES_STATUS=()
+    GAMES_BYTES=()
+    GAMES_SIZE=()
+    GAMES_PREDICT=()
+    # Per game, "pct|level" from the community table when this machine has not
+    # measured it and the library's zstd level matches the row. Empty otherwise.
+    # GAMES_HINT_LOW[i] is 1 when that hint is under min_gain_pct: an advisory
+    # only, never a held-back game, because only a local pass can measure it.
+    GAMES_HINT=()
+    GAMES_HINT_LOW=()
+    STAT_COMP_COUNT=0
+    STAT_UPD_COUNT=0
+    STAT_UNCOMP_COUNT=0
+    LOW_YIELD_COUNT=0
+    STAT_RUNNING_COUNT=0
+    SKIPPED_STUB_COUNT=0
+    SKIPPED_STUB_NAMES=()
+    MIGRATION_PAIRS=()
+    local min_bytes=$(( MIN_SIZE_MIB * 1024 * 1024 ))
+
+    # After LIBS is populated, and before the per-game loop below, which is the
+    # first thing that needs the answer.
+    discover_running_games
+
+    for lib in "${LIBS[@]}"; do
+        # The zstd level is a property of the filesystem, so it is resolved once
+        # per library and the table is loaded for that level only. A level-1
+        # mount must never be shown a level-6 measurement as if it applied.
+        local lib_level
+        lib_level=$(effective_level "$lib" 2>/dev/null || echo 3)
+        load_ratios_hint "$lib_level"
+        for dir in "$lib"/*/; do
+            [ -d "$dir" ] || continue
+            local name
+            name=${dir%/*}; name=${name##*/}
+            is_ignored "$name" && continue
+
+            local game_path="${dir%/}"
+            local comp_time="${STATE_MAP["$game_path"]:-}"
+            local legacy_used=0
+            # If this install has no path-keyed record yet, fall back to a
+            # name-keyed record from an older release and plan to migrate it.
+            # A name matches only when exactly one discovered install uses it,
+            # so two copies of the same game never inherit each other's history.
+            if [ -z "$comp_time" ] && [ -n "${LEGACY_MAP["$name"]:-}" ]; then
+                comp_time="${LEGACY_MAP["$name"]}"
+                legacy_used=1
+            fi
+            local g_bytes g_files g_newer
+            read -r g_bytes g_files g_newer g_human <<< "$(scan_game_dir "$dir" "${comp_time:-0}")"
+
+            if [ "${g_bytes:-0}" -lt "$min_bytes" ]; then
+                SKIPPED_STUB_COUNT=$(( SKIPPED_STUB_COUNT + 1 ))
+                SKIPPED_STUB_NAMES+=("$name")
+                continue
+            fi
+
+            GAMES_NAME+=("$name")
+            GAMES_PATH+=("$dir")
+            GAMES_BYTES+=("${g_bytes:-0}")
+            GAMES_SIZE+=("${g_human:-0B}")
+
+            local st ratio="" predicted=0
+            if [ -n "$comp_time" ]; then
+                if [ "${g_newer:-0}" -eq 1 ]; then
+                    st="UPDATED"
+                else
+                    st="COMPRESSED"
+                fi
+                if [ "$legacy_used" -eq 1 ]; then
+                    ratio="${LEGACY_RATIO["$name"]:-}"
+                    MIGRATION_PAIRS+=("$name"$'\t'"$game_path")
+                else
+                    ratio="${STATE_RATIO["$game_path"]:-}"
+                fi
+            else
+                st="UNCOMPRESSED"
+            fi
+
+            # Is re-compressing this game worth the time?  A defragmentation
+            # pass has to push every byte of the game through zstd, so its cost
+            # scales with size; the saving is size * the game's measured
+            # compression ratio.  Benefit per unit of work is therefore just
+            # the ratio, independent of size - which is why the test is a
+            # percentage and not an absolute byte count.  A 100 GB game that
+            # only shrinks to 98 GB is not worth an hour, but neither is a
+            # 200 MB one.  The absolute floor exists only to avoid spending
+            # more effort on a 3 MB gain than it is worth.
+            #
+            # Only games we have actually measured qualify here; a game with no
+            # history has to be compressed once before anything is predictable.
+            if [ -n "$ratio" ] && [ "$st" != "COMPRESSED" ]; then
+                # The thresholds may be fractional, so the comparison has to
+                # happen in awk rather than in a bash integer test.
+                read -r predicted low <<< "$(awk \
+                    -v b="${g_bytes:-0}" -v r="$ratio" \
+                    -v mp="$MIN_GAIN_PCT" -v mm="$MIN_GAIN_MIB" \
+                    'BEGIN { p = b * r / 1048576; low = 0
+                             if (mp > 0 && r * 100 < mp) low = 1
+                             if (mm > 0 && p < mm)         low = 1
+                             printf "%d %d", p, low }')"
+                if [ "$low" -eq 1 ]; then
+                    st="LOW YIELD"
+                fi
+            fi
+
+            # Running wins over every other state: a game in play is not work
+            # to be done later, it is work to not do at all, and the fix is to
+            # close the game rather than to change a threshold.
+            if [ -n "${RUNNING_DIRS["$game_path"]:-}" ]; then
+                st="RUNNING"
+            fi
+
+            # Counted only once the final state is settled, so a game that is
+            # both updated and running is not tallied under both.
+            case "$st" in
+                "COMPRESSED")   STAT_COMP_COUNT=$((STAT_COMP_COUNT + 1)) ;;
+                "UPDATED")      STAT_UPD_COUNT=$((STAT_UPD_COUNT + 1)) ;;
+                "UNCOMPRESSED") STAT_UNCOMP_COUNT=$((STAT_UNCOMP_COUNT + 1)) ;;
+                "LOW YIELD")    LOW_YIELD_COUNT=$((LOW_YIELD_COUNT + 1)) ;;
+                "RUNNING")      STAT_RUNNING_COUNT=$((STAT_RUNNING_COUNT + 1)) ;;
+            esac
+
+            # Community hint: display-only, and only for a game this machine has
+            # not measured itself, at the library's own zstd level. It never
+            # changes a game's state and never triggers a compression.
+            local hint="" hint_low=0
+            if [ -z "$ratio" ] && { [ "$st" = "UNCOMPRESSED" ] || [ "$st" = "UPDATED" ]; } \
+                && [ -n "${HINT_RATIO["$name"]:-}" ]; then
+                hint="${HINT_RATIO["$name"]}|$lib_level"
+                hint_low="${HINT_LOW["$name"]:-0}"
+            fi
+
+            GAMES_STATUS+=("$st")
+            GAMES_PREDICT+=("$predicted")
+            GAMES_HINT+=("$hint")
+            GAMES_HINT_LOW+=("$hint_low")
+
+        done
+    done
+
+    # Persist any legacy history that matched a single install, so the migration
+    # is a one-time cost and older records stop being candidates next run.
+    if [ "${#MIGRATION_PAIRS[@]}" -gt 0 ]; then
+        persist_legacy_migration "${MIGRATION_PAIRS[@]}"
+    fi
+}
+
+show_statistics() {
+    clear
+    tput cnorm
+    echo "================================================================================"
+    echo "  COMPRESSION STATISTICS"
+    echo "================================================================================"
+    printf "${BOLD}%-36s %10s %10s %10s %8s${RESET}\n" "Game Name" "Original" "On Disk" "Saved" "Saved %"
+    echo "--------------------------------------------------------------------------------"
+
+    local totals
+    totals=$(awk -F'|' -v BOLD="$BOLD" -v RESET="$RESET" '
+        # LC_ALL=C is forced, so length() and substr() are byte-oriented and a
+        # plain cut can land inside a multi-byte character. Keep at most n-1
+        # bytes and step back until the next byte is not a UTF-8 continuation
+        # byte (0x80-0xBF), so the result is always whole characters.
+        function fit(s, n,   i, c) {
+            if (length(s) <= n) return s
+            i = n - 1
+            while (i > 0) {
+                c = substr(s, i + 1, 1)
+                if (c < "\200" || c > "\277") break
+                i--
+            }
+            return substr(s, 1, i) "…"
+        }
+        NF >= 9 && $1 != "" && $8 != "" && $9 != "" && $8 + 0 > 0 {
+            pct = ($8 > 0) ? int(($7 * 100) / $8) : 0
+            printf "%-36s %10s %10s %10s %7d%%\n", fit($2, 35), $4, $5, $6, pct
+            total_uncomp += $8
+            total_disk   += $9
+            total_saved  += $7
+            count++
+        }
+        END {
+            print "###" total_uncomp "|" total_disk "|" total_saved "|" count
+        }
+    ' "$STATE_FILE")
+
+    echo "$totals" | grep -v "^###"
+
+    local summary_line
+    summary_line=$(echo "$totals" | grep "^###")
+    IFS='|' read -r total_uncomp total_disk total_saved count <<< "${summary_line#\#\#\#}"
+
+    echo "--------------------------------------------------------------------------------"
+    if [ -z "$count" ] || [ "$count" -eq 0 ]; then
+        echo "  No compressed games recorded yet."
+    else
+        local t_uncomp_str t_disk_str t_saved_str overall_pct=0
+        if [ "$total_uncomp" -gt 0 ]; then overall_pct=$(( (total_saved * 100) / total_uncomp )); fi
+        t_uncomp_str="$(awk -v m="$total_uncomp" 'BEGIN {printf "%.2f GB", m/1024}')"
+        t_disk_str="$(awk -v m="$total_disk" 'BEGIN {printf "%.2f GB", m/1024}')"
+        t_saved_str="$(awk -v m="$total_saved" 'BEGIN {printf "%.2f GB", m/1024}')"
+        printf "  %-26s %s\n" "Total Games Compressed:" "$count"
+        printf "  %-26s %s\n" "Total Original Size:" "$t_uncomp_str"
+        printf "  %-26s %s\n" "Total Size on Disk:" "$t_disk_str"
+        printf "  %-26s %b\n" "TOTAL SPACE SAVED:" "${GREEN}${t_saved_str}${RESET} (${overall_pct}% overall reduction)"
+    fi
+    echo "================================================================================"
+    echo -e "  ${DIM}Press any key to return to library...${RESET}"
+    read_input
+    tput civis
+    NEEDS_FULL_CLEAR=1
+}
+
+manage_settings() {
+    while true; do
+        clear
+        tput civis
+        local cur_mode
+        cur_mode=$(cat "$THROTTLE_FILE" 2>/dev/null || echo "0")
+        local mode_desc="${GREEN}Full Speed (Normal CPU & I/O priority)${RESET}"
+        if [ "$cur_mode" = "1" ]; then mode_desc="${YELLOW}Eco Mode (Low CPU/IO priority via ionice/nice)${RESET}"; fi
+
+        echo "================================================================================"
+        echo "  SETTINGS & PREFERENCES"
+        echo "================================================================================"
+        echo -e "  Performance Mode: $mode_desc"
+        echo "--------------------------------------------------------------------------------"
+        echo "Custom library paths:"
+        if [ ! -s "$CUSTOM_LIBS_FILE" ]; then
+            echo "  (none)"
+        else
+            # -ba numbers empty lines too, so the printed index always matches the
+            # line `sed "${n}d"` below removes. Without it, a blank line in the
+            # file shifts every number and removal deletes the wrong library.
+            nl -ba -w2 -s") " "$CUSTOM_LIBS_FILE"
+        fi
+        echo "--------------------------------------------------------------------------------"
+        echo "  [1] Toggle Speed / Throttle mode"
+        echo "  [2] Add custom library path"
+        echo "  [3] Remove custom library path"
+        echo "  [b] Back to main menu"
+        echo "================================================================================"
+        echo -e "  ${DIM}Press a key [1, 2, 3, b]...${RESET}"
+
+        local s_opt
+        read_input
+        s_opt="$KEY"
+        case "$s_opt" in
+            1)
+                if [ "$cur_mode" = "0" ]; then echo "1" > "$THROTTLE_FILE"; else echo "0" > "$THROTTLE_FILE"; fi ;;
+            2)
+                tput cnorm
+                echo ""
+                read -r -p "Paste library path: " new_path
+                tput civis
+                new_path="${new_path/#\~/$HOME}"
+                if [ -d "$new_path/steamapps/common" ]; then
+                    new_path="$new_path/steamapps/common"
+                fi
+                if [ ! -d "$new_path" ]; then
+                    echo -e "${RED}Error: Directory does not exist!${RESET}" ; sleep 1
+                else
+                    local fs_type
+                    fs_type=$(stat -f -c %T "$new_path" 2>/dev/null || true)
+                    if [ "$fs_type" != "btrfs" ]; then
+                        echo -e "${YELLOW}Warning: Path is on $fs_type, NOT Btrfs.${RESET}" ; sleep 2
+                    fi
+                    echo "$new_path" >> "$CUSTOM_LIBS_FILE"
+                fi ;;
+            3)
+                if [ -s "$CUSTOM_LIBS_FILE" ]; then
+                    tput cnorm
+                    echo ""
+                    read -r -p "Enter number to remove: " rem_num
+                    tput civis
+                    # `sed '0d'` is an error, so 0 (and anything non-numeric) is
+                    # ignored rather than allowed to fail silently.
+                    if [[ "$rem_num" =~ ^[0-9]+$ ]] && [ "$rem_num" -ge 1 ]; then
+                        sed -i "${rem_num}d" "$CUSTOM_LIBS_FILE"
+                    fi
+                fi ;;
+            b|B|q|Q|$'\x1b'|"")
+                NEEDS_FULL_CLEAR=1
+                return ;;
+            *)
+                drain_pending_input ;;
+        esac
+    done
+}
+
+draw_progress_bar() {
+    local current="$1" total="$2" width="${3:-40}"
+    local filled empty pct
+    if [ "$total" -le 0 ]; then total=1; fi
+    pct=$(( (current * 100) / total ))
+    filled=$(( (current * width) / total ))
+    empty=$(( width - filled ))
+    printf "  ["
+    printf "%${filled}s" | tr ' ' '#'
+    printf "%${empty}s" | tr ' ' '-'
+    printf "] %3d%% (%d/%d)\n" "$pct" "$current" "$total"
+}
+
+batch_compress_routine() {
+    clear
+    tput cnorm
+    local pending=0
+    local -a targets_idx=() skipped_low=()
+    # LOW YIELD is disabled only when *both* thresholds are zero. Testing just
+    # min_gain_mib here let a game held back by a nonzero min_gain_pct be
+    # compressed anyway, contradicting --status and --dry-run.
+    local low_disabled
+    low_disabled=$(awk -v p="$MIN_GAIN_PCT" -v m="$MIN_GAIN_MIB" \
+        'BEGIN { print (p + 0 == 0 && m + 0 == 0) ? 1 : 0 }')
+    for i in "${!GAMES_STATUS[@]}"; do
+        case "${GAMES_STATUS[$i]}" in
+            "UNCOMPRESSED"|"UPDATED") targets_idx+=("$i") ;;
+            "LOW YIELD")
+                if [ "$low_disabled" -eq 1 ]; then
+                    targets_idx+=("$i")
+                else
+                    skipped_low+=("$i")
+                fi
+                ;;
+        esac
+    done
+    pending=${#targets_idx[@]}
+
+    if [ "$pending" -eq 0 ]; then
+        if [ "${#skipped_low[@]}" -gt 0 ]; then
+            echo -e "${YELLOW}Nothing to compress: ${#skipped_low[@]} game(s) are held back as low yield.${RESET}"
+            echo "    Set min_gain_pct=0 and min_gain_mib=0 to compress them anyway."
+        else
+            echo -e "${GREEN}All games are already compressed!${RESET}"
+        fi
+        if [ "$STAT_RUNNING_COUNT" -gt 0 ]; then
+            echo -e "${YELLOW}$STAT_RUNNING_COUNT game(s) are running right now and were left alone.${RESET}"
+            echo "    Close them and run this again to include them."
+        fi
+        sleep 1
+        NEEDS_FULL_CLEAR=1
+        return
+    fi
+
+    ensure_sudo
+
+    echo "================================================================================"
+    echo "  BATCH COMPRESSION (Target games: $pending)"
+    if [ "$STAT_RUNNING_COUNT" -gt 0 ]; then
+        echo "  $STAT_RUNNING_COUNT running game(s) skipped - close them to include them."
+    fi
+    if [ "${#skipped_low[@]}" -gt 0 ]; then
+        echo "  ${#skipped_low[@]} low-yield game(s) held back (set min_gain_pct/min_gain_mib to 0 to include them)."
+    fi
+    echo "  Press Ctrl+C anytime to cancel safely."
+    echo "================================================================================"
+    echo ""
+
+    local done_count=0 skipped_running=0 failed_count=0
+    for idx in "${targets_idx[@]}"; do
+        local g_name="${GAMES_NAME[$idx]}"
+        local g_path="${GAMES_PATH[$idx]}"
+
+        # Re-checked here rather than only at discovery time: a game can be
+        # launched in the minutes between building the list and reaching it,
+        # and defragmenting a running game is the one failure worth avoiding.
+        # A /proc pass is milliseconds, against minutes of compression.
+        discover_running_games
+        if game_is_running "$g_path"; then
+            echo -e "${YELLOW}  Skipping ${g_name}: it started running since the list was built.${RESET}"
+            skipped_running=$(( skipped_running + 1 ))
+            continue
+        fi
+
+        echo ""
+        echo -e "${BOLD}[$((done_count + 1))/$pending] Compressing: ${CYAN}$g_name${RESET}..."
+        draw_progress_bar "$done_count" "$pending"
+
+        local b_raw b_disk result
+        b_raw=$(run_compsize "$g_path" || true)
+        b_disk=$(echo "$b_raw" | awk '/^TOTAL/ {print $3}')
+        [ -n "$b_disk" ] || b_disk="N/A"
+
+        local s_t e_t
+        s_t=$(date +%s)
+        if ! result=$(compress_and_record "$g_name" "$g_path"); then
+            echo -e "${RED}  Defragmentation failed for ${g_name}; leaving its saved state unchanged.${RESET}"
+            failed_count=$(( failed_count + 1 ))
+            done_count=$(( done_count + 1 ))
+            continue
+        fi
+        e_t=$(( $(date +%s) - s_t ))
+
+        print_summary_block "$g_name" "$b_disk" "$result"
+        echo -e "    ${GREEN}✓ Finished in ${e_t}s${RESET}"
+
+        GAMES_STATUS[$idx]="COMPRESSED"
+        CHECKED_STATE[${GAMES_PATH[$idx]}]=0
+        done_count=$(( done_count + 1 ))
+    done
+
+    echo ""
+    draw_progress_bar "$done_count" "$pending"
+    if [ "$skipped_running" -gt 0 ]; then
+        echo -e "${YELLOW}$skipped_running game(s) were skipped because they started running.${RESET}"
+    fi
+    echo ""
+    if [ "$failed_count" -gt 0 ]; then
+        echo -e "${YELLOW}Batch finished with $failed_count defragmentation failure(s). Press any key to return...${RESET}"
+    else
+        echo -e "${GREEN}Batch compression finished! Press any key to return...${RESET}"
+    fi
+    read_input
+    tput civis
+    NEEDS_FULL_CLEAR=1
+}
+
+join_stub_names() {
+    local out="" n
+    for n in "${SKIPPED_STUB_NAMES[@]}"; do
+        if [ -z "$out" ]; then out="$n"; else out="$out, $n"; fi
+    done
+    printf '%s' "$out"
+}
+
+bytes_human() {
+    awk -v b="${1:-0}" 'BEGIN {
+        if (b < 1024) { printf "%dB\n", b; exit }
+        units = "KMGTPE"
+        i = 0
+        while (b >= 1024 && i < 5) { b /= 1024; i++ }
+        printf "%.1f%c\n", b, substr(units, i, 1)
+    }'
+}
+
+# Clamp a game name to a column budget, so one long name cannot wrap the box
+# border. LC_ALL=C is forced, so ${#s} counts bytes rather than characters and a
+# naive cut can land mid-character and leave a half glyph on screen. Step back
+# to a character boundary instead: a byte is a boundary if it is not a
+# UTF-8 continuation byte (0x80-0xBF).
+#
+# Sets NAME_FIT rather than echoing: a row is re-rendered on every keypress, and
+# a command substitution would fork once per visible row per keystroke.
+NAME_FIT=""
+fit_name() {
+    local s="$1" max="$2" i b
+    if [ "${#s}" -le "$max" ]; then
+        NAME_FIT="$s"
+        return 0
+    fi
+    i=$(( max - 1 ))
+    while [ "$i" -gt 0 ]; do
+        printf -v b '%d' "'${s:i:1}"
+        if [ "$b" -lt 128 ] || [ "$b" -gt 191 ]; then
+            break
+        fi
+        i=$(( i - 1 ))
+    done
+    NAME_FIT="${s:0:i}…"
+}
+
+# A compact bar, e.g. "############....". Used by --status. Deliberately ASCII:
+# LC_ALL=C is forced for number parsing, and locale-independent output is worth
+# more here than a prettier glyph.
+bar() {
+    local current="$1" total="$2" width="${3:-28}" filled empty
+    [ "$total" -le 0 ] && { printf '%*s' "$width" '' | tr ' ' '.'; return; }
+    filled=$(( current * width / total ))
+    [ "$filled" -gt "$width" ] && filled=$width
+    empty=$(( width - filled ))
+    printf '%*s' "$filled" '' | tr ' ' '#'
+    printf '%*s' "$empty" '' | tr ' ' '.'
+}
+
+# Map a game state to a colour, so a wide report reads at a glance.
+status_color() {
+    case "$1" in
+        COMPRESSED)   printf '%s' "$GREEN" ;;
+        UPDATED)      printf '%s' "$MAGENTA" ;;
+        UNCOMPRESSED) printf '%s' "$YELLOW" ;;
+        "LOW YIELD")  printf '%s' "$DIM" ;;
+        RUNNING)      printf '%s' "$CYAN" ;;
+        *)            printf '%s' "$RESET" ;;
+    esac
+}
+
+cmd_status() {
+    local i n_shown=0 n_total=0 n_pending=0 n_low=0 n_running=0
+
+    if [ "${#LIBS[@]}" -gt 0 ]; then
+        local doable=$(( ${#GAMES_NAME[@]} - STAT_COMP_COUNT - STAT_RUNNING_COUNT ))
+        [ "$doable" -lt 0 ] && doable=0
+        local pct=0
+        [ "${#GAMES_NAME[@]}" -gt 0 ] && pct=$(( STAT_COMP_COUNT * 100 / ${#GAMES_NAME[@]} ))
+        printf '%s\n' "================================================================================"
+        printf '  %bBTRFS GAME COMPRESSOR%b %bv%s%b   %d game(s) across %d library(ies)\n' \
+            "${BOLD}${CYAN}" "$RESET" "$DIM" "$VERSION" "$RESET" \
+            "${#GAMES_NAME[@]}" "${#LIBS[@]}"
+        printf '  [%s] %d%% compressed\n' \
+            "$(bar "$STAT_COMP_COUNT" "${#GAMES_NAME[@]}")" "$pct"
+        printf '%s\n' "================================================================================"
+        printf '\n'
+    fi
+
+    printf '%b%-40s %-14s %10s %s%b\n' "$BOLD" "GAME" "STATUS" "SIZE" "EXPECTED GAIN" "$RESET"
+    printf '%s\n' "--------------------------------------------------------------------------------"
+    for i in "${!GAMES_NAME[@]}"; do
+        local st="${GAMES_STATUS[$i]}"
+        if [ "$OPT_PENDING_ONLY" -eq 1 ] && [ "$st" = "COMPRESSED" ]; then
+            continue
+        fi
+        n_total=$(( n_total + 1 ))
+        local note=""
+        case "$st" in
+            "COMPRESSED")   n_shown=$(( n_shown + 1 )) ;;
+            "UPDATED"|"UNCOMPRESSED")
+                n_pending=$(( n_pending + 1 ))
+                # A community hint is shown only when the library's zstd level
+                # matches the row it came from, and it is labelled as a table
+                # figure so it is never mistaken for a local measurement.
+                if [ -n "${GAMES_HINT[$i]:-}" ]; then
+                    note=$(printf ' table says ~%s%% (zstd%s)' \
+                        "${GAMES_HINT[$i]%%|*}" "${GAMES_HINT[$i]##*|}")
+                    if [ "${GAMES_HINT_LOW[$i]:-0}" -eq 1 ]; then
+                        note="$note - likely low yield"
+                    fi
+                fi
+                ;;
+            "LOW YIELD")
+                n_low=$(( n_low + 1 ))
+                note=$(printf ' ~%s expected' "$(bytes_human "$(( ${GAMES_PREDICT[$i]:-0} * 1048576 ))")")
+                ;;
+            "RUNNING")
+                n_running=$(( n_running + 1 ))
+                note=" (close the game first)"
+                ;;
+        esac
+        fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
+        printf '%-40s %b%-14s%b %10s %s\n' \
+            "$NAME_FIT" "$(status_color "$st")" "$st" "$RESET" "${GAMES_SIZE[$i]}" "$note"
+    done
+    printf '%s\n' "--------------------------------------------------------------------------------"
+    printf 'libraries: %d   games: %d   pending: %d   compressed: %d   low-yield: %d' \
+        "${#LIBS[@]}" "$n_total" "$n_pending" "$n_shown" "$n_low"
+    if [ "$n_running" -gt 0 ]; then
+        printf '   running: %d' "$n_running"
+    fi
+    printf '\n'
+    if [ "$n_pending" -eq 0 ] && [ "$n_total" -gt 0 ] && [ "$n_running" -eq 0 ]; then
+        printf '%bAll games compressed - nothing to do.%b\n' "$GREEN" "$RESET"
+    fi
+    if [ "$SKIPPED_STUB_COUNT" -gt 0 ]; then
+        printf 'skipped:   %d empty install(s) under %d MiB (%s)\n' \
+            "$SKIPPED_STUB_COUNT" "$MIN_SIZE_MIB" "$(join_stub_names)"
+    fi
+    local i lib
+    for lib in "${LIBS[@]}"; do
+        local mp mlev
+        mp=$(findmnt -no TARGET --target "$lib" 2>/dev/null || true)
+        mlev=$(mount_zstd_level "$lib" || true)
+        printf 'zstd:      %s -> mount %s%s, defragment level %s%s\n' \
+            "$lib" "${mp:-?}" "${mlev:+ (level $mlev)}" \
+            "$(effective_level "$lib")" \
+            "$(is_removable_media "$lib" && echo ', removable media')"
+    done
+    case "$PLATFORM" in
+        steamos)  printf 'platform:  SteamOS%s\n' \
+                       "$(grep -q '^VARIANT_ID="steamdeck"' /etc/os-release 2>/dev/null && echo ' (Steam Deck)')" ;;
+        steamdeck) printf 'platform:  Steam Deck\n' ;;
+        cachyos)  printf 'platform:  CachyOS\n' ;;
+        bazzite)   printf 'platform:  Bazzite\n' ;;
+        fedora)    printf 'platform:  Fedora\n' ;;
+        arch)      printf 'platform:  Arch Linux\n' ;;
+        ubuntu)    printf 'platform:  Ubuntu\n' ;;
+        debian)    printf 'platform:  Debian\n' ;;
+        opensuse)  printf 'platform:  openSUSE\n' ;;
+        *)         printf 'platform:  %s\n' "$PLATFORM" ;;
+    esac
+    if [ "$COMPSIZE_OK" -ne 1 ]; then
+        printf 'note: btrfs-compsize not found - savings figures unavailable (run --status for structure only)\n'
+    fi
+    if [ "${#LIBS[@]}" -eq 0 ]; then
+        printf 'note: no btrfs Steam libraries found. Add one with --library /path/to/library\n'
+    fi
+    return 0
+}
+
+cmd_status_json() {
+    local i comma="" n_total=0 n_pending=0 n_compressed=0 n_low=0 n_running=0
+    printf '{"version":%s,"libraries":[' "$(json_quote "$VERSION")"
+    for i in "${!LIBS[@]}"; do
+        [ "$i" -gt 0 ] && printf ','
+        printf '%s' "$(json_quote "${LIBS[$i]}")"
+    done
+    printf '],"games":['
+    for i in "${!GAMES_NAME[@]}"; do
+        local st="${GAMES_STATUS[$i]}"
+        if [ "$OPT_PENDING_ONLY" -eq 1 ] && [ "$st" = "COMPRESSED" ]; then
+            continue
+        fi
+        case "$st" in
+            COMPRESSED) n_compressed=$((n_compressed + 1)) ;;
+            UPDATED|UNCOMPRESSED) n_pending=$((n_pending + 1)) ;;
+            "LOW YIELD") n_low=$((n_low + 1)) ;;
+            RUNNING) n_running=$((n_running + 1)) ;;
+        esac
+        n_total=$((n_total + 1))
+        printf '%s{"name":%s,"path":%s,"status":%s,"size_bytes":%s,"size_display":%s,"expected_gain_mib":%s' \
+            "$comma" "$(json_quote "${GAMES_NAME[$i]}")" \
+            "$(json_quote "${GAMES_PATH[$i]%/}")" "$(json_quote "$st")" \
+            "${GAMES_BYTES[$i]:-0}" "$(json_quote "${GAMES_SIZE[$i]}")" \
+            "${GAMES_PREDICT[$i]:-0}"
+        if [ -n "${GAMES_HINT[$i]:-}" ]; then
+            printf ',"community_hint_pct":%s,"community_hint_level":%s,"community_hint_low_yield":%s' \
+                "${GAMES_HINT[$i]%%|*}" "$(json_quote "zstd${GAMES_HINT[$i]##*|}")" \
+                "$([ "${GAMES_HINT_LOW[$i]:-0}" -eq 1 ] && printf true || printf false)"
+        fi
+        printf '}'
+        comma=,
+    done
+    printf '],"summary":{"game_count":%d,"pending":%d,"compressed":%d,"low_yield":%d,"running":%d,"skipped_empty":%d}}\n' \
+        "$n_total" "$n_pending" "$n_compressed" "$n_low" "$n_running" "$SKIPPED_STUB_COUNT"
+}
+
+cmd_notify() {
+    local i count=0 names="" name entry extra=0
+    local -a pending_names=()
+    # The watch-only timer runs this twice a day, which makes it the natural
+    # place to keep the tool itself current. It never touches a game.
+    maybe_auto_update
+    if ! command -v notify-send >/dev/null 2>&1; then
+        echo "$PROGNAME: --notify requires the optional 'notify-send' command (libnotify)." >&2
+        return 1
+    fi
+    for i in "${!GAMES_NAME[@]}"; do
+        case "${GAMES_STATUS[$i]}" in
+            UPDATED|UNCOMPRESSED)
+                # A community hint rides along with the name so the notice says
+                # what to expect, but only at the level the library actually uses.
+                entry="${GAMES_NAME[$i]}"
+                if [ -n "${GAMES_HINT[$i]:-}" ]; then
+                    entry="$entry (~${GAMES_HINT[$i]%%|*}% at zstd${GAMES_HINT[$i]##*|})"
+                fi
+                pending_names+=("$entry")
+                count=$((count + 1))
+                ;;
+        esac
+    done
+    if [ "$count" -eq 0 ]; then
+        printf 'No actionable games need compression.\n'
+        return 0
+    fi
+    for name in "${pending_names[@]}"; do
+        if [ "${#names}" -ge 180 ]; then
+            extra=$((extra + 1))
+            continue
+        fi
+        if [ -n "$names" ]; then names="$names, "; fi
+        names="$names$name"
+    done
+    [ "$extra" -gt 0 ] && names="$names, and $extra more"
+    notify-send "Btrfs Game Compressor" "$count game(s) changed and can be compressed: $names" \
+        || { echo "$PROGNAME: desktop notification could not be delivered." >&2; return 1; }
+    return 0
+}
+
+# Human-readable byte count from a MiB integer, matching the rest of the tool.
+mib_human() {
+    awk -v m="${1:-0}" 'BEGIN {
+        if (m < 1024) { printf "%d MiB\n", m; exit }
+        gb = m / 1024
+        if (gb < 1024) { printf "%.2f GiB\n", gb; exit }
+        printf "%.2f TiB\n", gb / 1024
+    }'
+}
+
+# Percentage that $1 is of $2, to one decimal place.
+pct_of() {
+    awk -v s="${1:-0}" -v u="${2:-0}" \
+        'BEGIN { if (u > 0) printf "%.1f", s * 100 / u; else printf "0.0" }'
+}
+
+# Seconds to add to a UTC epoch to get local time, from `date +%z` (e.g. +0200).
+# Falls back to UTC if the value is not the expected shape.
+tz_offset_seconds() {
+    local tz sign hh mi
+    tz=$(date +%z 2>/dev/null || true)
+    case "$tz" in
+        [+-][0-9][0-9][0-9][0-9]) ;;
+        *) printf '0'; return 0 ;;
+    esac
+    sign=1
+    [ "${tz:0:1}" = "-" ] && sign=-1
+    hh=$((10#${tz:1:2}))
+    mi=$((10#${tz:3:2}))
+    printf '%d' "$(( sign * (hh * 3600 + mi * 60) ))"
+}
+
+# awk helpers shared by every reader of the state database.
+#
+# Deliberately POSIX awk only. asort() and strftime() are gawk extensions, and
+# Debian/Ubuntu ship mawk as /usr/bin/awk by default, so relying on them makes
+# --history and --benchmark die with "function asort never defined" on exactly
+# the distros most people install from. Octal string escapes are avoided for the
+# same reason. Instead:
+#   - sorting emits a zero-padded key and pipes through sort(1), which also
+#     orders numerically; asort() compares as strings, so "7.90" outranked "68.00"
+#   - dates come from the epoch via the standard civil-from-days algorithm
+#   - column clamping is done in bash by fit_name, already tested on multi-byte
+STATE_AWK_FUNCS='
+    function unescape(s) {
+        gsub(/%0D/, "\r", s); gsub(/%0A/, "\n", s)
+        gsub(/%7C/, "|", s); gsub(/%25/, "%", s)
+        return s
+    }
+    function cleantab(s) { gsub(/\t/, " ", s); return s }
+    function jesc(s,   out, i, c) {
+        out = ""
+        for (i = 1; i <= length(s); i++) {
+            c = substr(s, i, 1)
+            if (c == "\\") out = out "\\\\"
+            else if (c == "\"") out = out "\\\""
+            else out = out c
+        }
+        return out
+    }
+    function civildate(ts,   z, era, doe, yoe, y, doy, mp, d, m, sod, hh, mi) {
+        z = int(ts / 86400) + 719468
+        era = int((z >= 0 ? z : z - 146096) / 146097)
+        doe = z - era * 146097
+        yoe = int((doe - int(doe/1460) + int(doe/36524) - int(doe/146096)) / 365)
+        y = yoe + era * 400
+        doy = doe - (365*yoe + int(yoe/4) - int(yoe/100))
+        mp = int((5*doy + 2)/153)
+        d = doy - int((153*mp+2)/5) + 1
+        m = mp + (mp < 10 ? 3 : -9)
+        if (m <= 2) y++
+        sod = ts - int(ts / 86400) * 86400
+        if (sod < 0) sod += 86400
+        hh = int(sod / 3600)
+        mi = int((sod % 3600) / 60)
+        return sprintf("%04d-%02d-%02d %02d:%02d", y, m, d, hh, mi)
+    }
+'
+
+# Format one epoch second as local YYYY-MM-DD HH:MM without forking `date`.
+epoch_local() {
+    awk -v t="${1:-0}" -v o="$(tz_offset_seconds)" "$STATE_AWK_FUNCS"'
+        BEGIN { print civildate(t + o) }'
+}
+
+# One summary pass over the state file. Emits a single tab-separated line:
+#   rows  before_mib  after_mib  saved_mib  best_pct  best_name  over50  newest
+state_summary() {
+    awk -F'|' "$STATE_AWK_FUNCS"'
+        NF >= 9 && $1 != "" && $8 != "" && $9 != "" {
+            u = $8 + 0; d = $9 + 0
+            if (u <= 0) next
+            rows++; tu += u; td += d
+            pct = (u - d) * 100 / u
+            if (pct > best_pct) { best_pct = pct; best_name = cleantab(unescape($2)) }
+            if (pct >= 50) over50++
+            ts = $3 + 0
+            if (ts > newest) newest = ts
+        }
+        END {
+            printf "%d\t%d\t%d\t%d\t%.2f\t%s\t%d\t%d\n", \
+                rows + 0, tu + 0, td + 0, (tu - td) + 0, best_pct + 0, \
+                best_name, over50 + 0, newest + 0
+        }
+    ' "$STATE_FILE" 2>/dev/null
+}
+
+# History rows, newest first: when, name, raw, on-disk, saved.
+history_rows() {
+    awk -F'|' -v tzoff="$1" "$STATE_AWK_FUNCS"'
+        NF >= 9 && $1 != "" && $8 != "" && $9 != "" && $8 + 0 > 0 {
+            ts = $3 + 0
+            printf "%012d\t%s\t%s\t%s\t%s\t%s\n", \
+                ts, civildate(ts + tzoff), cleantab(unescape($2)), $4, $5, $6
+        }
+    ' "$STATE_FILE" 2>/dev/null | sort -r | cut -f2-
+}
+
+# Benchmark rows, best saving first: name, before_mib, after_mib, pct.
+benchmark_rows() {
+    awk -F'|' "$STATE_AWK_FUNCS"'
+        NF >= 9 && $1 != "" && $8 != "" && $9 != "" {
+            u = $8 + 0; d = $9 + 0
+            if (u <= 0) next
+            pct = (u - d) * 100 / u
+            printf "%08.2f\t%s\t%d\t%d\t%.1f\n", \
+                pct, cleantab(unescape($2)), u, d, pct
+        }
+    ' "$STATE_FILE" 2>/dev/null | sort -r | cut -f2-
+}
+
+cmd_history() {
+    local rows tzoff when name before after savedstr n=0
+    tzoff=$(tz_offset_seconds)
+    rows=$(history_rows "$tzoff")
+    if [ -z "$rows" ]; then
+        printf 'No compression history yet. Run a compression pass to start recording.\n'
+        return 0
+    fi
+    printf '%b%-44s  %-16s  %10s %14s  %10s%b\n' "$BOLD" \
+        "GAME" "WHEN" "RAW" "ON DISK" "SAVED" "$RESET"
+    printf '%s\n' "------------------------------------------------------------------------------------------------"
+    while IFS=$'\t' read -r when name before after savedstr; do
+        [ -n "$name" ] || continue
+        fit_name "$name" 44
+        printf '%-44s  %-16s  %10s -> %-10s  %10s\n' \
+            "$NAME_FIT" "$when" "$before" "$after" "$savedstr"
+        n=$(( n + 1 ))
+    done <<< "$rows"
+    printf '%s\n' "------------------------------------------------------------------------------------------------"
+    printf '%d record(s)\n' "$n"
+    return 0
+}
+
+cmd_stats() {
+    local line rows tu td saved best_pct best_name over50 newest overall
+    line=$(state_summary)
+    IFS=$'\t' read -r rows tu td saved best_pct best_name over50 newest <<< "$line"
+    rows=${rows:-0}; tu=${tu:-0}; td=${td:-0}; saved=${saved:-0}
+    overall=$(pct_of "$saved" "$tu")
+
+    echo "================================================================================"
+    echo -e "  ${BOLD}COMPRESSION STATISTICS${RESET}"
+    echo "================================================================================"
+    if [ "$rows" -eq 0 ]; then
+        echo "  No compressed games recorded yet."
+        echo "  Run the interactive batch ('b') or compress a game to populate this."
+        echo "================================================================================"
+        return 0
+    fi
+    printf "  %-26s %s\n" "Games compressed:" "$rows"
+    printf "  %-26s %s\n" "Total original size:" "$(mib_human "$tu")"
+    printf "  %-26s %s\n" "Total size on disk:" "$(mib_human "$td")"
+    printf "  %-26s %b\n" "Total space saved:" \
+        "${GREEN}$(mib_human "$saved")${RESET} (${BOLD}${overall}%${RESET} overall)"
+    if [ "${newest:-0}" -gt 0 ]; then
+        printf "  %-26s %s\n" "Most recent compression:" "$(epoch_local "$newest")"
+    fi
+    echo "================================================================================"
+    return 0
+}
+
+# The benchmark is the honest version of the marketing claim: instead of an
+# invented headline it reports what the recorded, compsize-measured numbers
+# actually say, per game and overall. Every figure is derivable from the state
+# database on the machine running it, so anyone can reproduce or dispute it.
+cmd_benchmark() {
+    local line rows tu td saved best_pct best_name over50 newest overall table
+    line=$(state_summary)
+    IFS=$'\t' read -r rows tu td saved best_pct best_name over50 newest <<< "$line"
+    rows=${rows:-0}; tu=${tu:-0}; td=${td:-0}; saved=${saved:-0}
+    overall=$(pct_of "$saved" "$tu")
+
+    if [ "$OPT_JSON" -eq 1 ]; then
+        printf '{"version":%s,"games":[' "$(json_quote "$VERSION")"
+        awk -F'|' "$STATE_AWK_FUNCS"'
+            NF >= 9 && $1 != "" && $8 != "" && $9 != "" {
+                u = $8 + 0; d = $9 + 0
+                if (u <= 0) next
+                printf "%s{\"name\":\"%s\",\"before_mib\":%d,\"after_mib\":%d,\"saved_mib\":%d,\"ratio_pct\":%.1f}", \
+                    (n++ ? "," : ""), jesc(cleantab(unescape($2))), u, d, u - d, (u - d) * 100 / u
+            }
+        ' "$STATE_FILE" 2>/dev/null
+        printf '],"summary":{"games":%d,"before_mib":%d,"after_mib":%d,"saved_mib":%d,"overall_pct":%s,"games_over_50pct":%d,"best_pct":%s,"best_game":%s}}\n' \
+            "$rows" "$tu" "$td" "$saved" "$overall" \
+            "${over50:-0}" "${best_pct:-0}" "$(json_quote "${best_name:-}")"
+        return 0
+    fi
+
+    table=$(benchmark_rows)
+    if [ -z "$table" ]; then
+        printf 'No measured games yet. Compress at least one game, then run this again.\n'
+        printf 'The benchmark reports compsize-measured results only - nothing is estimated.\n'
+        return 0
+    fi
+
+    local name u d pct
+    printf '%b%-40s %14s %14s %8s%b\n' "$BOLD" "GAME" "BEFORE" "AFTER" "SAVED" "$RESET"
+    printf '%s\n' "-------------------------------------------------------------------------------------"
+    while IFS=$'\t' read -r name u d pct; do
+        [ -n "$name" ] || continue
+        fit_name "$name" 40
+        printf '%-40s %9d MiB -> %9d MiB   %5.1f%%\n' "$NAME_FIT" "$u" "$d" "$pct"
+    done <<< "$table"
+    printf '%s\n' "-------------------------------------------------------------------------------------"
+    echo "================================================================================"
+    echo -e "  ${BOLD}MEASURED SAVINGS${RESET}"
+    echo "================================================================================"
+    printf "  %-30s %s\n" "Games measured:" "$rows"
+    printf "  %-30s %s\n" "Before:" "$(mib_human "$tu")"
+    printf "  %-30s %s\n" "After:" "$(mib_human "$td")"
+    printf "  %-30s %b\n" "Reclaimed:" \
+        "${GREEN}$(mib_human "$saved")${RESET} (${BOLD}${overall}%${RESET})"
+    printf "  %-30s %s (%s%%)\n" "Best single game:" "${best_name:-n/a}" "${best_pct:-0}"
+    printf "  %-30s %s\n" "Games saving over 50%:" "${over50:-0}"
+    echo "================================================================================"
+    printf "  %bAll figures come from compsize on this machine, not an estimate.%b\n" "$DIM" "$RESET"
+    return 0
+}
+
+# --- Community ratio table -------------------------------------------------
+#
+# A per-game table of measured savings, maintained in the repository at
+# ratios/games.json and contributed to by pull request. The zstd level is part
+# of the key, because a game's ratio is a property of (game, level), not of the
+# game alone: mixing levels would produce confident, wrong predictions. Every
+# row also carries how many samples it averages, so a reader can weigh it.
+#
+# This table is only ever a *hint* for games this machine has not measured. A
+# local measurement always wins, and the table never compresses anything.
+
+# Parse a ratios JSON document into lines of "name<TAB>level<TAB>pct<TAB>samples".
+#
+# A real, if small, JSON tokenizer rather than a line-matcher: ratio files are
+# contributed by hand in pull requests, so they arrive with every kind of
+# whitespace and with objects on one line or many. The walker only understands
+# the documented shape - games.name.level.{pct,samples} - and ignores anything
+# else. Invalid input yields no rows, which callers treat as "no table".
+ratios_parse() {
+    awk '
+        function unesc(s,   o, i, c, e) {
+            o = ""; e = 0
+            for (i = 1; i <= length(s); i++) {
+                c = substr(s, i, 1)
+                if (e) {
+                    if (c == "n") o = o "\n"
+                    else if (c == "t") o = o "\t"
+                    else o = o c
+                    e = 0
+                } else if (c == "\\") {
+                    e = 1
+                } else {
+                    o = o c
+                }
+            }
+            return o
+        }
+        BEGIN { src = ""; n = 0; depth = 0; in_games = 0
+                game = ""; level = ""; pct = ""; samples = ""; want = ""; iskey = 0 }
+        { src = src $0 "\n" }
+        END {
+            L = length(src); i = 1
+            # Tokenise: strings, numbers, and the structural characters.
+            while (i <= L) {
+                c = substr(src, i, 1)
+                if (c == " " || c == "\t" || c == "\n" || c == "\r") { i++; continue }
+                if (c == "{" || c == "}" || c == ":" || c == ",") {
+                    tok[++n] = "S" c; i++; continue
+                }
+                if (c == "\"") {
+                    i++; buf = ""; esc = 0
+                    while (i <= L) {
+                        d = substr(src, i, 1)
+                        if (esc) { buf = buf "\\" d; esc = 0; i++ }
+                        else if (d == "\\") { esc = 1; i++ }
+                        else if (d == "\"") { i++; break }
+                        else { buf = buf d; i++ }
+                    }
+                    tok[++n] = "V" unesc(buf); ttype[n] = "str"; continue
+                }
+                # Bare token (number / true / false / null)
+                buf = ""
+                while (i <= L) {
+                    d = substr(src, i, 1)
+                    # index() rather than a bracket regex: busybox awk does not
+                    # treat \t or \r reliably inside a bracket expression, and
+                    # this must run on mawk and busybox awk as well as gawk.
+                    if (index("{}[]:,", d) > 0 || d == " " || d == "\t" || d == "\n" || d == "\r") break
+                    buf = buf d; i++
+                }
+                if (buf != "") { tok[++n] = "V" buf; ttype[n] = "lit" }
+                else i++
+            }
+            # Walk the tokens. games_depth is the brace depth of the object
+            # that holds game names, so game names sit at games_depth, level
+            # names one deeper, and pct/samples one deeper again.
+            for (k = 1; k <= n; k++) {
+                t = tok[k]
+                if (t == "S{") {
+                    depth++
+                    if (!in_games && prevkey == "games") { in_games = 1; games_depth = depth }
+                    if (in_games && depth == games_depth + 2) { pct = ""; samples = "" }
+                    continue
+                }
+                if (t == "S}") {
+                    if (in_games && depth == games_depth + 2 && pct != "") {
+                        print game "\t" level "\t" pct "\t" samples
+                    }
+                    if (in_games && depth == games_depth) in_games = 0
+                    depth--
+                    continue
+                }
+                if (t == "S:" || t == "S,") continue
+                if (substr(t, 1, 1) == "V") {
+                    val = substr(t, 2)
+                    nxt = tok[k + 1]
+                    if (nxt == "S:") {
+                        # It is a key.
+                        prevkey = val
+                        if (in_games) {
+                            if (depth == games_depth)      { game = val; level = ""; pct = ""; samples = "" }
+                            else if (depth == games_depth + 1) { level = val; pct = ""; samples = "" }
+                        }
+                    } else {
+                        # It is a value.
+                        if (in_games && depth == games_depth + 2) {
+                            if (prevkey == "pct") pct = val
+                            else if (prevkey == "samples") samples = val
+                        }
+                    }
+                }
+            }
+        }
+    ' "${1:-}"
+}
+
+# Read the table in use. Normally the imported cache wins, so a contributed
+# table overrides the bundled one. With the argument "repo" the cache is ignored
+# and only the shipped file is considered: --render-ratios must render the file
+# that is actually committed, never a maintainer's personal import.
+ratios_source_file() {
+    local prefer_repo=0
+    [ "${1:-}" = "repo" ] && prefer_repo=1
+    if [ "$prefer_repo" -eq 0 ] && [ -r "$RATIOS_CACHE" ]; then
+        printf '%s' "$RATIOS_CACHE"; return 0
+    fi
+    local dir data_home
+    # Resolve the script's real location. Package managers (Homebrew, Nix) and
+    # /usr/local/bin put a symlink on PATH pointing into a versioned keg/store
+    # directory, and the table ships next to the real file, not the symlink.
+    dir="$(cd "$(dirname "$(self_script_path)")" 2>/dev/null && pwd || true)"
+    data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+    # In order: a git checkout or extracted release (table next to the script),
+    # then the `bin/../share` layout `make install` and package managers use,
+    # then a user-level data file. An installed user gets --ratios with no extra
+    # step.
+    for candidate in \
+        "$dir/ratios/games.json" \
+        "$dir/../ratios/games.json" \
+        "$dir/../../ratios/games.json" \
+        "$dir/../share/btrfs-game-compressor/ratios/games.json" \
+        "$dir/../../share/btrfs-game-compressor/ratios/games.json" \
+        "$data_home/btrfs-game-compressor/ratios/games.json"
+    do
+        if [ -n "$candidate" ] && [ -r "$candidate" ]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Populate HINT_RATIO[name] with the table value for a *specific* level, so a
+# level-1 mount is never told what a level-6 measurement saw. HINT_LOW[name] is
+# filled in the same single pass: 1 when the hinted saving is under
+# min_gain_pct, so a game the table already knows is a poor investment can be
+# advised against on its first pass.
+load_ratios_hint() {
+    HINT_RATIO=()
+    HINT_LOW=()
+    local file lvl
+    lvl="${1:-}"
+    [ -n "$lvl" ] || return 0
+    file=$(ratios_source_file) || return 0
+    while IFS=$'\t' read -r name pct low; do
+        [ -n "$name" ] || continue
+        HINT_RATIO["$name"]="$pct"
+        HINT_LOW["$name"]="$low"
+    done < <(ratios_parse "$file" 2>/dev/null | awk \
+        -v FS="$(printf '\t')" -v lvl="zstd$lvl" -v mp="$MIN_GAIN_PCT" '
+            $2 == lvl && $3 != "" {
+                print $1 "\t" $3 "\t" (mp > 0 && $3 + 0 < mp ? 1 : 0)
+            }')
+    return 0
+}
+
+cmd_ratios() {
+    local file
+    if ! file=$(ratios_source_file); then
+        printf 'No ratio table found.\n'
+        printf 'Import one with:  %s --import-ratios <file.json>\n' "$PROGNAME"
+        printf 'Or contribute yours:  %s --export-ratios\n' "$PROGNAME"
+        return 1
+    fi
+
+    local query="${RATIOS_QUERY:-}"
+    local rows
+    rows=$(ratios_parse "$file" 2>/dev/null | sort -t$'\t' -k1,1 -k2,2)
+    if [ -z "$rows" ]; then
+        printf 'The ratio table at %s could not be parsed.\n' "$file" >&2
+        return 1
+    fi
+
+    if [ "$OPT_JSON" -eq 1 ]; then
+        printf '{"version":%s,"source":%s,"ratios":[' \
+            "$(json_quote "$VERSION")" "$(json_quote "$file")"
+        local first=1 name level pct samples
+        while IFS=$'\t' read -r name level pct samples; do
+            [ -n "$name" ] || continue
+            [ -z "$query" ] || [ "$name" = "$query" ] || continue
+            printf '%s{"name":%s,"level":%s,"pct":%s,"samples":%s}' \
+                "$([ $first -eq 1 ] || printf ',')" "$(json_quote "$name")" \
+                "$(json_quote "$level")" "${pct:-0}" "${samples:-0}"
+            first=0
+        done <<< "$rows"
+        printf ']}\n'
+        return 0
+    fi
+
+    printf '%b%-42s %-8s %8s %9s%b\n' "$BOLD" "GAME" "LEVEL" "SAVING" "SAMPLES" "$RESET"
+    printf '%s\n' "--------------------------------------------------------------------------------"
+    local n=0 shown=0
+    while IFS=$'\t' read -r name level pct samples; do
+        [ -n "$name" ] || continue
+        n=$(( n + 1 ))
+        [ -z "$query" ] || [ "$name" = "$query" ] || continue
+        fit_name "$name" 42
+        printf '%-42s %-8s %7s%% %9s\n' "$NAME_FIT" "$level" "$pct" "$samples"
+        shown=$(( shown + 1 ))
+    done <<< "$rows"
+    printf '%s\n' "--------------------------------------------------------------------------------"
+    if [ -n "$query" ] && [ "$shown" -eq 0 ]; then
+        printf 'No entry for "%s" at any level. Contribute it with --export-ratios.\n' "$query"
+    else
+        printf '%d entr%s from %s\n' "$n" "$([ "$n" -eq 1 ] && echo y || echo ies)" "$file"
+        printf '%bHint only: your own --benchmark always wins. Ratios depend on the%b\n' "$DIM" "$RESET"
+        printf '%bzstd level, which is why each row names one.%b\n' "$DIM" "$RESET"
+    fi
+    return 0
+}
+
+# Emit this machine's measured ratios as a valid ratios document, ready to paste
+# into ratios/games.json or send as a pull request. Groups repeated measurements
+# of the same game at the same level into one averaged row.
+cmd_export_ratios() {
+    local rows="${TMPDIR:-/tmp}/bgc-export-rows.$$"
+    local out="${TMPDIR:-/tmp}/bgc-export.$$"
+    local -A mount_level=()
+    local name path pct lvl mp
+
+    awk -F'|' 'NF>=9 && $1!="" && $8>0 && $9>0 {
+        p = $1; gsub(/%0D/, "\r", p); gsub(/%0A/, "\n", p)
+        gsub(/%7C/, "|", p); gsub(/%25/, "%", p)
+        nm = $2; gsub(/%0D/, "\r", nm); gsub(/%0A/, "\n", nm)
+        gsub(/%7C/, "|", nm); gsub(/%25/, "%", nm)
+        printf "%s\t%s\t%s\n", nm, p, (($8 - $9) * 100 / $8)
+    }' "$STATE_FILE" > "$rows" 2>/dev/null || true
+
+    : > "$out"
+    while IFS=$'\t' read -r name path pct; do
+        [ -n "$name" ] || continue
+        mp=$(findmnt -no TARGET --target "$path" 2>/dev/null || echo "")
+        # An empty subscript is a hard error in bash for an associative array,
+        # and a path that is not a mount point (a synthetic test path, or a
+        # library that has since been unmounted) yields an empty findmnt answer.
+        [ -n "$mp" ] || mp="?"
+        if [ -n "${mount_level["$mp"]:-}" ]; then
+            lvl="${mount_level["$mp"]}"
+        else
+            lvl=$(effective_level "$path" 2>/dev/null || echo 3)
+            mount_level["$mp"]="$lvl"
+        fi
+        printf '%s\tzstd%s\t%s\n' "$name" "$lvl" "$pct" >> "$out"
+    done < "$rows"
+    rm -f "$rows"
+
+    if [ ! -s "$out" ]; then
+        rm -f "$out"
+        printf 'No measured games to export yet.\n'
+        return 0
+    fi
+
+    printf '{\n'
+    printf '  "schema": 1,\n'
+    printf '  "measured_with": %s,\n' "$(json_quote "btrfs filesystem defragment -czstd -L <level> + btrfs-compsize")"
+    printf '  "contributor_note": %s,\n' "$(json_quote "Generated by $PROGNAME $VERSION --export-ratios. Ratios are per zstd level.")"
+    printf '  "games": {\n'
+    LC_ALL=C sort -t$'\t' -k1,1 -k2,2 "$out" |
+        awk -v FS="$(printf '\t')" '
+            function jesc(s,   o, i, c) {
+                o = ""
+                for (i = 1; i <= length(s); i++) {
+                    c = substr(s, i, 1)
+                    if (c == "\\") o = o "\\\\"
+                    else if (c == "\"") o = o "\\\""
+                    else o = o c
+                }
+                return o
+            }
+            function flush(   pct) {
+                if (n == 0) return
+                pct = sum / n
+                printf "%s    \"%s\": {\n      \"%s\": {\n        \"pct\": %.1f,\n        \"samples\": %d,\n        \"min\": %.1f,\n        \"max\": %.1f\n      }\n    }",
+                    (first ? "" : ",\n"), jesc(g), lv, pct, n, mn, mx
+                first = 0
+            }
+            BEGIN { first = 1 }
+            {
+                key = $1 "\t" $2
+                if (key != cur) { flush(); cur = key; g = $1; lv = $2; n = 0; sum = 0 }
+                v = $3 + 0; n++; sum += v
+                if (n == 1 || v < mn) mn = v
+                if (n == 1 || v > mx) mx = v
+            }
+            END { flush(); printf "\n  }\n}\n" }
+        '
+    rm -f "$out"
+    printf '\n' >&2
+    printf 'Paste the "games" entries into ratios/games.json, or open a pull request.\n' >&2
+    return 0
+}
+
+# Render the table as a Markdown document for browsing on GitHub without
+# installing anything. Maintainers regenerate GAMES.md with `make ratios-doc`.
+cmd_render_ratios() {
+    local file
+    if ! file=$(ratios_source_file repo); then
+        printf 'No ratio table found.\n' >&2
+        return 1
+    fi
+    printf '# Community compression ratios\n\n'
+    printf 'Per-game savings measured with `btrfs filesystem defragment -czstd` and\n'
+    printf '`btrfs-compsize`. **Every row names the zstd level it was measured at**, because\n'
+    printf 'a game compresses differently at level 1 and level 6. `Samples` is how many\n'
+    printf 'independent measurements the average is built from.\n\n'
+    printf '> Generated from [`ratios/games.json`](games.json). Do not edit by hand.\n'
+    printf '> Contribute with `btrfs-game-compressor --export-ratios`.\n\n'
+    printf '| Game | Level | Saving | Samples |\n'
+    printf '|---|---:|---:|---:|\n'
+    local name level pct samples n=0
+    while IFS=$'\t' read -r name level pct samples; do
+        [ -n "$name" ] || continue
+        # Escape the pipe so a game name can never break the table.
+        name="${name//|/\\|}"
+        printf '| %s | %s | %s%% | %s |\n' "$name" "$level" "$pct" "$samples"
+        n=$(( n + 1 ))
+    done < <(ratios_parse "$file" 2>/dev/null | sort -t$'\t' -k1,1 -k2,2)
+    printf '\n_%d entr%s._\n' "$n" "$([ "$n" -eq 1 ] && echo y || echo ies)"
+    return 0
+}
+
+cmd_import_ratios() {
+    local src="${RATIOS_IMPORT_FILE:-}"
+    if [ -z "$src" ] || [ ! -r "$src" ]; then
+        printf '%s: --import-ratios needs a readable JSON file\n' "$PROGNAME" >&2
+        return 2
+    fi
+    # Refuse anything that does not parse, so a bad file is never cached as if
+    # it were a table.
+    if [ -z "$(ratios_parse "$src" 2>/dev/null)" ]; then
+        printf '%s: %s is not a usable ratios file (no entries parsed)\n' "$PROGNAME" "$src" >&2
+        return 1
+    fi
+    cp -f "$src" "$RATIOS_CACHE" 2>/dev/null || {
+        printf '%s: could not write %s\n' "$PROGNAME" "$RATIOS_CACHE" >&2
+        return 1
+    }
+    local count
+    count=$(ratios_parse "$RATIOS_CACHE" 2>/dev/null | grep -c . || true)
+    printf 'Imported %s entries into %s\n' "${count:-0}" "$RATIOS_CACHE"
+    printf 'They are used only as a hint for games you have not measured yourself.\n'
+    return 0
+}
+
+# --- Self-update -----------------------------------------------------------
+#
+# The tool updates itself from its own GitHub releases. Three rules keep that
+# from becoming a supply-chain hazard or fighting the package managers:
+#   1. every download is verified against the release's SHA256SUMS;
+#   2. a copy owned by pacman, Homebrew or Nix is never touched -- the user is
+#      sent to their package manager instead;
+#   3. the automatic check is throttled to once a day, only ever replaces a
+#      user-writable install, and never re-executes the running process.
+
+# Path of the script actually running, with symlinks resolved.
+self_script_path() {
+    local self="$0"
+    case "$self" in
+        */*) ;;
+        *) self=$(command -v -- "$self" 2>/dev/null || printf '%s' "$self") ;;
+    esac
+    if command -v readlink >/dev/null 2>&1; then
+        self=$(readlink -f -- "$self" 2>/dev/null || printf '%s' "$self")
+    fi
+    printf '%s' "$self"
+}
+
+# True when the path belongs to a package manager, whose database and checksums
+# an in-place rewrite would silently invalidate.
+package_managed_path() {
+    case "${1:-}" in
+        /usr/bin/*|/usr/lib/*|/bin/*) return 0 ;;
+        /nix/store/*) return 0 ;;
+        */Cellar/*|*/linuxbrew/*|*homebrew*) return 0 ;;
+    esac
+    return 1
+}
+
+latest_release_tag() {
+    command -v curl >/dev/null 2>&1 || return 1
+    curl -fsSL --max-time 10 "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+        | awk -F'"' '/"tag_name"[[:space:]]*:/ { print $4; exit }'
+}
+
+update_stamp_touch() {
+    date +%s > "$UPDATE_STAMP" 2>/dev/null || true
+}
+
+# Has the throttle window (one day) passed since the last automatic check? A
+# missing or unreadable stamp means "go ahead".
+update_check_due() {
+    [ -f "$UPDATE_STAMP" ] || return 0
+    local last now
+    last=$(cat "$UPDATE_STAMP" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    case "$last" in ''|*[!0-9]*) return 0 ;; esac
+    [ $(( now - last )) -ge 86400 ]
+}
+
+cmd_check_update() {
+    local tag
+    tag=$(latest_release_tag) || tag=""
+    tag="${tag#v}"
+    if [ -z "$tag" ]; then
+        printf '%s: could not reach the release API; check your network.\n' "$PROGNAME" >&2
+        return 1
+    fi
+    update_stamp_touch
+    if [ "$tag" = "$VERSION" ]; then
+        printf '%s %s is the latest release.\n' "$PROGNAME" "$VERSION"
+    else
+        printf '%s %s is available (you have %s).\n' "$PROGNAME" "$tag" "$VERSION"
+        printf 'Update with:  %s --self-update\n' "$PROGNAME"
+    fi
+    return 0
+}
+
+# Download and install the latest release over this script. $1 = quiet, which
+# suppresses normal output (the automatic path uses it so a redraw is not
+# scribbled over). Returns 0 updated/already-current, 2 package-managed,
+# 3 cannot write, 1 network/verification failure.
+do_self_update() {
+    local quiet="${1:-0}" self tag tmp archive base expected actual new dep
+    self=$(self_script_path)
+
+    if package_managed_path "$self"; then
+        [ "$quiet" -eq 1 ] || {
+            printf '%s is managed by a package manager (%s).\n' "$PROGNAME" "$self"
+            printf 'Update it with pacman, brew or nix; --self-update will not touch it.\n'
+        }
+        return 2
+    fi
+    if [ ! -w "$self" ] && [ ! -w "$(dirname "$self")" ]; then
+        [ "$quiet" -eq 1 ] || {
+            printf '%s: %s is not writable by you.\n' "$PROGNAME" "$self"
+            printf 'Reinstall with the one-line installer, or update as root.\n'
+        }
+        return 3
+    fi
+    for dep in curl tar sha256sum awk install grep head; do
+        if ! command -v "$dep" >/dev/null 2>&1; then
+            [ "$quiet" -eq 1 ] || printf '%s: required command not found: %s\n' "$PROGNAME" "$dep" >&2
+            return 3
+        fi
+    done
+
+    tag=$(latest_release_tag) || tag=""
+    tag="${tag#v}"
+    if [ -z "$tag" ]; then
+        [ "$quiet" -eq 1 ] || printf '%s: could not reach the release API.\n' "$PROGNAME" >&2
+        return 1
+    fi
+    if [ "$tag" = "$VERSION" ]; then
+        [ "$quiet" -eq 1 ] || printf '%s %s is already up to date.\n' "$PROGNAME" "$VERSION"
+        update_stamp_touch
+        return 0
+    fi
+
+    tmp=$(mktemp -d 2>/dev/null) || return 1
+    archive="$PROGNAME-$tag.tar.gz"
+    base="https://github.com/$REPO/releases/download/v$tag"
+    if ! curl -fsSL --max-time 300 "$base/$archive" -o "$tmp/$archive" 2>/dev/null; then
+        printf '%s: download failed: %s/%s\n' "$PROGNAME" "$base" "$archive" >&2
+        rm -rf "$tmp"; return 1
+    fi
+    if ! curl -fsSL --max-time 30 "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" 2>/dev/null; then
+        printf '%s: could not download SHA256SUMS; refusing to update.\n' "$PROGNAME" >&2
+        rm -rf "$tmp"; return 1
+    fi
+    expected=$(awk -v f="$archive" \
+        '$2 == f && length($1) == 64 && $1 ~ /^[[:xdigit:]]+$/ { print $1 }' "$tmp/SHA256SUMS")
+    [ -n "$expected" ] || {
+        printf '%s: no checksum for %s; refusing to update.\n' "$PROGNAME" "$archive" >&2
+        rm -rf "$tmp"; return 1
+    }
+    actual=$(sha256sum "$tmp/$archive" | awk '{print $1}')
+    [ "$actual" = "$expected" ] || {
+        printf '%s: checksum mismatch; refusing to update.\n' "$PROGNAME" >&2
+        rm -rf "$tmp"; return 1
+    }
+
+    tar -xzf "$tmp/$archive" -C "$tmp" || {
+        printf '%s: could not unpack the release.\n' "$PROGNAME" >&2
+        rm -rf "$tmp"; return 1
+    }
+    new="$tmp/$PROGNAME-$tag/$PROGNAME"
+    if [ ! -s "$new" ] || ! head -n1 "$new" | grep -q '^#!'; then
+        printf '%s: release archive does not contain a valid script.\n' "$PROGNAME" >&2
+        rm -rf "$tmp"; return 1
+    fi
+    # Replace the file on disk. The running process keeps the old inode, so the
+    # update lands atomically and takes effect on the next run.
+    if ! install -m 0755 "$new" "$self"; then
+        printf '%s: could not replace %s\n' "$PROGNAME" "$self" >&2
+        rm -rf "$tmp"; return 1
+    fi
+    rm -rf "$tmp"
+    update_stamp_touch
+    [ "$quiet" -eq 1 ] || \
+        printf 'Updated %s %s -> %s (takes effect on the next run).\n' "$PROGNAME" "$VERSION" "$tag"
+    return 0
+}
+
+# Best-effort automatic check, used by the TUI and the --notify timer. Silent,
+# throttled, disabled by auto_update=0, skipped by an environment override (the
+# test suite sets it), and a no-op for package-managed installs.
+maybe_auto_update() {
+    [ "${AUTO_UPDATE:-1}" = "1" ] || return 0
+    [ -z "${BTRFS_GAME_COMPRESSOR_NO_SELF_UPDATE:-}" ] || return 0
+    update_check_due || return 0
+    do_self_update 1 2>/dev/null || true
+    update_stamp_touch
+    return 0
+}
+
+# Remove this install: the script, the manpage and the ratio table the installer
+# placed next to it, and the optional systemd units. Destructive, so it needs a
+# terminal and an explicit y, it refuses a package-managed copy, and it never
+# deletes the user's configuration or history.
+cmd_uninstall() {
+    local self prefix man ratios_dir dotdir unit reply=""
+    self=$(self_script_path)
+    if package_managed_path "$self"; then
+        printf '%s is managed by a package manager (%s).\n' "$PROGNAME" "$self"
+        printf 'Remove it with pacman, brew or nix instead.\n'
+        return 2
+    fi
+    prefix=$(cd "$(dirname "$self")/.." 2>/dev/null && pwd || true)
+    man="$prefix/share/man/man1/$PROGNAME.1"
+    ratios_dir="$prefix/share/btrfs-game-compressor"
+    dotdir="$HOME/.config/systemd/user"
+
+    printf '%s will remove:\n' "$PROGNAME"
+    printf '  %s\n' "$self"
+    [ -e "$man" ] && printf '  %s\n' "$man"
+    [ -d "$ratios_dir" ] && printf '  %s/\n' "$ratios_dir"
+    for unit in btrfs-game-compressor-notify.service btrfs-game-compressor-notify.timer; do
+        [ -e "$dotdir/$unit" ] && printf '  %s/%s\n' "$dotdir" "$unit"
+    done
+    printf '\nYour configuration and history are kept:\n'
+    printf '  %s\n  %s\n' "$CONFIG_DIR" "$STATE_DIR"
+
+    if [ "$OPT_YES" -ne 1 ]; then
+        if [ ! -t 0 ]; then
+            printf '\n%s: --uninstall needs a terminal to confirm (or --yes).\n' "$PROGNAME" >&2
+            printf 'Remove the file(s) above by hand instead.\n' >&2
+            return 1
+        fi
+        printf '\nRemove? [y/N] '
+        read -r reply || reply=""
+        case "$reply" in
+            [Yy]*) ;;
+            *) printf 'aborted.\n'; return 0 ;;
+        esac
+    fi
+
+    # rm of the running script is safe: the process keeps the open inode.
+    rm -f "$self"
+    rm -f "$man"
+    rm -f "$ratios_dir/ratios/games.json" "$ratios_dir/GAMES.md"
+    rmdir "$ratios_dir/ratios" "$ratios_dir" 2>/dev/null || true
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user disable --now btrfs-game-compressor-notify.timer 2>/dev/null || true
+    fi
+    rm -f "$dotdir/btrfs-game-compressor-notify.service" \
+          "$dotdir/btrfs-game-compressor-notify.timer"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user daemon-reload 2>/dev/null || true
+    fi
+    printf '\nRemoved %s.\n' "$PROGNAME"
+    printf 'Config and history left in place for a future reinstall.\n'
+    return 0
+}
+
+cmd_balance() {
+    require_btrfs
+
+    # One balance per filesystem, not per library: libraries routinely share a
+    # mount point, and balancing the same filesystem twice is pure waste.
+    local -a mnt=()
+    local lib mp i dup
+    for lib in "${LIBS[@]}"; do
+        mp=$(findmnt -no TARGET --target "$lib" 2>/dev/null || true)
+        [ -n "$mp" ] || continue
+        dup=0
+        for ((i = 0; i < ${#mnt[@]}; i++)); do
+            if [ "${mnt[$i]}" = "$mp" ]; then
+                dup=1
+                break
+            fi
+        done
+        [ "$dup" -eq 0 ] && mnt+=("$mp")
+    done
+
+    if [ "${#mnt[@]}" -eq 0 ]; then
+        echo "$PROGNAME: no Steam libraries found to balance." >&2
+        echo "          Add one with --library /path/to/library" >&2
+        return 1
+    fi
+
+    echo "================================================================================"
+    echo "  FILESYSTEM BALANCE"
+    echo "================================================================================"
+    echo "Defragmenting rewrites a game's extents, which leaves them scattered across"
+    echo "the filesystem. 'btrfs balance start -m' puts them back together so the space"
+    echo "they freed can actually be reused. This is the other half of the standard"
+    echo "SteamOS recipe, and it is opt-in because it is a whole-filesystem operation:"
+    echo ""
+    for mp in "${mnt[@]}"; do
+        echo "  sudo btrfs balance start -m $mp"
+    done
+    echo ""
+    echo "  It needs root, it is I/O heavy, and on a large filesystem it can run for"
+    echo "  hours. It is not scheduled and not repeated: each command runs once and"
+    echo "  this exits. A balance is safe to interrupt at any time."
+    echo "================================================================================"
+
+    # Deliberately not runnable unattended. The same reasoning as the rest of the
+    # tool applies with more force here: a wrong guess rewrites a whole
+    # filesystem rather than one game.
+    if [ ! -t 0 ]; then
+        echo "" >&2
+        echo "$PROGNAME: --balance needs a terminal to confirm." >&2
+        echo "          Run the command(s) above by hand instead." >&2
+        return 1
+    fi
+
+    echo -e "Proceed? [${BOLD}y${RESET}/N] "
+    local reply=""
+    read -r reply || reply=""
+    case "$reply" in
+        [Yy]*) ;;
+        *) echo "aborted."; return 0 ;;
+    esac
+
+    local prefix rc=0
+    prefix=$(get_cmd_prefix)
+    for mp in "${mnt[@]}"; do
+        echo ""
+        echo ">>> balancing $mp"
+        if [ "$EUID" -eq 0 ]; then
+            $prefix btrfs balance start -m "$mp" || rc=1
+        else
+            sudo -v
+            $prefix sudo btrfs balance start -m "$mp" || rc=1
+        fi
+    done
+    if [ "$rc" -eq 0 ]; then
+        echo ""
+        echo -e "${GREEN}Balance finished.${RESET}"
+    else
+        echo ""
+        echo "$PROGNAME: one or more balance commands failed; see the output above." >&2
+    fi
+    return $rc
+}
+
+cmd_dry_run() {
+    local i n=0 n_low=0 n_running=0 n_advised=0
+    for i in "${!GAMES_NAME[@]}"; do
+        local st="${GAMES_STATUS[$i]}"
+        if [ "$st" = "COMPRESSED" ]; then
+            continue
+        fi
+        if [ "$st" = "RUNNING" ]; then
+            n_running=$(( n_running + 1 ))
+            fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
+            printf 'skipping       %-40s %-14s %10s %s\n' \
+                "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}" "(game is running)"
+            continue
+        fi
+        if [ "$st" = "LOW YIELD" ]; then
+            n_low=$(( n_low + 1 ))
+            fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
+            printf 'skipping       %-40s %-14s %10s ~%s expected\n' \
+                "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}" \
+                "$(bytes_human "$(( ${GAMES_PREDICT[$i]:-0} * 1048576 ))")"
+            continue
+        fi
+        n=$(( n + 1 ))
+        # A game this machine has never measured can still be advised against if
+        # the community table expects it to save under min_gain_pct. It is only
+        # an advisory: the game is still listed and still compressed, because a
+        # local pass is the only way to get a trustworthy number.
+        local advice=""
+        if [ -n "${GAMES_HINT[$i]:-}" ] && [ "${GAMES_HINT_LOW[$i]:-0}" -eq 1 ]; then
+            n_advised=$(( n_advised + 1 ))
+            advice=$(printf ' (table: ~%s%% - likely low yield)' "${GAMES_HINT[$i]%%|*}")
+        fi
+        fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
+        printf 'would compress  %-40s %-14s %10s%s\n' \
+            "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}" "$advice"
+    done
+    if [ "$n" -eq 0 ] && [ "$n_low" -eq 0 ] && [ "$n_running" -eq 0 ]; then
+        printf 'nothing to do - every game is already compressed.\n'
+    elif [ "$n" -eq 0 ] && [ "$n_low" -eq 0 ]; then
+        printf 'nothing to do right now - every remaining game is running.\n'
+    elif [ "$n" -eq 0 ] && [ "$n_running" -eq 0 ]; then
+        printf 'nothing worth compressing - the remaining %d game(s) are not expected to gain enough.\n' "$n_low"
+    else
+        printf '%d game(s) would be compressed. Nothing was changed (--dry-run).\n' "$n"
+    fi
+    if [ "$n_low" -gt 0 ]; then
+        printf '%d game(s) skipped as low yield (under %s%% or %s MiB expected). Set min_gain_pct=0 and min_gain_mib=0 to compress anyway.\n' \
+            "$n_low" "$MIN_GAIN_PCT" "$MIN_GAIN_MIB"
+    fi
+    if [ "$n_advised" -gt 0 ]; then
+        printf '%d game(s) are unmeasured but the community table expects under %s%%; they are still listed, but may not be worth the time.\n' \
+            "$n_advised" "$MIN_GAIN_PCT"
+    fi
+    if [ "$n_running" -gt 0 ]; then
+        printf '%d game(s) skipped because they are running. Close them and run this again.\n' "$n_running"
+    fi
+    return 0
+}
+
+# --- Entry Point ---
+parse_args "$@"
+init_paths
+load_config
+detect_platform
+require_dependencies
+
+# Modes that read only the state file, the configuration or the ratio table run
+# before any library is discovered. Walking a 250k-file library is the most
+# expensive thing the tool does and none of these commands need it, so --ratios on
+# a machine with no Steam library -- and `make ratios-doc` in CI -- do not pay for
+# a scan, and neither does a read-only --history, --stats or --benchmark.
+if [ "$OPT_HISTORY" -eq 1 ]; then
+    cmd_history
+    exit 0
+fi
+
+if [ "$OPT_STATS" -eq 1 ]; then
+    cmd_stats
+    exit 0
+fi
+
+if [ "$OPT_BENCHMARK" -eq 1 ]; then
+    cmd_benchmark
+    exit 0
+fi
+
+if [ "$OPT_EXPORT" -eq 1 ]; then
+    cmd_export_ratios
+    exit 0
+fi
+
+if [ "$OPT_RATIOS" -eq 1 ]; then
+    cmd_ratios
+    exit $?
+fi
+
+if [ "$OPT_IMPORT" -eq 1 ]; then
+    cmd_import_ratios
+    exit $?
+fi
+
+if [ "$OPT_RENDER" -eq 1 ]; then
+    cmd_render_ratios
+    exit $?
+fi
+
+if [ "$OPT_CHECK_UPDATE" -eq 1 ]; then
+    cmd_check_update
+    exit $?
+fi
+
+if [ "$OPT_SELF_UPDATE" -eq 1 ]; then
+    do_self_update 0
+    exit $?
+fi
+
+if [ "$OPT_UNINSTALL" -eq 1 ]; then
+    cmd_uninstall
+    exit $?
+fi
+
+check_compsize
+discover_data
+
+if [ "$OPT_STATUS" -eq 1 ]; then
+    if [ "$OPT_JSON" -eq 1 ]; then cmd_status_json; else cmd_status; fi
+    exit 0
+fi
+
+if [ "$OPT_NOTIFY" -eq 1 ]; then
+    cmd_notify
+    exit $?
+fi
+
+if [ "$OPT_DRY_RUN" -eq 1 ]; then
+    cmd_dry_run
+    exit 0
+fi
+
+if [ "$OPT_BALANCE" -eq 1 ]; then
+    cmd_balance
+    exit $?
+fi
+
+for lib in "${LIBS[@]}"; do
+    check_compress_mount "$lib"
+done
+
+if [ ! -t 0 ]; then
+    echo "$PROGNAME: interactive mode needs a terminal. Use --status or --dry-run when piping." >&2
+    exit 1
+fi
+
+require_btrfs
+
+# Look for a newer release now and then, before the UI takes over the screen.
+# Throttled to once a day, silent, and a no-op for a package-managed install.
+maybe_auto_update
+
+# --- Main Program Loop ---
+TUI_ACTIVE=1
+while true; do
+    tput civis
+    if [ "$NEEDS_FULL_CLEAR" -eq 1 ]; then
+        clear
+        NEEDS_FULL_CLEAR=0
+    else
+        tput cup 0 0
+    fi
+
+    FILTERED_INDICES=()
+    for i in "${!GAMES_NAME[@]}"; do
+        name="${GAMES_NAME[$i]}"
+        st="${GAMES_STATUS[$i]}"
+
+        if [ "$VIEW_PENDING_ONLY" -eq 1 ] && [ "$st" = "COMPRESSED" ]; then
+            continue
+        fi
+
+        if [ -n "$FILTER_QUERY" ]; then
+            l_name="${name,,}"
+            l_query="${FILTER_QUERY,,}"
+            if [[ "$l_name" != *"$l_query"* ]]; then
+                continue
+            fi
+        fi
+
+        FILTERED_INDICES+=("$i")
+    done
+
+    TOTAL_MATCHES=${#FILTERED_INDICES[@]}
+    TOTAL_PAGES=$(( (TOTAL_MATCHES + PAGE_SIZE - 1) / PAGE_SIZE ))
+    [ "$TOTAL_PAGES" -eq 0 ] && TOTAL_PAGES=1
+    [ "$CURRENT_PAGE" -gt "$TOTAL_PAGES" ] && CURRENT_PAGE=$TOTAL_PAGES
+    [ "$CURRENT_PAGE" -lt 1 ] && CURRENT_PAGE=1
+
+    START_IDX=$(( (CURRENT_PAGE - 1) * PAGE_SIZE ))
+    END_IDX=$(( START_IDX + PAGE_SIZE ))
+    [ "$END_IDX" -gt "$TOTAL_MATCHES" ] && END_IDX=$TOTAL_MATCHES
+    ITEMS_ON_PAGE=$(( END_IDX - START_IDX ))
+
+    if [ "$CURSOR_POS" -ge "$ITEMS_ON_PAGE" ]; then
+        if [ "$ITEMS_ON_PAGE" -gt 0 ]; then
+            CURSOR_POS=$(( ITEMS_ON_PAGE - 1 ))
+        else
+            CURSOR_POS=0
+        fi
+    fi
+    [ "$CURSOR_POS" -lt 0 ] && CURSOR_POS=0
+
+    CHECKED_COUNT=0
+    for val in "${CHECKED_STATE[@]}"; do
+        if [[ "$val" == "1" ]]; then CHECKED_COUNT=$(( CHECKED_COUNT + 1 )); fi
+    done
+
+    # Header. This is top-level code, not a function, so `local` here would print
+    # "can only be used in a function" on every redraw and write into the TUI.
+    tui_pct=0
+    [ "${#GAMES_NAME[@]}" -gt 0 ] && tui_pct=$(( STAT_COMP_COUNT * 100 / ${#GAMES_NAME[@]} ))
+    echo "================================================================================"
+    echo -e "  ${BOLD}${CYAN}BTRFS GAME COMPRESSOR${RESET} ${DIM}v$VERSION${RESET}   ${DIM}${#GAMES_NAME[@]} game(s) · ${#LIBS[@]} library(ies)${RESET}"
+    printf "  [%s] %d%% compressed\n" "$(bar "$STAT_COMP_COUNT" "${#GAMES_NAME[@]}")" "$tui_pct"
+    printf "  ${GREEN}%d Compressed${RESET}  │  ${MAGENTA}%d Updated${RESET}  │  ${YELLOW}%d Uncompressed${RESET}" \
+        "$STAT_COMP_COUNT" "$STAT_UPD_COUNT" "$STAT_UNCOMP_COUNT"
+    if [ "$STAT_RUNNING_COUNT" -gt 0 ]; then
+        printf "  │  ${CYAN}%d Running${RESET}" "$STAT_RUNNING_COUNT"
+    fi
+    # Only shown when non-zero, but then always shown, so the figures here add
+    # up to the total. Labelled "Uncompressed" rather than "Pending", because
+    # --status uses "pending" for the work still to do, which includes Updated.
+    if [ "$LOW_YIELD_COUNT" -gt 0 ]; then
+        printf "  │  ${RED}%d Low Yield${RESET}" "$LOW_YIELD_COUNT"
+    fi
+    printf "\n"
+    echo "================================================================================"
+
+    if [ "$VIEW_PENDING_ONLY" -eq 1 ] || [ -n "$FILTER_QUERY" ]; then
+        printf "  ${CYAN}Filter active:${RESET} "
+        [ "$VIEW_PENDING_ONLY" -eq 1 ] && printf "[PENDING ONLY] "
+        [ -n "$FILTER_QUERY" ] && printf "[\"%s\"] " "$FILTER_QUERY"
+        printf "(%d matches)\n" "$TOTAL_MATCHES"
+        echo "--------------------------------------------------------------------------------"
+    fi
+
+    # Items table
+    printf "${BOLD}  SEL    ID   STATUS          GAME NAME${RESET}\n"
+    echo "--------------------------------------------------------------------------------"
+
+    if [ "$TOTAL_MATCHES" -eq 0 ]; then
+        echo "  (No games found matching your current filter)"
+        for ((p = 1; p < PAGE_SIZE; p++)); do echo ""; done
+    else
+        for ((p = 0; p < PAGE_SIZE; p++)); do
+            if [ "$p" -ge "$ITEMS_ON_PAGE" ]; then
+                echo ""
+                continue
+            fi
+            r_idx="${FILTERED_INDICES[$(( START_IDX + p ))]}"
+            g_name="${GAMES_NAME[$r_idx]}"
+            g_st="${GAMES_STATUS[$r_idx]}"
+
+            case "$g_st" in
+                "COMPRESSED")   tag="${GREEN}[COMPRESSED]  ${RESET}" ;;
+                "UPDATED")      tag="${MAGENTA}[UPDATED]     ${RESET}" ;;
+                "UNCOMPRESSED") tag="${YELLOW}[UNCOMPRESSED]${RESET}" ;;
+                "LOW YIELD")    tag="${DIM}[LOW YIELD]   ${RESET}" ;;
+                "RUNNING")      tag="${CYAN}[RUNNING]     ${RESET}" ;;
+            esac
+
+            if [[ "${CHECKED_STATE[${GAMES_PATH[$r_idx]}]:-0}" == "1" ]]; then
+                chk="${CYAN}[x]${RESET}"
+            else
+                chk="[ ]"
+            fi
+
+            if [ "$p" -eq "$CURSOR_POS" ]; then
+                ptr="${CYAN}>${RESET}"
+                row_style="${BOLD}"
+            else
+                ptr=" "
+                row_style=""
+            fi
+
+            # Clamped, so one very long game name cannot push the right-hand
+            # border off the screen and wrap the whole layout.
+            fit_name "$g_name" "$TUI_NAME_WIDTH"
+            printf " %b %b  %3d   %b  %b%s${RESET}\033[K\n" \
+                "$ptr" "$chk" "$((r_idx + 1))" "$tag" "$row_style" "$NAME_FIT"
+        done
+    fi
+
+    echo "--------------------------------------------------------------------------------"
+    action_txt="Compress highlighted"
+    if [ "$CHECKED_COUNT" -gt 0 ]; then
+        action_txt="${CYAN}Compress $CHECKED_COUNT selected${RESET}"
+    fi
+
+    echo -e "  Page ${BOLD}${CURRENT_PAGE}/${TOTAL_PAGES}${RESET}  │  ${BOLD}↑/↓${RESET}: Move  │  ${BOLD}←/→${RESET}: Page  │  ${BOLD}Space${RESET}: Select  │  ${BOLD}Enter/c${RESET}: $action_txt\033[K"
+    echo -e "  Shortcuts: [${BOLD}a${RESET}] All page  [${BOLD}f${RESET}] Search  [${BOLD}v${RESET}] Pending  [${BOLD}b${RESET}] Batch  [${BOLD}t${RESET}] Stats  [${BOLD}s${RESET}] Config  [${BOLD}q${RESET}] Quit\033[K"
+    echo "================================================================================"
+
+    if ! read_input; then
+        clear
+        tput cnorm
+        echo "Input stream closed. Exiting."
+        exit 0
+    fi
+    choice="$KEY"
+
+    case "$choice" in
+        q|Q) clear ; tput cnorm ; echo "Exiting." ; exit 0 ;;
+        $'\x1b[A'|$'\x1bOA'|k|K) # UP
+            if [ "$CURSOR_POS" -gt 0 ]; then
+                CURSOR_POS=$(( CURSOR_POS - 1 ))
+            fi
+            continue ;;
+        $'\x1b[B'|$'\x1bOB'|j|J) # DOWN
+            if [ "$CURSOR_POS" -lt $(( ITEMS_ON_PAGE - 1 )) ]; then
+                CURSOR_POS=$(( CURSOR_POS + 1 ))
+            fi
+            continue ;;
+        # RIGHT ARROW (next page)
+        $'\x1b[C'|$'\x1bOC'|n|N|$'\x1b[6~'|l|L)
+            [ "$CURRENT_PAGE" -lt "$TOTAL_PAGES" ] && CURRENT_PAGE=$((CURRENT_PAGE + 1))
+            CURSOR_POS=0
+            continue ;;
+        # LEFT ARROW (previous page)
+        $'\x1b[D'|$'\x1bOD'|p|P|$'\x1b[5~'|h|H)
+            [ "$CURRENT_PAGE" -gt 1 ] && CURRENT_PAGE=$((CURRENT_PAGE - 1))
+            CURSOR_POS=0
+            continue ;;
+        " ") # Space: Toggle checkbox
+            if [ "$ITEMS_ON_PAGE" -gt 0 ]; then
+                cur_path="${GAMES_PATH[${FILTERED_INDICES[$(( START_IDX + CURSOR_POS ))]}]}"
+                if [[ "${CHECKED_STATE[$cur_path]:-0}" == "1" ]]; then
+                    CHECKED_STATE[$cur_path]=0
+                else
+                    CHECKED_STATE[$cur_path]=1
+                fi
+            fi
+            continue ;;
+        a|A) # Toggle all on current page
+            all_checked=1
+            for ((p = 0; p < ITEMS_ON_PAGE; p++)); do
+                r_idx="${FILTERED_INDICES[$(( START_IDX + p ))]}"
+                if [[ "${CHECKED_STATE[${GAMES_PATH[$r_idx]}]:-0}" != "1" ]]; then
+                    all_checked=0
+                    break
+                fi
+            done
+            for ((p = 0; p < ITEMS_ON_PAGE; p++)); do
+                r_idx="${FILTERED_INDICES[$(( START_IDX + p ))]}"
+                r_path="${GAMES_PATH[$r_idx]}"
+                if [ "$all_checked" -eq 1 ]; then
+                    CHECKED_STATE[$r_path]=0
+                else
+                    CHECKED_STATE[$r_path]=1
+                fi
+            done
+            continue ;;
+        f|F|/)
+            tput cnorm
+            echo ""
+            read -r -p "Search filter (press enter empty to reset): " FILTER_QUERY
+            CURRENT_PAGE=1
+            CURSOR_POS=0
+            NEEDS_FULL_CLEAR=1
+            continue ;;
+        v|V)
+            if [ "$VIEW_PENDING_ONLY" -eq 0 ]; then VIEW_PENDING_ONLY=1; else VIEW_PENDING_ONLY=0; fi
+            CURRENT_PAGE=1
+            CURSOR_POS=0
+            continue ;;
+        t|T)
+            show_statistics
+            continue ;;
+        s|S)
+            manage_settings
+            discover_data
+            continue ;;
+        b|B)
+            batch_compress_routine
+            discover_data
+            continue ;;
+        c|C)
+            TARGETS=()
+            for t_path in "${!CHECKED_STATE[@]}"; do
+                if [[ "${CHECKED_STATE[$t_path]}" == "1" ]]; then
+                    TARGETS+=("$t_path")
+                fi
+            done
+
+            if [ ${#TARGETS[@]} -eq 0 ] && [ "$ITEMS_ON_PAGE" -gt 0 ]; then
+                TARGETS+=("${GAMES_PATH[${FILTERED_INDICES[$(( START_IDX + CURSOR_POS ))]}]}")
+            fi
+
+            if [ ${#TARGETS[@]} -eq 0 ]; then
+                continue
+            fi
+
+            clear
+            tput cnorm
+            ensure_sudo
+
+            if [ ${#TARGETS[@]} -eq 1 ]; then
+                sel_path="${TARGETS[0]}"
+                tgt_name=${sel_path%/*}; tgt_name=${tgt_name##*/}
+                tgt_path="$sel_path"
+
+                echo "================================================================================"
+                echo "  GAME COMPRESSION: $tgt_name"
+                echo "================================================================================"
+                echo "  Location: $tgt_path"
+                echo ""
+                echo "Analyzing current disk usage..."
+                b_raw=$(run_compsize "$tgt_path" || true)
+                b_total=$(echo "$b_raw" | grep "^TOTAL" || true)
+                b_disk="N/A"
+                if [ -n "$b_total" ]; then
+                    b_disk=$(echo "$b_total" | awk '{print $3}')
+                    u_disk=$(echo "$b_total" | awk '{print $4}')
+                    ratio=$(echo "$b_total" | awk '{print $2}')
+                    echo "  Current footprint on disk: $b_disk (Raw: $u_disk, Extent ratio: $ratio)"
+                elif [ "$COMPSIZE_OK" -ne 1 ]; then
+                    echo -e "  ${YELLOW}compsize unavailable - compression will run, but savings cannot be measured.${RESET}"
+                fi
+                echo "--------------------------------------------------------------------------------"
+                echo -e "Press [${BOLD}y${RESET}] to compress with ZSTD, or any other key to cancel..."
+                read_input
+                if [[ "$KEY" =~ ^[Yy]$ ]]; then
+                    discover_running_games
+                    if game_is_running "$tgt_path"; then
+                        echo -e "${YELLOW}  $tgt_name is running right now - close it and try again.${RESET}"
+                        read_input
+                        NEEDS_FULL_CLEAR=1
+                        continue
+                    fi
+                    echo ""
+                    echo ">>> Compressing files with ZSTD... (please wait)"
+                    s_t=$(date +%s)
+                    if ! result=$(compress_and_record "$tgt_name" "$tgt_path"); then
+                        echo -e "${RED}  Defragmentation failed for $tgt_name; saved state was not changed.${RESET}"
+                        read_input
+                        NEEDS_FULL_CLEAR=1
+                        continue
+                    fi
+                    e_t=$(( $(date +%s) - s_t ))
+                    print_summary_block "$tgt_name" "$b_disk" "$result"
+                    echo -e "    ${GREEN}✓ Finished in ${e_t}s${RESET}"
+                    CHECKED_STATE[$sel_path]=0
+                    sel_idx=$(game_index_by_path "$sel_path" || true)
+                    [ -n "$sel_idx" ] && GAMES_STATUS[$sel_idx]="COMPRESSED"
+                    echo "Press any key to return..."
+                    read_input
+                fi
+            else
+                echo "================================================================================"
+                echo "  COMPRESSING ${#TARGETS[@]} SELECTED GAMES"
+                echo "================================================================================"
+                for t_path in "${TARGETS[@]}"; do
+                    echo "  • $(basename "$t_path")"
+                done
+                echo "--------------------------------------------------------------------------------"
+                echo -e "Press [${BOLD}y${RESET}] to proceed with all, or any other key to cancel..."
+                read_input
+                if [[ "$KEY" =~ ^[Yy]$ ]]; then
+                    t_cur=1
+                    for t_path in "${TARGETS[@]}"; do
+                        tgt_name=$(basename "$t_path")
+                        tgt_path="$t_path"
+                        # See batch_compress_routine: the guarantee has to hold
+                        # at the moment of the write, not when the list was built.
+                        discover_running_games
+                        if game_is_running "$tgt_path"; then
+                            echo ""
+                            echo -e "${YELLOW}  Skipping $tgt_name: it is running right now.${RESET}"
+                            continue
+                        fi
+                        echo ""
+                        echo -e "${BOLD}[$t_cur/${#TARGETS[@]}] Compressing: ${CYAN}$tgt_name${RESET} ... "
+                        s_t=$(date +%s)
+                        b_raw=$(run_compsize "$tgt_path" || true)
+                        b_disk=$(echo "$b_raw" | awk '/^TOTAL/ {print $3}')
+                        [ -n "$b_disk" ] || b_disk="N/A"
+                        if ! result=$(compress_and_record "$tgt_name" "$tgt_path"); then
+                            echo -e "${RED}  Defragmentation failed for $tgt_name; saved state was not changed.${RESET}"
+                            t_cur=$(( t_cur + 1 ))
+                            continue
+                        fi
+                        e_t=$(( $(date +%s) - s_t ))
+                        print_summary_block "$tgt_name" "$b_disk" "$result"
+                        echo -e "    ${GREEN}✓ Finished in ${e_t}s${RESET}"
+                        CHECKED_STATE[$t_path]=0
+                        t_idx=$(game_index_by_path "$tgt_path" || true)
+                        [ -n "$t_idx" ] && GAMES_STATUS[$t_idx]="COMPRESSED"
+                        t_cur=$(( t_cur + 1 ))
+                    done
+                    echo "Press any key to return..."
+                    read_input
+                fi
+            fi
+            NEEDS_FULL_CLEAR=1
+            discover_data
+            ;;
+        *)
+            drain_pending_input
+            continue ;;
+    esac
+done

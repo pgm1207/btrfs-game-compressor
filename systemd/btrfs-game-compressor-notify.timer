@@ -1,0 +1,15 @@
+[Unit]
+Description=Periodically check whether Steam games on Btrfs need compression
+
+[Timer]
+# Run a little while after login, then twice a day. Randomized so a fleet of
+# machines does not wake up together, and Persistent so a missed run (laptop
+# asleep) happens once shortly after it comes back.
+OnStartupSec=5min
+OnUnitActiveSec=12h
+RandomizedDelaySec=30min
+Persistent=true
+Unit=btrfs-game-compressor-notify.service
+
+[Install]
+WantedBy=timers.target
