@@ -76,7 +76,9 @@ distro_fields() {
 }
 
 pkg_command() {
-    # shellcheck disable=SC2086
+    # distro_fields prints "ID ID_LIKE"; splitting that into $1 and $2 is exactly
+    # what is wanted here, so the word-splitting warning is silenced on purpose.
+    # shellcheck disable=SC2046
     set -- $(distro_fields)
     # The compsize package is named 'compsize' on Arch, Fedora and openSUSE, but
     # 'btrfs-compsize' on Debian and Ubuntu. Getting this wrong makes the
