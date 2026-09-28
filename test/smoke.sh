@@ -1488,6 +1488,39 @@ check_rc "--yes without --uninstall is rejected" 2 "$rc"
 check_contains "--yes rejection explains the rule" "only applies to --uninstall" "$out"
 
 # ---------------------------------------------------------------------------
+group "Ratio merge tool"
+
+# ratios/merge.py folds an --export-ratios document into the community table.
+if command -v python3 >/dev/null 2>&1 && [ -f "$REPO_ROOT/ratios/merge.py" ]; then
+    cp "$REPO_ROOT/ratios/games.json" "$WORK/merge-target.json"
+    cat > "$WORK/merge-in.json" <<'JSON'
+{"schema":1,"games":{
+  "MechHavoc":{"zstd1":{"pct":80.0,"samples":2,"min":79.0,"max":81.0}},
+  "Brand New Game":{"zstd1":{"pct":50.0,"samples":3,"min":45.0,"max":55.0}}
+}}
+JSON
+    out=$(python3 "$REPO_ROOT/ratios/merge.py" "$WORK/merge-target.json" "$WORK/merge-in.json" 2>&1); rc=$?
+    check_rc "ratio merge succeeds" 0 $rc
+    check_contains "ratio merge reports what it did" "1 new, 1 updated" "$out"
+    got=$(python3 - "$WORK/merge-target.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+m=d["games"]["MechHavoc"]["zstd1"]
+print(f'{m["pct"]} {m["samples"]} {m["min"]} {m["max"]} {"Brand New Game" in d["games"]}')
+PY
+)
+    [ "$got" = "85.0 4 79.0 90.0 True" ] &&
+        ok "ratio merge averages samples and widens the range" ||
+        bad "ratio merge averages samples and widens the range" "got '$got'"
+
+    printf 'not json' > "$WORK/merge-bad.json"
+    out=$(python3 "$REPO_ROOT/ratios/merge.py" "$WORK/merge-target.json" "$WORK/merge-bad.json" 2>&1); rc=$?
+    check_rc "ratio merge rejects invalid JSON" 1 "$rc"
+else
+    ok "ratio merge tool skipped (python3 not available)"
+fi
+
+# ---------------------------------------------------------------------------
 group "TUI source hygiene"
 
 # The main loop runs at top level, not inside a function, so a stray `local`

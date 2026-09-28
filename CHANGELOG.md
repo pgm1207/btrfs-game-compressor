@@ -44,6 +44,12 @@ never published.
   `likely low yield` in `--status` and `--dry-run` — an advisory only, never held
   back, because only a local pass can produce a trustworthy number. The table is
   installed alongside the tool, so `--ratios` works offline.
+- A **contribution path** for the community table: `ratios/merge.py` and
+  `make ratios-merge FILE=my-ratios.json` fold an `--export-ratios` document into
+  `ratios/games.json` with sample-weighted averaging, sample-count summing and
+  min/max widening, then regenerate `GAMES.md` and the README list. A "Submit
+  compression ratios" issue form covers people without a checkout. Nothing is
+  ever uploaded automatically.
 - `--notify` for optional read-only desktop notifications about actionable games.
 - A **watch-only** systemd user timer (`systemd/`, installed with `make service`)
   that runs `--notify` twice a day. It reads the library and sends a notification;

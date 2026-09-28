@@ -893,18 +893,25 @@ expects to save under `min_gain_pct` is flagged `likely low yield` in `--status`
 `--dry-run` — an advisory, never a block, because only a local pass can measure it for
 real.
 
-Contribute what you measured, so the next person benefits:
+### Add your games
+
+Contribute what you measured, so the next person benefits. From a clone:
 
 ```sh
-btrfs-game-compressor --export-ratios > my-ratios.json   # after a pass
-btrfs-game-compressor --import-ratios my-ratios.json     # preview it locally
+btrfs-game-compressor --export-ratios > my-ratios.json   # after a compression pass
+make ratios-merge FILE=my-ratios.json                    # fold it into the table
+python3 ratios/merge.py ratios/games.json my-ratios.json --dry-run   # ...or preview first
 ```
 
-`--export-ratios` groups your repeated measurements, resolves the level of each game's
-mount, and emits a valid ratios document. Merge the entries into `ratios/games.json` in
-a pull request; see [`ratios/README.md`](ratios/README.md) for the format and the rules.
-Maintainers regenerate the browsable table with `make ratios-doc`. Nothing is uploaded
-anywhere automatically: the data moves only through a pull request you can read.
+`make ratios-merge` averages your samples into any existing row (weighted by sample
+count), widens `min`/`max`, adds games the table has not seen, and regenerates
+`GAMES.md` and the list above. Then commit and open a pull request. **No git setup?**
+Paste the `--export-ratios` output into the
+[ratio submission issue](https://github.com/pablogonz12/btrfs-game-compressor/issues/new?template=ratio_submission.yml),
+and a maintainer merges it.
+
+Nothing is uploaded automatically: the data moves only through a pull request or issue
+you can read. See [`ratios/README.md`](ratios/README.md) for the format and rules.
 
 ## Files
 

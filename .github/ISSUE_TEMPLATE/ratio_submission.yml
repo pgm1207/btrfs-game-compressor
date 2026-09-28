@@ -1,0 +1,51 @@
+name: Submit compression ratios
+description: Share the savings you measured so they can be added to the community table
+title: "[ratios] "
+labels: ["ratios"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing your measurements! No git or development setup needed —
+        just paste the data.
+
+        Generate it after at least one compression pass:
+
+        ```sh
+        btrfs-game-compressor --export-ratios > my-ratios.json
+        ```
+
+        The output contains only game names, the zstd level, the saving, and the
+        sample count and range — no paths, no host details.
+  - type: textarea
+    id: data
+    attributes:
+      label: The `--export-ratios` output
+      description: Paste the whole JSON document here.
+      render: json
+      placeholder: |
+        {
+          "schema": 1,
+          "games": {
+            "Some Game": {
+              "zstd1": { "pct": 42.0, "samples": 1, "min": 42.0, "max": 42.0 }
+            }
+          }
+        }
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Distro and zstd level
+      description: For example "SteamOS 3.7, compress-force=zstd:6" or "CachyOS, zstd:1".
+      placeholder: SteamOS 3.7, zstd:6
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: These are my own measurements, and I understand they will be merged into `ratios/games.json` under the MIT license.
+          required: true

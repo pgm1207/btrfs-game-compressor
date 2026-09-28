@@ -54,25 +54,43 @@ btrfs-game-compressor --ratios "Factorio" # one game
 for games you have not measured. It refuses a file with no parsable entries, so a
 bad merge can never be cached as if it were a table.
 
-## Open a pull request
+## Submit your numbers
 
-1. Fork the repository and create a branch.
-2. Paste the entries from the `"games"` object of your generated file into
-   `ratios/games.json`, merging them into the existing `"games"` object (do not
-   replace the file).
-3. If the same game/level already exists, prefer merging your samples into the
-   existing row over overwriting it: raise `samples`, and widen `min`/`max` if
-   your measurement falls outside the current range.
-4. Regenerate the browsable table and commit it alongside the JSON:
+### The fast path (one command)
 
-   ```sh
-   make ratios-doc
-   ```
+From a clone of the repository:
 
-5. Run the test suite (`make check`) and open the PR.
+```sh
+btrfs-game-compressor --export-ratios > my-ratios.json
+make ratios-merge FILE=my-ratios.json
+```
+
+`make ratios-merge` folds your file into `ratios/games.json` for you:
+
+- a game the table has not seen is added,
+- a game it already has is updated as a **sample-weighted average** of the two
+  (`pct = (old_pct*old_samples + new_pct*new_samples) / (old_samples + new_samples)`),
+- `samples` is summed and `min`/`max` are widened,
+- `GAMES.md` and the list in the README are regenerated.
+
+Then commit the changed files and open a pull request. Run `make ratios-merge
+FILE=my-ratios.json DRY_RUN=1` first if you want to see the result without writing
+it. (The merge tool needs `python3`; the tool itself does not.)
+
+### No git? Open an issue instead
+
+There is a **"Submit compression ratios"** issue template: generate the file, then
+paste the whole `--export-ratios` output into the issue. A maintainer merges it.
+
+### Doing it by hand
+
+Merge the entries from the `"games"` object of your file into the existing
+`"games"` object in `ratios/games.json` (do not replace the file), then run
+`make ratios-doc` and commit both.
 
 No registration, account, or telemetry is involved: the data arrives as a normal
-pull request you can review line by line.
+pull request or issue you can review line by line, and nothing is uploaded unless
+you run the command yourself.
 
 ## Format
 

@@ -17,7 +17,7 @@ FILES       := $(PROG) $(MANPAGE) README.md LICENSE CHANGELOG.md CONTRIBUTING.md
                install.sh Makefile GAMES.md ratios
 
 .PHONY: all check test lint syntax install uninstall service service-off package \
-        ratios-doc clean help
+        ratios-doc ratios-merge clean help
 
 all: help
 
@@ -75,6 +75,20 @@ ratios-doc:
 	@# the GAMES.md we just wrote, so the README cannot drift from the JSON.
 	@awk '/<!-- GAME-LIST-START -->/ { print; while ((getline l < "GAMES.md") > 0) if (l ~ /^\|/) print l; skip=1; next } /<!-- GAME-LIST-END -->/ { skip=0 } !skip { print }' README.md > README.md.tmp && mv README.md.tmp README.md
 	@echo "GAMES.md and the README game list regenerated from ratios/games.json"
+
+# Fold a `--export-ratios` document into the community table and refresh the docs.
+#   btrfs-game-compressor --export-ratios > my-ratios.json
+#   make ratios-merge FILE=my-ratios.json
+# Averages with the existing samples and widens min/max; adds new games.
+ratios-merge:
+	@test -n "$(FILE)" || { echo "usage: make ratios-merge FILE=my-ratios.json [DRY_RUN=1]" >&2; exit 2; }
+	@if [ "$(DRY_RUN)" = "1" ]; then \
+		python3 ratios/merge.py ratios/games.json "$(FILE)" --dry-run >/dev/null; \
+		echo "(dry run: ratios/games.json not written)"; \
+	else \
+		python3 ratios/merge.py ratios/games.json "$(FILE)"; \
+		$(MAKE) --no-print-directory ratios-doc; \
+	fi
 
 install:
 	@install -d $(DESTDIR)$(BINDIR)
