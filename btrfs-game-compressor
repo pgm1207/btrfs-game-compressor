@@ -4,7 +4,7 @@
 # libraries living on Btrfs. Single file, no runtime deps beyond coreutils,
 # awk, btrfs-progs and (optionally) btrfs-compsize.
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 PROGNAME="btrfs-game-compressor"
 # Owner/repo used by --self-update and --check-update to find the latest release.
 REPO="${BTRFS_GAME_COMPRESSOR_REPO:-pablogonz12/btrfs-game-compressor}"

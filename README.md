@@ -26,7 +26,7 @@ touches a game that is running, and knows when re-compressing is not worth your 
 ```console
 $ btrfs-game-compressor --status
 ================================================================================
-  BTRFS GAME COMPRESSOR v0.1.0   225 game(s) across 1 library(ies)
+  BTRFS GAME COMPRESSOR v0.1.1   225 game(s) across 1 library(ies)
   [########################....] 92% compressed
 ================================================================================
 GAME                                     STATUS               SIZE EXPECTED GAIN
@@ -349,7 +349,7 @@ Options, either as environment variables or by editing the script:
 | Variable | Default | Meaning |
 |---|---|---|
 | `PREFIX` | `$HOME/.local` | install under this prefix (`$PREFIX/bin/`) |
-| `BTRFS_GAME_COMPRESSOR_VERSION` | latest release | pin a specific version, e.g. `0.1.0` |
+| `BTRFS_GAME_COMPRESSOR_VERSION` | latest release | pin a specific version, e.g. `0.1.1` |
 
 ```sh
 # install system-wide instead of per-user

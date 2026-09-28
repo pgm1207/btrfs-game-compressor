@@ -1429,7 +1429,7 @@ fi
 out=$(PATH="$WORK/update-bin:$PATH" UPDATE_FIXTURE="$UPDF" FAKE_TAG="$NEWVER" HOME="$SUHOME" \
     "$WORK/selfup/bin/btrfs-game-compressor" --self-update 2>&1); rc=$?
 check_rc "--self-update succeeds against a verified release" 0 "$rc"
-check_contains "--self-update reports what it did" "Updated btrfs-game-compressor 0.1.0 -> $NEWVER" "$out"
+check_contains "--self-update reports what it did" "Updated btrfs-game-compressor $("$PROG" --version | awk '{print $2}') -> $NEWVER" "$out"
 if grep -q 'new-version-fixture' "$WORK/selfup/bin/btrfs-game-compressor"; then
     ok "--self-update replaced the file"
 else

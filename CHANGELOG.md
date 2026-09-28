@@ -4,6 +4,46 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-09-28
+
+The version advertised in the README: every feature described there is now in the
+released archive. It is a superset of 0.1.0, which was tagged before the ratio
+work and the packaging cleanup landed.
+
+### Added
+
+- A **community ratio table** of 225 measured games (`ratios/games.json`,
+  browsable as `GAMES.md` and embedded in the README), with `--ratios`,
+  `--export-ratios`, `--import-ratios` and `--render-ratios`.
+- A one-command contribution path: `make ratios-merge FILE=…` (sample-weighted
+  merge), a "Submit compression ratios" issue form, and `--submit-ratios` to open
+  the issue through the user's own `gh` login. Nothing is ever uploaded silently.
+- **Self-update**: `--check-update`, `--self-update`, and a throttled once-a-day
+  automatic check, all checksum-verified and inert for package-managed installs.
+- `--uninstall` (with `--yes`) to remove the tool, manpage, ratio table and
+  systemd units while keeping the user's history.
+- Community hints in `--status`/`--notify` at the matching zstd level, plus the
+  table-driven "likely low yield" advisory.
+- The one-line installer now installs the manpage and the ratio table, follows the
+  latest release when no version is pinned, detects the distribution, and offers
+  to install missing dependencies and to add itself to `PATH`.
+
+### Fixed
+
+- Upgrading no longer discards compression history; state is versioned and
+  migrated, and written atomically with a `.bak` backup.
+- `compress-force=` mounts, including SteamOS's `compress-force=zstd:6`, are
+  recognised; defragmentation mirrors the mount's zstd level via `-L`.
+- A game with a live process is never defragmented, re-checked immediately before
+  every write.
+- `--history` and `--benchmark` no longer rely on gawk-only `asort()`/`strftime()`,
+  so they work with mawk on Debian/Ubuntu and under busybox awk.
+- Without `compsize`, a compressed game is remembered as compressed (zeroed
+  marker) instead of being re-done every run, and stays out of the statistics.
+- The TUI no longer prints `local: can only be used in a function` over the
+  interface, and its batch honours the low-yield thresholds.
+- Many other correctness and safety fixes; see the 0.1.0 entry.
+
 ## [0.1.0] - 2026-09-28
 
 The first public release. Everything before it was an internal script that was
@@ -275,4 +315,5 @@ never published.
   flag that silently does nothing is a bug, and is now rejected as an unknown
   option.
 
+[0.1.1]: https://github.com/pablogonz12/btrfs-game-compressor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/pablogonz12/btrfs-game-compressor/releases/tag/v0.1.0
