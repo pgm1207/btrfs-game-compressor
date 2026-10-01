@@ -60,6 +60,49 @@ MAGENTA="\e[1;35m"
 RED="\e[1;31m"
 RESET="\e[0m"
 
+# --- OpenCode-style framing -------------------------------------------------
+# A dim box-drawing rule, an accent title bar and a dim key-hint footer, kept
+# dependency-free. COLUMNS is consulted so a narrow terminal still looks sane.
+BOX_H="─"
+
+terminal_width() {
+    local w="${COLUMNS:-}"
+    if ! [[ "$w" =~ ^[0-9]+$ ]] || [ "$w" -lt 40 ]; then
+        w=$(tput cols 2>/dev/null || echo 80)
+    fi
+    [[ "$w" =~ ^[0-9]+$ ]] || w=80
+    # Leave the rightmost column free; writing into it makes terminals wrap.
+    [ "$w" -gt 100 ] && w=100
+    printf '%s' "$w"
+}
+
+# One full-width horizontal rule, e.g. ────────
+hrule() {
+    local w; w=$(terminal_width)
+    local n=$(( w - 4 ))
+    local line="" i
+    for (( i = 0; i < n; i++ )); do line+="$BOX_H"; done
+    printf '%s\n' "  $line"
+}
+
+# box_title "Main menu" [accent-colour]
+box_title() {
+    local title="$1" colour="${2:-$CYAN}"
+    local w; w=$(terminal_width)
+    local inner=$(( w - 4 ))
+    local pad=$(( inner - ${#title} - 2 ))
+    [ "$pad" -lt 1 ] && pad=1
+    local rule="" i
+    for (( i = 0; i < pad; i++ )); do rule+="$BOX_H"; done
+    printf '%b\n' "  ${colour}${title}${RESET} ${DIM}${rule}${RESET}"
+}
+
+# A dim, full-width footer carrying the key hints, like a status bar.
+box_footer() {
+    local hint="$1"
+    printf '%b\n' "  ${DIM}${hint}${RESET}"
+}
+
 # --- Options ---
 OPT_STATUS=0
 OPT_DRY_RUN=0
@@ -880,6 +923,10 @@ declare -A HINT_LOW
 
 KEY=""
 
+# Canonical Enter. Terminals deliver CR (0x0d); some deliver LF. Both select the
+# highlighted item / confirm, so callers never have to special-case Enter.
+KEY_ENTER=$'\r'
+
 read_input() {
     KEY=""
     local lead="" final=""
@@ -895,6 +942,9 @@ read_input() {
             esac
             KEY="$KEY$lead$final"
         fi
+    fi
+    if [ "$KEY" = $'\n' ]; then
+        KEY="$KEY_ENTER"
     fi
     return 0
 }
@@ -1551,7 +1601,7 @@ print_summary_block() {
     if [[ "$before_bytes" =~ ^[0-9]+$ ]] && [[ "$after_bytes" =~ ^[0-9]+$ ]] ; then
         COMPRESS_ZSTD_SAVED_BYTES=$((before_bytes - after_bytes))
     fi
-    echo "--------------------------------------------------------------------------------"
+    hrule
     printf "  %-20s %s\n" "Game:" "$name"
     if [[ "$original_file_bytes" =~ ^[0-9]+$ ]]; then
         printf "  %-20s %s\n" "Original file size:" "$(bytes_human "$original_file_bytes")"
@@ -1569,7 +1619,7 @@ print_summary_block() {
     else
         printf "  %-20s %s\n" "ZSTD change this pass:" "unavailable (sudo measurement required)"
     fi
-    echo "--------------------------------------------------------------------------------"
+    hrule
 }
 
 # The state file records, per install path:
@@ -1871,11 +1921,11 @@ discover_data() {
 show_statistics() {
     clear
     tput cnorm
-    echo "================================================================================"
+    hrule
     echo "  COMPRESSION STATISTICS"
-    echo "================================================================================"
+    hrule
     printf "${BOLD}%-36s %10s %10s %10s %8s${RESET}\n" "Game Name" "Original" "On Disk" "ZSTD Saved" "Saved %"
-    echo "--------------------------------------------------------------------------------"
+    hrule
 
     local totals
     totals=$(awk -F'|' -v BOLD="$BOLD" -v RESET="$RESET" '
@@ -1912,7 +1962,7 @@ show_statistics() {
     summary_line=$(echo "$totals" | grep "^###")
     IFS='|' read -r total_uncomp total_disk total_saved count <<< "${summary_line#\#\#\#}"
 
-    echo "--------------------------------------------------------------------------------"
+    hrule
     if [ -z "$count" ] || [ "$count" -eq 0 ]; then
         echo "  No compressed games recorded yet."
     else
@@ -1926,7 +1976,7 @@ show_statistics() {
         printf "  %-26s %s\n" "Total Size on Disk:" "$t_disk_str"
         printf "  %-26s %b\n" "TOTAL ZSTD SAVED:" "${GREEN}${t_saved_str}${RESET} (${overall_pct}% overall reduction)"
     fi
-    echo "================================================================================"
+    hrule
     echo -e "  ${DIM}Press any key to return to library...${RESET}"
     read_input
     tput civis
@@ -1943,37 +1993,35 @@ manage_settings() {
         local mode_desc="${GREEN}Full Speed (Normal CPU & I/O priority)${RESET}"
         if [ "$cur_mode" = "1" ]; then mode_desc="${YELLOW}Eco Mode (Low CPU/IO priority via ionice/nice)${RESET}"; fi
 
-        echo "================================================================================"
-        echo "  SETTINGS & PREFERENCES"
-        echo "================================================================================"
+        box_title "SETTINGS & PREFERENCES"
         echo -e "  Performance Mode: $mode_desc"
         echo "  ZSTD level: $COMPRESS_LEVEL (auto uses the filesystem setting)"
         local target_desc
         case "$VISUAL_TARGET" in
-            ultra-performance) target_desc="Ultra Performance (360p)" ;;
-            performance) target_desc="Performance (720p)" ;;
-            balanced) target_desc="Balanced (1080p)" ;;
-            quality) target_desc="Quality (1440p)" ;;
-            ultra-quality) target_desc="Ultra Quality (4K)" ;;
-            lossless) target_desc="Lossless (Hades LZ4 packages only)" ;;
-            *) target_desc="Native (no beta asset changes)" ;;
+            ultra-performance) target_desc="${GREEN}Ultra Performance (480p)${RESET}" ;;
+            performance) target_desc="${GREEN}Performance (720p)${RESET}" ;;
+            balanced) target_desc="${GREEN}Balanced (1080p)${RESET}" ;;
+            quality) target_desc="${GREEN}Quality (1440p)${RESET}" ;;
+            ultra-quality) target_desc="${GREEN}Ultra Quality (4K)${RESET}" ;;
+            lossless) target_desc="${GREEN}Lossless (Hades LZ4 packages only)${RESET}" ;;
+            *) target_desc="${DIM}Native (no asset changes)${RESET}" ;;
         esac
-        echo "  Asset profile: $target_desc"
-        echo "  [BETA] Supported files: loose raster images, simple DDS textures, and simple mono/stereo WAV audio"
-        echo "  Resized RGB images use tiered color precision (alpha is retained); Ultra Performance PCM may be 11.025 kHz / 8-bit."
-        echo "  Higher audio tiers target up to 16-bit PCM without up-converting; Native makes no beta asset changes."
-        echo "  Packed game files and encoded audio are skipped; Opus replacement needs game-specific support."
-        echo "--------------------------------------------------------------------------------"
-        echo "Custom library paths:"
+        echo -e "  Asset profile: $target_desc"
+        echo "  Applies to: loose images, DDS textures, PCM WAV, Hades packages, and"
+        echo "              packed PCK assets (Godot/Unity) where supported."
+        echo "  No per-file restore copies are kept for packed assets; Steam's"
+        echo "  'Verify integrity of game files' restores the originals."
+        hrule
+        echo "  Custom library paths:"
         if [ ! -s "$CUSTOM_LIBS_FILE" ]; then
-            echo "  (none)"
+            echo -e "  ${DIM}(none)${RESET}"
         else
             # -ba numbers empty lines too, so the printed index always matches the
             # line `sed "${n}d"` below removes. Without it, a blank line in the
             # file shifts every number and removal deletes the wrong library.
             nl -ba -w2 -s") " "$CUSTOM_LIBS_FILE"
         fi
-        echo "--------------------------------------------------------------------------------"
+        hrule
         echo "  [1] Toggle Speed / Throttle mode"
         echo "  [2] Add custom library path"
         echo "  [3] Remove custom library path"
@@ -1988,8 +2036,8 @@ manage_settings() {
         echo "  [7] Smallest saving worth a delete-only prune (MiB; compression uses the %, not this)"
         echo "      currently: $MIN_PRUNE_MIB MiB freeing"
         echo "  [b] Back to main menu"
-        echo "================================================================================"
-        echo -e "  ${DIM}Press a key [1, 2, 3, 4, 5, 6, 7, b]...${RESET}"
+        hrule
+        box_footer "1-7: change a setting   b: back"
 
         local s_opt
         read_input
@@ -2049,7 +2097,7 @@ manage_settings() {
                 echo "  Lower profiles resize images/DDS and resample simple PCM WAV to lower sample rates."
                 echo "  Lossless only recompresses Hades v7 LZ4 packages; decoded assets stay identical."
                 echo "  Anti-cheat compatibility is not detected. Native disables all asset changes."
-                echo "  [1] Ultra Performance (360p)"
+                echo "  [1] Ultra Performance (480p)"
                 echo "  [2] Performance (720p)"
                 echo "  [3] Balanced (1080p)"
                 echo "  [4] Quality (1440p)"
@@ -2215,11 +2263,11 @@ batch_compress_routine() {
     BATCH_ASSET_FOOTPRINT_SAVED=0 BATCH_ASSET_FOOTPRINT_MEASURED=0
 
     if [ "$all_mode" -eq 1 ]; then
-        echo "================================================================================"
+        hrule
         echo "  BATCH ASSET OPTIMIZATION (Target games: $pending)"
         echo "  Whole-game compression is disabled; only games with changed assets are deduplicated."
     else
-        echo "================================================================================"
+        hrule
         echo "  BATCH COMPACTION (Target games: $pending)"
     fi
     if [ "$STAT_RUNNING_COUNT" -gt 0 ]; then
@@ -2229,7 +2277,7 @@ batch_compress_routine() {
         echo "  ${#skipped_low[@]} low-yield game(s) held back (compressing rewrites the whole game, so a low ratio is skipped; set min_gain_pct=0 to include them)."
     fi
     echo "  Press Ctrl+C anytime to cancel safely."
-    echo "================================================================================"
+    hrule
     echo ""
 
     local done_count=0 skipped_running=0 failed_count=0 dedupe_failed=0 dedupe_rc asset_rc
@@ -2327,16 +2375,16 @@ batch_compress_routine() {
         echo "[BETA] Asset optimization: not run (not selected or not confirmed)."
     else
         echo "[BETA] Asset results: scanned $BATCH_ASSET_SCANNED game(s) · changed assets in $BATCH_ASSET_DONE · no eligible assets $BATCH_ASSET_NONE · failed $BATCH_ASSET_FAILED."
-        echo "  Changed files: images $BATCH_ASSET_IMAGES · DDS textures $BATCH_ASSET_TEXTURES · PCM WAV $BATCH_ASSET_WAV · lossless Hades packages $BATCH_ASSET_PACKAGES."
+        echo "  Changed files: images $BATCH_ASSET_IMAGES · textures (DDS or packed PCK) $BATCH_ASSET_TEXTURES · audio (PCM WAV or packed PCK) $BATCH_ASSET_WAV · lossless Hades packages $BATCH_ASSET_PACKAGES."
         echo "  Logical sizes of changed files: $(bytes_human "$BATCH_ASSET_BYTES_BEFORE") → $(bytes_human "$BATCH_ASSET_BYTES_AFTER") · reduction: $(bytes_human "$((BATCH_ASSET_BYTES_BEFORE-BATCH_ASSET_BYTES_AFTER))") across $BATCH_ASSET_FILES file(s)."
         if [ "$BATCH_ASSET_FOOTPRINT_MEASURED" -gt 0 ]; then
             echo "  Live game data footprint after optimization: $(bytes_human "$BATCH_ASSET_FOOTPRINT_SAVED") lower in aggregate (restore data and snapshots can still occupy space)."
         else
-            echo "  Physical game-data footprint change: unavailable; originals remain in restore copies, so logical reduction is not free space."
+            echo "  Physical game-data footprint change: unavailable; loose originals remain in restore copies (packed PCK keeps none), so logical reduction is not free space."
         fi
         echo "  Files identified: packed/media containers $BATCH_ASSET_PACKED · audio files $BATCH_ASSET_AUDIO (only Hades v7 LZ4 bundles can be recompressed; Bink/FMOD are not re-encoded)."
         echo "  WAV stays WAV. Converting to Opus needs explicit game/engine support and matching asset references; this tool does not rewrite those."
-        echo "  Changed files keep their original path and container; restore copies remain. Asset size reductions are not free-space savings until restore copies are finalized."
+        echo "  Changed files keep their original path and container. Loose assets keep restore copies; packed PCK is rewritten in place, so recover it with Steam verify. Asset size reductions are not free-space savings until loose restore copies are finalized."
     fi
     if [ "$failed_count" -gt 0 ] || [ "$dedupe_failed" -eq 1 ] || [ "${BATCH_ASSET_FAILED:-0}" -gt 0 ]; then
         if [ "$all_mode" -eq 1 ]; then echo -e "${YELLOW}Asset batch finished with issue(s). Press any key to return...${RESET}"; else echo -e "${YELLOW}Batch finished with compression or deduplication issue(s). Press any key to return...${RESET}"; fi
@@ -2824,9 +2872,9 @@ cmd_stats() {
     rows=${rows:-0}; tu=${tu:-0}; td=${td:-0}; saved=${saved:-0}
     overall=$(pct_of "$saved" "$tu")
 
-    echo "================================================================================"
+    hrule
     echo -e "  ${BOLD}COMPRESSION STATISTICS${RESET}"
-    echo "================================================================================"
+    hrule
     if [ "$rows" -eq 0 ]; then
         echo "  No compressed games recorded yet."
         echo "  Run the interactive batch ('b') or compress a game to populate this."
@@ -2843,7 +2891,7 @@ cmd_stats() {
     local dedupe_line dedupe_passes dedupe_libs dedupe_latest dedupe_newest
     dedupe_line=$(dedupe_history_summary)
     IFS=$'\t' read -r dedupe_passes dedupe_libs dedupe_latest dedupe_newest <<< "$dedupe_line"
-    echo '--------------------------------------------------------------------------------'
+    hrule
     echo '  DEDUPLICATION MEASUREMENTS (game data footprint)'
     if [ "${dedupe_passes:-0}" -eq 0 ]; then
         echo '  No measured dedupe passes recorded yet.'
@@ -2854,7 +2902,7 @@ cmd_stats() {
         printf "  %-40s %s\n" "Most recent pass:" "$(epoch_local "$dedupe_newest")"
         echo '  ¹ Sum of the latest measured pass for each directory; overlapping scopes may double-count. Not a cumulative total.'
     fi
-    echo "================================================================================"
+    hrule
     return 0
 }
 
@@ -3149,7 +3197,7 @@ cmd_engines() {
         [ "$tag" = CONTAINER ] || continue
         printf '    %10s  %-15s %6s files  %s\n' "$(bytes_human "${bytes:-0}")" "$class" "${files:-0}" "${path:-.}"
     done < <(printf '%s\n' "$output" | awk -F'|' '$1=="CONTAINER"{print $3"|"$0}' | sort -rn | cut -d'|' -f2-)
-    printf '  Nothing was changed. Inspect candidates with --variants or supported packed files with --audit-container. Texture resizing inside packed assets is not available yet.\n'
+    printf '  Nothing was changed. Inspect candidates with --variants or supported packed files with --audit-container. Supported packed PCK textures/audio are rewritten only by asset apply, not by this audit.\n'
 }
 
 # One-shot, format-agnostic slimming: keep the highest resolution tier and the
@@ -3348,7 +3396,7 @@ asset_workflow() {
                 asset_scan_summary "$packed" "$audio" "$raster" "$total" "$packed_bytes" "$audio_bytes"
                 return 0
             fi
-            printf '[BETA] Asset profile: %s · images %s, DDS textures %s, PCM WAV %s, lossless Hades packages %s · estimated logical sizes: %s → %s (reduction %s)\n' \
+            printf '[BETA] Asset profile: %s · images %s, textures %s, audio %s, lossless Hades packages %s · estimated logical sizes: %s → %s (reduction %s)\n' \
                 "$reported_target" "${images:-0}" "${textures:-0}" "${wavs:-0}" "${packages:-0}" "$(bytes_human "$before")" "$(bytes_human "$after")" \
                 "$(bytes_human "$((before-after))")"
             if [ "$confirmed" != 1 ] && [ ! -t 0 ]; then
@@ -3356,7 +3404,7 @@ asset_workflow() {
                 return 2
             fi
             if [ "$confirmed" != 1 ]; then
-                printf '[BETA] Images/DDS may lose visual detail; PCM WAV may be resampled. Anti-cheat is not detected automatically. Originals are retained for restore. Apply to %s? [y/N] ' "$query"
+                printf '[BETA] Images/DDS may lose visual detail; PCM WAV may be resampled. Anti-cheat is not detected automatically. Loose assets keep a restore copy; supported packed PCK files are rewritten in place with no restore copy (recover with Steam "Verify integrity of game files"). Apply to %s? [y/N] ' "$query"
             fi
         elif [ "$action" = finalize ]; then
             if [ ! -t 0 ]; then
@@ -3395,7 +3443,7 @@ asset_workflow() {
                printf 'Lossless candidates rejected: original game assets restored; no package savings accepted.\n' ;;
         esac
     fi
-    printf '[BETA] Game: %s · Asset profile: %s · images %s, DDS textures %s, PCM WAV %s, lossless Hades packages %s\n' "$query" "$reported_target" "${images:-0}" "${textures:-0}" "${wavs:-0}" "${packages:-0}"
+    printf '[BETA] Game: %s · Asset profile: %s · images %s, textures %s, audio %s, lossless Hades packages %s\n' "$query" "$reported_target" "${images:-0}" "${textures:-0}" "${wavs:-0}" "${packages:-0}"
     case "$action" in
         plan)
             ASSET_PREVIEW_COUNT="$count"
@@ -3405,7 +3453,7 @@ asset_workflow() {
             else
                 printf 'Candidate asset bytes: %s → %s · possible logical reduction: %s\n' \
                     "$(bytes_human "$before")" "$(bytes_human "$after")" "$(bytes_human "$((before-after))")"
-                printf 'Images/DDS are resized; simple PCM WAV may be resampled. Hades v7 LZ4 packages are recompressed without changing decoded assets. Bink/FMOD and other packages remain unchanged. These are logical sizes, not net disk savings.\n'
+                printf 'Loose images/DDS are resized; simple PCM WAV may be resampled; supported packed PCK audio/textures are rewritten in place with no restore copy. Hades v7 LZ4 packages are recompressed without changing decoded assets. Bink/FMOD and other packages remain unchanged. These are logical sizes, not net disk savings.\n'
             fi ;;
         apply|restore|finalize)
             disk_after=$(asset_usage_bytes "$game") || disk_after=""
@@ -3481,7 +3529,7 @@ batch_asset_game() {
         BATCH_ASSET_CHANGED=0
         BATCH_ASSET_NONE=$((BATCH_ASSET_NONE+1)); return 0
     fi
-    printf '  [BETA] Assets: %s — images %s, DDS textures %s, PCM WAV %s, lossless Hades packages %s; logical sizes %s → %s (reduction %s). Originals retained, so this is not a free-space figure.\n' \
+    printf '  [BETA] Assets: %s — images %s, textures %s, audio %s, lossless Hades packages %s; logical sizes %s → %s (reduction %s). Loose originals are retained, but packed PCK has no restore copy, so this is not a free-space figure.\n' \
         "$reported" "${images:-0}" "${textures:-0}" "${wavs:-0}" "${packages:-0}" "$(bytes_human "$before")" "$(bytes_human "$after")" \
         "$(bytes_human "$((before-after))")"
     BATCH_ASSET_DONE=$((BATCH_ASSET_DONE+1))
@@ -3529,10 +3577,9 @@ cmd_benchmark() {
         fit_name "$name" 40
         printf '%-40s %9d MiB -> %9d MiB   %5.1f%%\n' "$NAME_FIT" "$u" "$d" "$pct"
     done <<< "$table"
-    printf '%s\n' "-------------------------------------------------------------------------------------"
-    echo "================================================================================"
+    hrule
     echo -e "  ${BOLD}MEASURED SAVINGS${RESET}"
-    echo "================================================================================"
+    hrule
     printf "  %-30s %s\n" "Games measured:" "$rows"
     printf "  %-30s %s\n" "Before:" "$(mib_human "$tu")"
     printf "  %-30s %s\n" "After:" "$(mib_human "$td")"
@@ -3540,7 +3587,7 @@ cmd_benchmark() {
         "${GREEN}$(mib_human "$saved")${RESET} (${BOLD}${overall}%${RESET})"
     printf "  %-30s %s (%s%%)\n" "Best single game:" "${best_name:-n/a}" "${best_pct:-0}"
     printf "  %-30s %s\n" "Games saving over 50%:" "${over50:-0}"
-    echo "================================================================================"
+    hrule
     printf "  %bAll figures come from Btrfs extent metadata on this machine, not an estimate.%b\n" "$DIM" "$RESET"
     return 0
 }
@@ -4251,9 +4298,9 @@ cmd_balance() {
         return 1
     fi
 
-    echo "================================================================================"
+    hrule
     echo "  FILESYSTEM BALANCE"
-    echo "================================================================================"
+    hrule
     echo "Defragmenting rewrites a game's extents, which leaves them scattered across"
     echo "the filesystem. A metadata balance relocates metadata block groups. It is"
     echo "not required to reclaim deduplicated file data. This follows the optional"
@@ -4266,7 +4313,7 @@ cmd_balance() {
     echo "  It needs root, it is I/O heavy, and on a large filesystem it can run for"
     echo "  hours. It is not scheduled and not repeated: each command runs once and"
     echo "  this exits. A balance is safe to interrupt at any time."
-    echo "================================================================================"
+    hrule
 
     # Deliberately not runnable unattended. The same reasoning as the rest of the
     # tool applies with more force here: a wrong guess rewrites a whole
@@ -4600,8 +4647,8 @@ while true; do
     # "can only be used in a function" on every redraw and write into the TUI.
     tui_pct=0
     [ "${#GAMES_NAME[@]}" -gt 0 ] && tui_pct=$(( STAT_COMP_COUNT * 100 / ${#GAMES_NAME[@]} ))
-    echo "================================================================================"
-    echo -e "  ${BOLD}${CYAN}BTRFS GAME COMPRESSOR${RESET} ${DIM}v$VERSION${RESET}   ${DIM}${#GAMES_NAME[@]} game(s) · ${#LIBS[@]} library(ies)${RESET}"
+    box_title "BTRFS GAME COMPRESSOR  ·  v$VERSION"
+    echo -e "  ${DIM}${#GAMES_NAME[@]} game(s) · ${#LIBS[@]} library(ies)${RESET}"
     printf "  [%s] %d%% compacted\n" "$(bar "$STAT_COMP_COUNT" "${#GAMES_NAME[@]}")" "$tui_pct"
     printf "  ${GREEN}%d Compacted${RESET}  │  ${YELLOW}%d Compressed only${RESET}  │  ${MAGENTA}%d Updated${RESET}  │  ${YELLOW}%d Uncompressed${RESET}" \
         "$STAT_COMP_COUNT" "$STAT_COMPRESSED_ONLY_COUNT" "$STAT_UPD_COUNT" "$STAT_UNCOMP_COUNT"
@@ -4615,19 +4662,19 @@ while true; do
         printf "  │  ${RED}%d Low Yield${RESET}" "$LOW_YIELD_COUNT"
     fi
     printf "\n"
-    echo "================================================================================"
+    hrule
 
     if [ "$VIEW_PENDING_ONLY" -eq 1 ] || [ -n "$FILTER_QUERY" ]; then
         printf "  ${CYAN}Filter active:${RESET} "
         [ "$VIEW_PENDING_ONLY" -eq 1 ] && printf "[PENDING ONLY] "
         [ -n "$FILTER_QUERY" ] && printf "[\"%s\"] " "$FILTER_QUERY"
         printf "(%d matches)\n" "$TOTAL_MATCHES"
-        echo "--------------------------------------------------------------------------------"
+        hrule
     fi
 
     # Items table
     printf "${BOLD}  SEL    ID   STATUS          GAME NAME${RESET}\n"
-    echo "--------------------------------------------------------------------------------"
+    hrule
 
     if [ "$TOTAL_MATCHES" -eq 0 ]; then
         echo "  (No games found matching your current filter)"
@@ -4673,7 +4720,7 @@ while true; do
         done
     fi
 
-    echo "--------------------------------------------------------------------------------"
+    hrule
     action_txt="Process highlighted"
     if [ "$CHECKED_COUNT" -gt 0 ]; then
         action_txt="${CYAN}Process $CHECKED_COUNT selected${RESET}"
@@ -4681,8 +4728,7 @@ while true; do
 
     echo -e "  Page ${BOLD}${CURRENT_PAGE}/${TOTAL_PAGES}${RESET}  │  ${BOLD}↑/↓${RESET}: Move  │  ${BOLD}←/→${RESET}: Page  │  ${BOLD}Space${RESET}: Select  │  ${BOLD}Enter/c${RESET}: $action_txt\033[K"
     echo -e "  Actions: [${BOLD}b${RESET}] Batch menu (pending work or asset scan all)  [${BOLD}o${RESET}] Preview/apply assets for highlighted game\033[K"
-    echo -e "  Browse: [${BOLD}↑/↓${RESET}] Move  [${BOLD}Space${RESET}] Select  [${BOLD}a${RESET}] All page  [${BOLD}f${RESET}] Search  [${BOLD}s${RESET}] Settings  [${BOLD}q${RESET}] Quit\033[K"
-    echo "================================================================================"
+    box_footer "↑/↓ move   ←/→ page   Space select   Enter process   b batch   o assets   s settings   q quit"
 
     if ! read_input; then
         clear
@@ -4775,7 +4821,7 @@ while true; do
                 ASSET_PREVIEW_COUNT=0
                 asset_workflow "$cur_path" --assets
                 if [ "$VISUAL_TARGET" != native ] && [ "${ASSET_PREVIEW_COUNT:-0}" -gt 0 ]; then
-                    read -r -p "[BETA] Apply this profile to supported images, DDS textures and PCM WAV audio? Originals are retained; anti-cheat is not detected. [y/N] " asset_reply || asset_reply=""
+                    read -r -p "[BETA] Apply this profile to supported images, textures, audio and packed PCK? Loose files keep a restore copy; packed PCK is rewritten in place with no restore copy (recover via Steam verify); anti-cheat is not detected. [y/N] " asset_reply || asset_reply=""
                     if [[ "$asset_reply" = y || "$asset_reply" = Y ]]; then
                         asset_workflow "$cur_path" --apply-assets 1
                         discover_data
@@ -4787,7 +4833,7 @@ while true; do
                 NEEDS_FULL_CLEAR=1
             fi
             continue ;;
-        c|C)
+        c|C|"$KEY_ENTER")
             TARGETS=()
             for t_path in "${!CHECKED_STATE[@]}"; do
                 if [[ "${CHECKED_STATE[$t_path]}" == "1" ]]; then
@@ -4813,9 +4859,9 @@ while true; do
                 tgt_path="$sel_path"
                 sel_idx=$(game_index_by_path "$tgt_path" || true)
                 if [ -n "$sel_idx" ] && { [ "${GAMES_STATUS[$sel_idx]}" = "COMPRESSED" ] || { [ "${GAMES_STATUS[$sel_idx]}" = "LOW YIELD" ] && [ "${GAMES_DEDUPE_PENDING[$sel_idx]:-0}" -eq 1 ]; }; }; then
-                    echo "================================================================================"
+                    hrule
                     echo "  GAME DEDUPLICATION: $tgt_name"
-                    echo "================================================================================"
+                    hrule
                     echo "  This game is already compressed; only deduplication will run."
                     echo -e "Press [${BOLD}y${RESET}] to deduplicate, or any other key to cancel..."
                     read_input
@@ -4833,9 +4879,9 @@ while true; do
                     continue
                 fi
 
-                echo "================================================================================"
+                hrule
                 echo "  GAME COMPRESSION: $tgt_name"
-                echo "================================================================================"
+                hrule
                 echo "  Location: $tgt_path"
                 echo ""
                 echo "Analyzing current disk usage..."
@@ -4853,7 +4899,7 @@ while true; do
                 elif [ "$COMPSIZE_OK" -ne 1 ]; then
                     echo -e "  ${YELLOW}Native measurement unavailable - savings cannot be measured.${RESET}"
                 fi
-                echo "--------------------------------------------------------------------------------"
+                hrule
                 echo -e "Press [${BOLD}y${RESET}] to compress with ZSTD, or any other key to cancel..."
                 read_input
                 if [[ "$KEY" =~ ^[Yy]$ ]]; then
@@ -4889,13 +4935,13 @@ while true; do
                     read_input
                 fi
             else
-                echo "================================================================================"
+                hrule
                 echo "  COMPRESSING ${#TARGETS[@]} SELECTED GAMES"
-                echo "================================================================================"
+                hrule
                 for t_path in "${TARGETS[@]}"; do
                     echo "  • $(basename "$t_path")"
                 done
-                echo "--------------------------------------------------------------------------------"
+                hrule
                 echo -e "Press [${BOLD}y${RESET}] to proceed with all, or any other key to cancel..."
                 read_input
                 if [[ "$KEY" =~ ^[Yy]$ ]]; then

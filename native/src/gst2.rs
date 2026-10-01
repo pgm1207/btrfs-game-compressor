@@ -1,4 +1,5 @@
-//! Export-only, profile-aware rewriting of Godot `GST2` (`.ctex`) textures.
+//! Profile-aware rewriting of Godot `GST2` (`.ctex`) textures, used by both the
+//! export commands and the in-place asset pipeline.
 //!
 //! A GST2 file is a small outer header followed by an image payload that may be
 //! raw pixels, PNG or WebP. Encodings this module does not understand are left
@@ -233,7 +234,13 @@ pub fn transform(bytes: &[u8], target: &TextureTarget) -> io::Result<Option<Vec<
     let new_mipmaps = if mipmaps == 0 { 0 } else { 31 - new_w.max(new_h).leading_zeros() };
     let levels = new_mipmaps + 1;
 
-    let mut level = resize(&base, new_w, new_h);
+    // Resampling to the same dimensions is not an identity operation (Lanczos3
+    // ringing changes pixels slightly). Skip it when there is no downscale.
+    let mut level = if new_w == width && new_h == height {
+        base
+    } else {
+        resize(&base, new_w, new_h)
+    };
     let mut payload = Vec::new();
     let mut cursor_w = new_w;
     let mut cursor_h = new_h;
@@ -263,7 +270,10 @@ pub fn transform(bytes: &[u8], target: &TextureTarget) -> io::Result<Option<Vec<
         if i + 1 < levels {
             cursor_w = (cursor_w / 2).max(1);
             cursor_h = (cursor_h / 2).max(1);
-            level = resize(&base, cursor_w, cursor_h);
+            // Derive each mip from the already-quantized level above it, not the
+            // pristine base. Otherwise a second in-place pass regenerates the
+            // mips from the re-decoded base and shrinks slightly again forever.
+            level = resize(&level, cursor_w, cursor_h);
         }
     }
 
@@ -412,6 +422,27 @@ mod tests {
         basis[36..40].copy_from_slice(&3u32.to_le_bytes());
         assert!(transform(&basis, &target).unwrap().is_none());
         assert!(transform(b"not a texture", &target).unwrap().is_none());
+    }
+
+    #[test]
+    fn at_cap_textures_are_quantized_once_and_then_untouched() {
+        // Ultra Performance-style quantization at or below the physical cap must
+        // be a fixed point: a later in-place pass must not resample or re-encode
+        // the texture again. The mipped case is the one that regressed on real
+        // Godot 4 packs, where regenerated mips differed on every run.
+        let mut mipped = webp_ctex(256, 192);
+        mipped[44..48].copy_from_slice(&3u32.to_le_bytes());
+        for _ in 0..3 {
+            mipped.extend_from_slice(&1u32.to_le_bytes());
+            mipped.push(0);
+        }
+        let target = TextureTarget { max_edge: 64, quality: image_dds::Quality::Fast, color_bits: 4 };
+        for source in [webp_ctex(48, 32), webp_ctex(256, 192), mipped] {
+            let once = transform(&source, &target).unwrap().expect("first pass must reduce");
+            assert!(once.len() < source.len());
+            assert!(transform(&once, &target).unwrap().is_none(), "second pass must be a no-op");
+            assert_eq!(once, transform(&source, &target).unwrap().unwrap(), "must be deterministic");
+        }
     }
 
     #[test]

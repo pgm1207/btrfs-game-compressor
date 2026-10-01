@@ -223,6 +223,12 @@ fn compress_file_progress(
             ..Default::default()
         };
         call(file, request(1, 0x94, 16, 48), &mut args).map_err(|e| {
+            // Keep ENOTTY/EOPNOTSUPP intact so best-effort callers can tell
+            // "this filesystem/kernel has no such ioctl" apart from a real
+            // compression failure, which still gets the actionable message.
+            if ioctl_unsupported(&e) {
+                return e;
+            }
             io::Error::new(
                 e.kind(),
                 format!(
@@ -235,6 +241,33 @@ fn compress_file_progress(
         progress(start);
     }
     file.sync_all()
+}
+/// True when an ioctl failed because the filesystem or kernel does not provide
+/// it, rather than because the request itself was rejected.
+pub(crate) fn ioctl_unsupported(e: &io::Error) -> bool {
+    // 25 is ENOTTY ("inappropriate ioctl for device"); EOPNOTSUPP maps to
+    // ErrorKind::Unsupported. Stock/older kernels and non-Btrfs filesystems
+    // (tmpfs test fixtures, ext4 CI runners) report one of these.
+    e.raw_os_error() == Some(25) || e.kind() == io::ErrorKind::Unsupported
+}
+/// Best-effort Btrfs Zstd recompression for callers that have already produced
+/// the desired bytes. The compression ioctl only exists on Btrfs with the
+/// required kernel support; when it is missing the transformed file is still
+/// installed rather than failing the whole pass. Real I/O failures still error.
+pub(crate) fn compress_file_best_effort(file: &File, path: &Path, level: u8) -> io::Result<()> {
+    match compress_file(file, path, level) {
+        Ok(()) => Ok(()),
+        Err(e) if ioctl_unsupported(&e) => {
+            if env::var_os("BGC_VERBOSE").is_some() {
+                eprintln!(
+                    "{}: Btrfs compression unavailable on this filesystem; installed without recompressing",
+                    path.display()
+                );
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 fn compress(tree: &Tree, level: u8) -> io::Result<()> {
     if !(1..=15).contains(&level) {

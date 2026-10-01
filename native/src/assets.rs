@@ -35,7 +35,7 @@ struct Profile {
 }
 fn profile(s: &str) -> io::Result<Option<Profile>> {
     Ok(Some(match s {
-        "ultra-performance" => Profile { label:"Ultra Performance (360p; WAV up to 11.025 kHz / 8-bit)", max_edge:640, jpeg_quality:60, color_bits:4, audio_rate:11025, audio_bits:8 },
+        "ultra-performance" => Profile { label:"Ultra Performance (480p; WAV up to 11.025 kHz / 8-bit)", max_edge:640, jpeg_quality:60, color_bits:4, audio_rate:11025, audio_bits:8 },
         "performance" => Profile { label:"Performance (720p)", max_edge:1280, jpeg_quality:80, color_bits:6, audio_rate:32000, audio_bits:16 },
         "balanced" => Profile { label:"Balanced (1080p)", max_edge:1920, jpeg_quality:86, color_bits:7, audio_rate:44100, audio_bits:16 },
         "quality" => Profile { label:"Quality (1440p)", max_edge:2560, jpeg_quality:91, color_bits:8, audio_rate:48000, audio_bits:16 },
@@ -1463,6 +1463,18 @@ pub fn run(action: &str, target: &str, level: u8, root: &Path) -> io::Result<()>
         }
         Ok(())
     })?;
+    // Packed PCK assets are handled by a dedicated in-place pass. They are far
+    // too large to buffer as a Vec<u8>, and the Godot transforms rewrite the
+    // whole container rather than one stream, so they cannot ride the streaming
+    // image/audio callback above.
+    if action == "apply" || action == "plan" {
+        let packed = packed_asset_pass(root, target, &p, action, level)?;
+        count += packed.count;
+        before += packed.before;
+        after += packed.after;
+        texture_count += packed.textures;
+        audio_count += packed.audio;
+    }
     println!(
         "ASSETS|{action}|{}|{count}|{before}|{after}|{retained}|{}|{}|{image_count}|{texture_count}|{audio_count}|{}|{}|{}|{}|{package_count}",
         p.label, inventory.packed_media, inventory.audio_files, inventory.raster_files,
@@ -1470,6 +1482,115 @@ pub fn run(action: &str, target: &str, level: u8, root: &Path) -> io::Result<()>
     );
     Ok(())
 }
+
+#[derive(Default)]
+struct PackedStats {
+    count: u64,
+    before: u64,
+    after: u64,
+    textures: u64,
+    audio: u64,
+}
+
+/// Walk for Godot PCK files and apply the profile in place.
+///
+/// No per-file backups are retained: this tool is aimed at Steam-managed games,
+/// where "Verify integrity of game files" restores the original pack. The
+/// savings gate is enforced by the transform itself, so a pack that would not
+/// shrink is left byte-for-byte untouched.
+fn packed_asset_pass(root: &Path, target: &str, p: &Profile, action: &str, level: u8) -> io::Result<PackedStats> {
+    let mut stats = PackedStats::default();
+    if p.max_edge == u32::MAX {
+        // Lossless never resizes textures.
+        return Ok(stats);
+    }
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        super::cancelled()?;
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.file_name().is_some_and(|n| n == BACKUP) {
+                continue;
+            }
+            let m = fs::symlink_metadata(&path)?;
+            if m.file_type().is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if !m.file_type().is_file() || m.len() < 52 {
+                continue;
+            }
+            if !path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("pck"))
+            {
+                continue;
+            }
+            let original_len = m.len();
+            if action == "plan" {
+                // A packed pack is a real candidate, but its reduction can only
+                // be known after the in-place transform. Count it and report no
+                // predicted change rather than overstating the preview.
+                stats.count += 1;
+                stats.before += original_len;
+                stats.after += original_len;
+                continue;
+            }
+            match packed_apply_one(&path, target, level) {
+                Ok((textures, audio)) => {
+                    if textures + audio > 0 {
+                        let after_len = fs::metadata(&path)?.len();
+                        stats.count += 1;
+                        stats.before += original_len;
+                        stats.after += after_len;
+                        stats.textures += textures;
+                        stats.audio += audio;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
+                Err(e) => {
+                    if std::env::var_os("BGC_VERBOSE").is_some() {
+                        eprintln!("Skipping packed asset {}: {e}", path.display());
+                    }
+                }
+            }
+        }
+    }
+    Ok(stats)
+}
+
+/// Apply the profile to one standalone PCK, returning (textures, audio) counts.
+fn packed_apply_one(path: &Path, target: &str, level: u8) -> io::Result<(u64, u64)> {
+    // Read the version so Godot 3 and Godot 4 packs route to their own
+    // transform. Anything unrecognized stays untouched.
+    let mut f = open_read(path)?;
+    let _magic = {
+        let mut b = [0u8; 4];
+        f.read_exact(&mut b)?;
+        u32::from_le_bytes(b)
+    };
+    let mut vb = [0u8; 4];
+    f.read_exact(&mut vb)?;
+    let version = u32::from_le_bytes(vb);
+    drop(f);
+    let before = fs::metadata(path)?.len();
+    let counts = match version {
+        1 => super::containers::godot3_apply(path, 0.0, target, level)?,
+        3 | 4 => (super::containers::godot_texture_apply(path, 0.0, target, level)?, 0),
+        _ => return Ok((0, 0)),
+    };
+    // Defence in depth for the savings gate: a transform only installs a
+    // temporary when it actually shrank, so a non-shrinking pack keeps its
+    // original byte-for-byte content and reports nothing.
+    let after = fs::metadata(path)?.len();
+    if after >= before {
+        return Ok((0, 0));
+    }
+    Ok(counts)
+}
+
 fn finish_backups(action: &str, root: &Path, backups: Vec<PathBuf>) -> io::Result<()> {
     let mut count = 0u64;
     let mut bytes = 0u64;
@@ -1642,6 +1763,45 @@ mod tests {
         assert_eq!(fs::read(base.join("orphan.bgc-checksum")).unwrap(), b"keep");
         assert!(fs::symlink_metadata(base.join("link")).unwrap().file_type().is_symlink());
         assert_eq!(fs::read(root.join("outside")).unwrap(), b"untouched");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn packed_apply_rewrites_pack_in_place_without_a_backup_dir() {
+        // A Godot 3 PCK with one large GDST texture must shrink in place, and
+        // no .bgc-assets-backup tree may be created for it: the recovery path
+        // for packed Steam assets is "Verify integrity of game files".
+        let root = fixture("packed-apply");
+        // 1000x600 exceeds the 640px Ultra Performance cap; the gdst unit test
+        // already proves this exact fixture shrinks when downscaled.
+        let texture = crate::gdst::tests::fixture(1000, 600);
+        let name = "res://art.stex";
+        let mut bytes = b"GDPC".to_vec();
+        for v in [1u32, 3, 7, 0] { bytes.extend_from_slice(&v.to_le_bytes()); }
+        bytes.resize(84, 0);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        let offset = 88 + 4 + name.len() + 1 + 32;
+        bytes.extend_from_slice(&(name.len() as u32 + 1).to_le_bytes());
+        bytes.extend_from_slice(name.as_bytes()); bytes.push(0);
+        bytes.extend_from_slice(&(offset as u64).to_le_bytes());
+        bytes.extend_from_slice(&(texture.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&crate::md5::digest(&texture));
+        bytes.extend_from_slice(&texture);
+        let pack = root.join("game.pck");
+        fs::write(&pack, &bytes).unwrap();
+        let original = fs::read(&pack).unwrap();
+
+        let (textures, _audio) = packed_apply_one(&pack, "ultra-performance", 1).unwrap();
+        assert_eq!(textures, 1, "the texture pass must report a rewrite");
+        let rewritten = fs::read(&pack).unwrap();
+        assert!(rewritten.len() < original.len());
+        assert!(!root.join(BACKUP).join("game.pck").exists());
+
+        // A pack that cannot shrink must be left byte-for-byte identical.
+        fs::write(&pack, &rewritten).unwrap();
+        let (again, _) = packed_apply_one(&pack, "ultra-performance", 1).unwrap();
+        assert_eq!(again, 0);
+        assert_eq!(fs::read(&pack).unwrap(), rewritten);
         fs::remove_dir_all(root).unwrap();
     }
 

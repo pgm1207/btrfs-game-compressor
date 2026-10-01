@@ -1,6 +1,6 @@
 //! Bounded, read-only Godot PCK directory and Unreal Pak footer inspection.
 //! Neither extension names nor footer codec names establish safe removability.
-use std::{collections::BTreeMap, fs, io::{self, Read, Write, Seek, SeekFrom},
+use std::{collections::BTreeMap, fs::{self, File}, io::{self, Read, Write, Seek, SeekFrom},
     os::unix::fs::{MetadataExt, OpenOptionsExt}, path::Path};
 use super::invalid;
 
@@ -485,6 +485,52 @@ pub fn godot3_optimize(input: &Path, output: Option<&Path>, min_efficiency: f64,
     godot3_transform(input, output, min_efficiency, profile, false)
 }
 
+/// In-place Godot 3 PCK audio/texture rewrite used by the main asset pipeline.
+///
+/// Chains the two export transforms — audio (MP3→Vorbis, PCM resample, `.import`
+/// retyping) and GDST `.stex` texture downscale — into sibling temporary files,
+/// then recompresses and atomically renames the final result over the pack. The
+/// texture pass reads the audio result when there is one, so both shrinks
+/// compose in a single pass. No per-file backup is kept, matching the Steam
+/// "Verify integrity of game files" recovery path. Returns `(textures, audio)`,
+/// the number of categories actually rewritten (0 or 1 each).
+pub fn godot3_apply(pack: &Path, min_efficiency: f64, profile: &str, level: u8) -> io::Result<(u64, u64)> {
+    let audio_tmp = sibling_temp(pack, "audio");
+    let texture_tmp = sibling_temp(pack, "tex");
+    let _ = fs::remove_file(&audio_tmp);
+    let _ = fs::remove_file(&texture_tmp);
+    let mut audio_written = false;
+    let mut texture_written = false;
+    let write = (|| -> io::Result<()> {
+        godot3_optimize(pack, Some(&audio_tmp), min_efficiency, profile)?;
+        audio_written = fs::symlink_metadata(&audio_tmp).is_ok();
+        // The transform writes nothing when its savings gate rejects the pack.
+        let tex_input = if audio_written { audio_tmp.as_path() } else { pack };
+        godot3_transform(tex_input, Some(&texture_tmp), min_efficiency, profile, true)?;
+        texture_written = fs::symlink_metadata(&texture_tmp).is_ok();
+        let winner = if texture_written {
+            &texture_tmp
+        } else if audio_written {
+            &audio_tmp
+        } else {
+            return Ok(());
+        };
+        let m = fs::metadata(pack)?;
+        fs::set_permissions(winner, m.permissions())?;
+        let f = fs::OpenOptions::new().read(true).open(winner)?;
+        super::compress_file_best_effort(&f, pack, level)?;
+        drop(f);
+        File::open(winner.parent().ok_or_else(|| invalid("invalid PCK path"))?)?.sync_all()?;
+        fs::rename(winner, pack)?;
+        File::open(pack.parent().ok_or_else(|| invalid("invalid PCK path"))?)?.sync_all()?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&audio_tmp);
+    let _ = fs::remove_file(&texture_tmp);
+    write?;
+    Ok((texture_written as u64, audio_written as u64))
+}
+
 fn godot3_transform(input: &Path, output: Option<&Path>, min_efficiency: f64, profile: &str, textures_only: bool) -> io::Result<()> {
     if !min_efficiency.is_finite() || !(0.0..=100.0).contains(&min_efficiency) {
         return Err(invalid("Godot write-efficiency percentage must be between 0 and 100"));
@@ -947,6 +993,52 @@ pub fn godot_texture_transform(input: &Path, output: Option<&Path>, min_efficien
     Ok(())
 }
 
+/// In-place Godot PCK texture rewrite used by the main asset pipeline.
+///
+/// Unlike the export path this replaces `pack` itself. It writes the rebuilt
+/// pack to a sibling temporary file, verifies it exactly like an export, then
+/// recompresses and atomically renames it over the original. There is
+/// deliberately no per-file backup: this tool targets Steam-managed games,
+/// where "Verify integrity of game files" restores the original pack. A rewrite
+/// that does not shrink the pack, or fails the write-efficiency gate, leaves the
+/// original untouched. Returns the number of rewritten texture categories (0/1).
+pub fn godot_texture_apply(pack: &Path, min_efficiency: f64, profile: &str, level: u8) -> io::Result<u64> {
+    let tmp = sibling_temp(pack, "tex");
+    let _ = fs::remove_file(&tmp);
+    let mut written = false;
+    let result = (|| -> io::Result<()> {
+        godot_texture_transform(pack, Some(&tmp), min_efficiency, profile)?;
+        // The transform writes nothing when the savings gate rejects the pack.
+        match fs::symlink_metadata(&tmp) {
+            Ok(_) => {
+                let m = fs::metadata(pack)?;
+                fs::set_permissions(&tmp, m.permissions())?;
+                let f = fs::OpenOptions::new().read(true).open(&tmp)?;
+                super::compress_file_best_effort(&f, pack, level)?;
+                drop(f);
+                File::open(tmp.parent().ok_or_else(|| invalid("invalid PCK path"))?)?.sync_all()?;
+                fs::rename(&tmp, pack)?;
+                File::open(pack.parent().ok_or_else(|| invalid("invalid PCK path"))?)?.sync_all()?;
+                written = true;
+                Ok(())
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result?;
+    Ok(written as u64)
+}
+
+fn sibling_temp(path: &Path, tag: &str) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".bgc-pck-{tag}-{}", std::process::id()));
+    path.with_file_name(name)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn changed_directory_verified(
     output: &Path,
@@ -1271,5 +1363,103 @@ mod tests {
         assert!(result.len() < bytes.len());
         assert_eq!(fs::read(&input).unwrap(), bytes);
         fs::remove_file(input).unwrap(); fs::remove_file(output).unwrap(); fs::remove_dir(root).unwrap();
+    }
+
+    // Godot 3 in-place apply must run both transforms in one pass: the audio
+    // pass rewrites `.sample`, then the texture pass reads that result and
+    // rewrites `.stex`. Nothing is backed up; recovery is Steam verify.
+    #[test]
+    fn godot3_apply_chains_audio_and_texture_and_is_idempotent() {
+        let root = std::env::temp_dir().join(format!("bgc-g3-apply-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&root).unwrap();
+        let frames = 4800usize;
+        let mut pcm = Vec::new();
+        for i in 0..frames {
+            let v = ((i as f64 * std::f64::consts::TAU * 440.0 / 48000.0).sin() * 16000.0) as i16;
+            pcm.extend_from_slice(&v.to_le_bytes());
+            pcm.extend_from_slice(&(-v).to_le_bytes());
+        }
+        let audio = crate::godot3::write_resource("AudioStreamSample", &[
+            ("data", crate::godot3::Variant::Raw(pcm)), ("format", crate::godot3::Variant::Int(1)),
+            ("mix_rate", crate::godot3::Variant::Int(48000)), ("stereo", crate::godot3::Variant::Bool(true)),
+        ]).unwrap();
+        let entries = [("res://tone.sample", audio), ("res://art.stex", crate::gdst::tests::fixture(1000, 600))];
+        // Plain v1 pack: 84-byte header, directory immediately after it.
+        let mut bytes = b"GDPC".to_vec();
+        for v in [1u32, 3, 7, 0] { bytes.extend_from_slice(&v.to_le_bytes()); }
+        bytes.resize(84, 0);
+        bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        let mut offset = 88 + entries.iter().map(|(name, _)| 4 + name.len() + 1 + 32).sum::<usize>();
+        for (name, payload) in &entries {
+            bytes.extend_from_slice(&(name.len() as u32 + 1).to_le_bytes());
+            bytes.extend_from_slice(name.as_bytes()); bytes.push(0);
+            bytes.extend_from_slice(&(offset as u64).to_le_bytes());
+            bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&crate::md5::digest(payload));
+            offset += payload.len();
+        }
+        for (_, payload) in &entries { bytes.extend_from_slice(payload); }
+        let pack = root.join("game.pck");
+        fs::write(&pack, &bytes).unwrap();
+
+        let (textures, audio) = godot3_apply(&pack, 0.0, "ultra-performance", 1).unwrap();
+        assert_eq!((textures, audio), (1, 1), "both categories must be rewritten");
+        let rewritten = fs::read(&pack).unwrap();
+        assert!(rewritten.len() < bytes.len());
+        let check = pck(&mut io::Cursor::new(&rewritten), rewritten.len() as u64).unwrap();
+        assert_eq!(check.entries.len(), 2);
+        for e in &check.entries {
+            let payload = &rewritten[e.offset as usize..(e.offset + e.size) as usize];
+            assert_eq!(crate::md5::digest(payload), e.hash, "directory hash must match payload");
+        }
+        // No sibling temporaries are left behind and no backup tree appears.
+        for entry in fs::read_dir(&root).unwrap() {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            assert!(!name.contains("bgc-pck"), "temp file left behind: {name}");
+        }
+        assert!(!root.join(".bgc-assets-backup").exists());
+
+        // Nothing left to gain: byte-for-byte identical and reported as no-op.
+        let (textures, audio) = godot3_apply(&pack, 0.0, "ultra-performance", 1).unwrap();
+        assert_eq!((textures, audio), (0, 0));
+        assert_eq!(fs::read(&pack).unwrap(), rewritten);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn godot4_texture_apply_rewrites_in_place_and_is_idempotent() {
+        for version in [3u32, 4] {
+            let root = std::env::temp_dir().join(format!("bgc-g4-apply-{version}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            fs::create_dir(&root).unwrap();
+            let binary: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+            let mut bytes = build_pck(&[("res://art.ctex", raw_ctex(1200, 900)), ("res://data.bin", binary.clone())]);
+            bytes[4..8].copy_from_slice(&version.to_le_bytes());
+            let pack = root.join("game.pck");
+            fs::write(&pack, &bytes).unwrap();
+
+            let textures = godot_texture_apply(&pack, 0.0, "ultra-performance", 1).unwrap();
+            assert_eq!(textures, 1, "v{version} texture must be rewritten");
+            let rewritten = fs::read(&pack).unwrap();
+            assert!(rewritten.len() < bytes.len());
+            let check = pck(&mut io::Cursor::new(&rewritten), rewritten.len() as u64).unwrap();
+            assert_eq!(check.version, version);
+            assert_eq!(check.entries.len(), 2);
+            let ctex = &rewritten[check.entries[0].offset as usize..(check.entries[0].offset + check.entries[0].size) as usize];
+            let info = crate::gst2::inspect(ctex).unwrap();
+            assert!(info.width.max(info.height) <= 640);
+            let untouched = &rewritten[check.entries[1].offset as usize..(check.entries[1].offset + check.entries[1].size) as usize];
+            assert_eq!(untouched, &binary[..], "non-ctex entry must be byte-identical");
+            for entry in fs::read_dir(&root).unwrap() {
+                let name = entry.unwrap().file_name();
+                let name = name.to_string_lossy();
+                assert!(!name.contains("bgc-pck"), "temp file left behind: {name}");
+            }
+
+            let textures = godot_texture_apply(&pack, 0.0, "ultra-performance", 1).unwrap();
+            assert_eq!(textures, 0);
+            assert_eq!(fs::read(&pack).unwrap(), rewritten);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }
