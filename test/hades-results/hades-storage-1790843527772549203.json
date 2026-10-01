@@ -1,0 +1,21 @@
+{
+  "root": "/home/pgm1207/Documents/Scripts/btrfs-game-compressor/native/target/hades-storage-1790843527772549203",
+  "before": [
+    2033598464,
+    2170945536,
+    2170945536
+  ],
+  "after": [
+    2041475072,
+    2154815488,
+    2120998912
+  ],
+  "backup": [
+    2033600810,
+    2170947882,
+    2170947882
+  ],
+  "live_physical_reduction": -7876608,
+  "net_with_backup": -2041477418,
+  "apply": "ASSETS|apply|Lossless (Hades packages only)|138|2170676405|2120675946|2170676405|138|0|0|0|0|0|2170676405|2170676405|0|138"
+}

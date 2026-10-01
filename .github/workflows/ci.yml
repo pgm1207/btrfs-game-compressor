@@ -20,6 +20,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Install shellcheck
         run: |
@@ -50,6 +51,9 @@ jobs:
       - name: Behavioural tests
         run: ./test/smoke.sh
 
+      - name: Native unit and filesystem tests
+        run: make native-test
+
       # GAMES.md and the game list embedded in README.md are generated from
       # ratios/games.json. If a contributor edits the JSON and forgets
       # `make ratios-doc`, the browsable list silently lies; this fails instead.
@@ -71,9 +75,9 @@ jobs:
         run: |
           version=$(sed -n 's/^VERSION="\(.*\)"/\1/p' btrfs-game-compressor)
           make package
-          cp "dist/btrfs-game-compressor-$version.tar.gz" /tmp/release-first.tar.gz
+          cp "dist/btrfs-game-compressor-$version-linux-$(uname -m).tar.gz" /tmp/release-first.tar.gz
           make package
-          cmp /tmp/release-first.tar.gz "dist/btrfs-game-compressor-$version.tar.gz"
+          cmp /tmp/release-first.tar.gz "dist/btrfs-game-compressor-$version-linux-$(uname -m).tar.gz"
 
       - name: Make check
         run: make check
@@ -92,6 +96,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Install ${{ matrix.awk }}
         run: |

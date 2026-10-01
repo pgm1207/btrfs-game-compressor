@@ -4,6 +4,10 @@ MANDIR      ?= $(PREFIX)/share/man/man1
 DATADIR     ?= $(PREFIX)/share/btrfs-game-compressor
 DESTDIR     ?=
 
+ARCH        ?= $(shell uname -m)
+NATIVE      := bgc-native
+NATIVE_TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p')
+
 PROG        := btrfs-game-compressor
 VERSION     := $(shell sed -n 's/^VERSION="\(.*\)"/\1/p' $(PROG))
 MANPAGE     := $(PROG).1
@@ -13,13 +17,13 @@ SYSTEMDDIR  := systemd
 # MANPAGE has to be defined above FILES: `:=` expands at assignment time, so
 # referring to it earlier would silently yield an empty string and drop the
 # manpage from the release tarball.
-FILES       := $(PROG) $(MANPAGE) README.md LICENSE CHANGELOG.md CONTRIBUTING.md \
-               install.sh Makefile GAMES.md ratios
+FILES       := $(PROG) $(MANPAGE) README.md LICENSE THIRD_PARTY.md CHANGELOG.md CONTRIBUTING.md \
+               install.sh Makefile GAMES.md ratios native/Cargo.toml native/Cargo.lock native/src native/vendor
 
 .PHONY: all check test lint syntax install uninstall service service-off package \
-        ratios-doc ratios-merge clean help
+        ratios-doc ratios-merge clean help native native-test
 
-all: help
+all: native
 
 help:
 	@echo "btrfs-game-compressor $(VERSION)"
@@ -35,7 +39,7 @@ help:
 	@echo "  make package            build a release tarball in dist/"
 	@echo "  make clean              remove build artifacts"
 
-check: syntax lint test
+check: syntax lint native-test test
 
 syntax:
 	@bash -n $(PROG) && echo "syntax: ok"
@@ -57,7 +61,14 @@ lint:
 		echo "shellcheck: not installed, skipping"; \
 	fi
 
-test:
+native:
+	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --locked --target $(NATIVE_TARGET) --manifest-path native/Cargo.toml
+	install -m 0755 native/target/$(NATIVE_TARGET)/release/bgc-native $(NATIVE)
+
+native-test:
+	cargo test --offline --locked --manifest-path native/Cargo.toml
+
+test: native
 	@./test/smoke.sh
 
 # Regenerate the browsable Markdown table from ratios/games.json. The renderer is
@@ -90,9 +101,10 @@ ratios-merge:
 		$(MAKE) --no-print-directory ratios-doc; \
 	fi
 
-install:
+install: native
 	@install -d $(DESTDIR)$(BINDIR)
 	@install -m 0755 $(PROG) $(DESTDIR)$(BINDIR)/$(PROG)
+	@install -m 0755 $(NATIVE) $(DESTDIR)$(BINDIR)/$(NATIVE)
 	@if [ -f $(MANPAGE) ]; then \
 		install -d $(DESTDIR)$(MANDIR); \
 		install -m 0644 $(MANPAGE) $(DESTDIR)$(MANDIR)/$(MANPAGE); \
@@ -102,12 +114,14 @@ install:
 	@install -d $(DESTDIR)$(DATADIR)/ratios
 	@install -m 0644 ratios/games.json $(DESTDIR)$(DATADIR)/ratios/games.json
 	@install -m 0644 GAMES.md $(DESTDIR)$(DATADIR)/GAMES.md
+	@install -m 0644 THIRD_PARTY.md $(DESTDIR)$(DATADIR)/THIRD_PARTY.md
 	@echo "installed $(DESTDIR)$(BINDIR)/$(PROG)"
 
 uninstall:
-	@rm -f $(DESTDIR)$(BINDIR)/$(PROG)
+	@rm -f $(DESTDIR)$(BINDIR)/$(PROG) $(DESTDIR)$(BINDIR)/$(NATIVE)
 	@rm -f $(DESTDIR)$(MANDIR)/$(MANPAGE)
 	@rm -f $(DESTDIR)$(DATADIR)/ratios/games.json $(DESTDIR)$(DATADIR)/GAMES.md
+	@rm -f $(DESTDIR)$(DATADIR)/THIRD_PARTY.md
 	@rmdir $(DESTDIR)$(DATADIR)/ratios $(DESTDIR)$(DATADIR) 2>/dev/null || true
 	@echo "removed $(DESTDIR)$(BINDIR)/$(PROG)"
 	@echo "config and state left in place: ~/.config/btrfs-game-compressor, ~/.local/state/btrfs-game-compressor"
@@ -132,16 +146,18 @@ service-off:
 	@systemctl --user daemon-reload 2>/dev/null || true
 	@echo "notify timer removed"
 
-package:
+package: native
 	@rm -rf dist/$(PROG)-$(VERSION)
 	@mkdir -p dist/$(PROG)-$(VERSION)
-	@cp -R $(FILES) $(TESTDIR) $(SYSTEMDDIR) dist/$(PROG)-$(VERSION)/
+	@cp -R $(PROG) $(MANPAGE) README.md LICENSE THIRD_PARTY.md CHANGELOG.md CONTRIBUTING.md install.sh Makefile GAMES.md ratios $(TESTDIR) $(SYSTEMDDIR) $(NATIVE) dist/$(PROG)-$(VERSION)/
+	@mkdir -p dist/$(PROG)-$(VERSION)/native
+	@cp -R native/Cargo.toml native/Cargo.lock native/src native/tests native/vendor dist/$(PROG)-$(VERSION)/native/
 	@tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
-		-cf - -C dist $(PROG)-$(VERSION) | gzip -n > dist/$(PROG)-$(VERSION).tar.gz
+		-cf - -C dist $(PROG)-$(VERSION) | gzip -n > dist/$(PROG)-$(VERSION)-linux-$(ARCH).tar.gz
 	@rm -rf dist/$(PROG)-$(VERSION)
-	@echo "dist/$(PROG)-$(VERSION).tar.gz"
+	@echo "dist/$(PROG)-$(VERSION)-linux-$(ARCH).tar.gz"
 	@echo "release archive sha256:"
-	@sha256sum dist/$(PROG)-$(VERSION).tar.gz | cut -d' ' -f1
+	@sha256sum dist/$(PROG)-$(VERSION)-linux-$(ARCH).tar.gz | cut -d' ' -f1
 
 clean:
 	@rm -rf dist

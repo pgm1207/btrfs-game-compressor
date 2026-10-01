@@ -1,0 +1,85 @@
+{
+  "scope": "Selected bundles, not extrapolated to whole games; RAM-only, no installed mutations",
+  "records": [
+    {
+      "game": "Despelote",
+      "path": "despelote_Data/StreamingAssets/aa/StandaloneWindows64/mainscene_scene_aa1719aa_6__videoclipisolation_assets_all.bundle",
+      "logical_bytes": 239029669,
+      "returncode": 0,
+      "result": "UNITYFS|239029669|239029669|239045882|1824|0|2|0.0000|0.410158|NO_GAIN",
+      "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+    },
+    {
+      "game": "Despelote",
+      "path": "despelote_Data/StreamingAssets/aa/StandaloneWindows64/mainscene_scene_scenes_all.bundle",
+      "logical_bytes": 159827112,
+      "returncode": 0,
+      "result": "UNITYFS|159827112|159827112|368670160|2813|0|4|0.0000|17.472764|NO_GAIN",
+      "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+    },
+    {
+      "game": "Despelote",
+      "path": "despelote_Data/StreamingAssets/aa/StandaloneWindows64/mainscene_scene_aa1719aa_12__videoclipisolation_assets_all.bundle",
+      "logical_bytes": 125697809,
+      "returncode": 0,
+      "result": "UNITYFS|125697809|125697809|125726903|960|0|2|0.0000|0.324997|NO_GAIN",
+      "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+    },
+    {
+      "game": "Despelote",
+      "path": "despelote_Data/StreamingAssets/aa/StandaloneWindows64/mainscene_scene_8c23e3f7_15__textureisolation_assets_all.bundle",
+      "logical_bytes": 16056637,
+      "returncode": 0,
+      "result": "UNITYFS|16056637|16056637|43012188|329|0|2|0.0000|2.354996|NO_GAIN",
+      "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+    },
+    {
+      "game": "Despelote",
+      "path": "despelote_Data/StreamingAssets/aa/StandaloneWindows64/mainscene_scene_8c23e3f7_26__textureisolation_assets_all.bundle",
+      "logical_bytes": 14943426,
+      "returncode": 0,
+      "result": "UNITYFS|14943426|14943426|29198184|223|0|2|0.0000|1.408127|NO_GAIN",
+      "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+    },
+    {
+      "game": "Dave the Diver",
+      "path": "DaveTheDiver_Data/StreamingAssets/aa/StandaloneWindows64/50ac80fed904be309c889e5869ec8cb0.bundle",
+      "logical_bytes": 135481716,
+      "returncode": 0,
+      "result": "UNITYFS|135481716|135481716|230496270|1759|0|4|0.0000|10.493996|NO_GAIN",
+      "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+    },
+    {
+      "game": "Dave the Diver",
+      "path": "DLC/StandaloneWindows64/LAD/25b9ab6f1ea905c9e2efa2b6ec330a1e.bundle",
+      "logical_bytes": 108164130,
+      "returncode": 0,
+      "result": "UNITYFS|108164130|108164130|152255755|1162|0|4|0.0000|5.149686|NO_GAIN",
+      "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+    },
+    {
+      "game": "Dave the Diver",
+      "path": "DaveTheDiver_Data/StreamingAssets/aa/StandaloneWindows64/25b9ab6f1ea905c9e2efa2b6ec330a1e.bundle",
+      "logical_bytes": 108163925,
+      "returncode": 0,
+      "result": "UNITYFS|108163925|108163925|152255147|1162|0|4|0.0000|5.106892|NO_GAIN",
+      "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+    },
+    {
+      "game": "Dave the Diver",
+      "path": "DaveTheDiver_Data/StreamingAssets/aa/StandaloneWindows64/c3a18192a4c4c9e9fd6196a70eebf246.bundle",
+      "logical_bytes": 16596546,
+      "returncode": 0,
+      "result": "UNITYFS|16596546|16596546|67746608|517|0|4|0.0000|3.255635|NO_GAIN",
+      "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+    },
+    {
+      "game": "Dave the Diver",
+      "path": "DaveTheDiver_Data/StreamingAssets/aa/StandaloneWindows64/3978c0b889009b9bacf431236d0887bb.bundle",
+      "logical_bytes": 16470335,
+      "returncode": 0,
+      "result": "UNITYFS|16470335|16470335|16471960|126|0|2|0.0000|0.020521|NO_GAIN",
+      "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+    }
+  ]
+}

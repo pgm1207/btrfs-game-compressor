@@ -16,3 +16,11 @@ README.md.tmp
 .idea/
 .vscode/
 .DS_Store
+
+# Native build output
+native/target/
+bgc-native
+
+# Python bytecode from optional developer diagnostics
+__pycache__/
+*.pyc

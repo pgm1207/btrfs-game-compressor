@@ -1,7 +1,7 @@
 # Community compression ratios
 
-Per-game savings measured with `btrfs filesystem defragment -czstd` and
-`btrfs-compsize`. **Every row names the zstd level it was measured at**, because
+Per-game savings measured from Btrfs extent metadata (older submissions used compsize).
+**Every row names the zstd level it was measured at**, because
 a game compresses differently at level 1 and level 6. `Samples` is how many
 independent measurements the average is built from.
 

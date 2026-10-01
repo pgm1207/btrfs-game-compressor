@@ -1,10 +1,10 @@
 #!/bin/bash
 #
 # btrfs-game-compressor - interactive ZSTD compression manager for Steam
-# libraries living on Btrfs. Single file, no runtime deps beyond coreutils,
-# awk, btrfs-progs and (optionally) btrfs-compsize.
+# libraries living on Btrfs. Bash UI plus the bundled bgc-native backend.
+# Filesystem operations use Linux ioctls; no external filesystem tools are used.
 
-VERSION="0.1.1"
+VERSION="0.2.0"
 PROGNAME="btrfs-game-compressor"
 # Owner/repo used by --self-update and --check-update to find the latest release.
 REPO="${BTRFS_GAME_COMPRESSOR_REPO:-pgm1207/btrfs-game-compressor}"
@@ -20,9 +20,14 @@ CUSTOM_LIBS_FILE="$CONFIG_DIR/custom_libraries.txt"
 THROTTLE_FILE="$CONFIG_DIR/throttle.conf"
 MIN_SIZE_FILE="$CONFIG_DIR/min_size_mib"
 LEVEL_FILE="$CONFIG_DIR/compress_level"
-GAIN_FILE="$CONFIG_DIR/min_gain_mib"
+VISUAL_TARGET_FILE="$CONFIG_DIR/visual_target"
+KEEP_LANGUAGES_FILE="$CONFIG_DIR/keep_languages"
 PCT_FILE="$CONFIG_DIR/min_gain_pct"
+DELETE_FILE="$CONFIG_DIR/min_prune_mib"
 AUTO_UPDATE_FILE="$CONFIG_DIR/auto_update"
+DEDUPE_HASH_DIR="$STATE_DIR/dedupe"
+DEDUPE_HISTORY_FILE="$STATE_DIR/dedupe_physical_history.db"
+DEDUPE_COMPLETION_FILE="$STATE_DIR/dedupe_completed.db"
 # Throttle stamp for the automatic check: its mtime is the last time the tool
 # looked for a newer release.
 UPDATE_STAMP="$STATE_DIR/last_update_check"
@@ -58,7 +63,28 @@ RESET="\e[0m"
 # --- Options ---
 OPT_STATUS=0
 OPT_DRY_RUN=0
+OPT_DEDUPE=0
+OPT_RECHECK=0
+OPT_ASSETS=0
+OPT_PRUNE=0
+PRUNE_QUERY=""
+PRUNE_FALLBACKS=0
+OPT_VARIANTS=0
+VARIANT_QUERY=""
+OPT_OPPORTUNITIES=0
+OPT_SLIM=0
+SLIM_QUERY=""
+OPT_ENGINES=0
+ENGINES_QUERY=""
+OPT_FMOD_EXPORT=0
+FMOD_QUALITY="" FMOD_SOURCE="" FMOD_OUTPUT=""
+OPT_CONTAINER=0
+CONTAINER_ACTION="" CONTAINER_SOURCE="" CONTAINER_OUTPUT="" CONTAINER_PROFILE=""
+ASSET_QUERY=""
+ASSET_ACTION=""
+ASSET_PREVIEW_COUNT=0
 OPT_NO_COLOR=0
+OPT_VERBOSE=0
 OPT_PENDING_ONLY=0
 OPT_BALANCE=0
 OPT_JSON=0
@@ -82,13 +108,16 @@ MIN_SIZE_MIB=1
 SKIPPED_STUB_COUNT=0
 SKIPPED_STUB_NAMES=()
 COMPRESS_LEVEL=auto
-MIN_GAIN_MIB=32
+VISUAL_TARGET=native
+KEEP_LANGUAGES=""
 MIN_GAIN_PCT=5
+MIN_PRUNE_MIB=1
 AUTO_UPDATE=1
 PLATFORM=other
 
 # Game install paths that a live process currently has mapped.
 declare -A RUNNING_DIRS=()
+declare -A DEDUPE_MAP=()
 
 usage() {
     cat <<EOF
@@ -103,11 +132,70 @@ OPTIONS
     -V, --version         print version and exit
     -s, --status          print a non-interactive compression report and exit
     -n, --dry-run         list what would be compressed, change nothing
+        --dedupe          manually scan all installed games in each Btrfs library
+                          (also marks them COMPACTED after a successful pass)
+        --recheck         remeasure installed games and refresh saved statistics
+        --assets GAME     preview [BETA] asset optimization for one game
+        --apply-assets GAME
+                          optimize supported assets and Hades LZ4 packages
+        --restore-assets GAME
+                          restore original assets from the local copy
+        --finalize-assets GAME
+                          discard restore copy after checking the game works
+        --prune-assets GAME
+                          remove unused developer debug symbols (*.pdb/*.ilk),
+                          retaining a restorable copy
+        --prune-fallbacks GAME
+                          additionally remove unused 720p/BC3 texture and video
+                          fallback suites (only safe if this machine uses the
+                          full-resolution assets); restorable
+        --variants GAME   read-only report of redundant asset variants (architecture,
+                          renderer, resolution or language suites) that share a
+                          file-name layout; nothing is changed
+        --opportunities   scan every installed game for possible duplicate
+                          resolution/platform/language suites; read-only estimate
+        --slim GAME       one-shot: remove unused resolution fallbacks, non-host
+                          platform folders, debug symbols and (with keep_languages
+                          set) other language packs; keeps the highest tier and
+                          the host build; restorable
+        --keep-languages LIST
+                          set the languages --slim will keep, e.g. "en,de" or
+                          "English,German"; clears the list when empty
+        --engines GAME    read-only report of the game engine (Unity, Unreal,
+                          Godot, ...) and where its bytes live; nothing changed
+        --audit-container FILE
+                          read-only UnityFS compression, Godot resource inventory,
+                          or Unreal Pak footer audit (auto-detected from contents)
+        --export-unityfs FILE OUTPUT
+                          experimental lossless LZ4 bundle recompression; new file
+                          only, gated by savings/output-write percentage
+        --export-godot FILE OUTPUT
+                          experimental lossless PCK resource deduplication; new
+                          file only, same percentage gate; preserves resource bytes
+        --audit-godot3-audio PROFILE FILE
+                          read-only estimate of Godot 3 (.mp3str -> Ogg Vorbis)
+                          packed-audio rewriting for a quality profile; no writes
+        --export-godot3-audio PROFILE FILE OUTPUT
+                          experimental, lossy Godot 3 PCK audio rewrite: decodes
+                          AudioStreamMP3 and re-encodes it as Ogg Vorbis under the
+                          same entry name, retyping the matching .import stub;
+                          new file only, same percentage gate
+        --audit-godot-textures PROFILE FILE
+                          read-only estimate of PCK texture downscaling for a
+                          quality profile; changes nothing
+        --export-godot-textures PROFILE FILE OUTPUT
+                          experimental PCK texture rewrite: downscales supported
+                           Godot 3 .stex / Godot 4 .ctex textures to the profile's longest
+                          edge; new file only, same percentage gate. Lossy,
+                          export-only; unsupported textures are copied unchanged
+        --export-fmod QUALITY FILE OUTPUT
+                          experimental FMOD export (conservative, balanced, 0.0-0.4)
+                          writes a new file only; never replaces game assets
     -l, --library DIR     add DIR as a game library, then exit
                            (accepts the library root or its steamapps/common)
         --pending         with --status/--dry-run, only show pending games
-        --history         print the recorded compression history and exit
-        --stats           print a savings summary from the history and exit
+        --history         print separate compression and deduplication history
+        --stats           print ZSTD savings and latest dedupe estimates
         --benchmark       measure real savings per game from recorded data
                           (add --json for machine-readable output)
         --ratios [GAME]   look up expected savings in the community table
@@ -119,7 +207,7 @@ OPTIONS
                           hint for games you have not measured yourself
         --render-ratios   render the community table as Markdown and exit
                           (maintainer command behind 'make ratios-doc')
-        --balance         offer to run 'btrfs balance start -m' on each
+        --balance         offer native metadata balance on each
                           library's mount point; needs a terminal
         --check-update    report whether a newer release exists, change nothing
         --self-update     download and install the latest release, verifying
@@ -133,12 +221,15 @@ OPTIONS
         --yes             with --uninstall or --submit-ratios, do not ask
         --json            with --status/--benchmark/--ratios, emit JSON
         --notify          send a desktop notice for actionable pending games
+        --verbose         show each file during compression/deduplication
         --no-color        disable ANSI colors (also honours \$NO_COLOR)
 
 EXAMPLES
     $PROGNAME                        interactive mode
     $PROGNAME --status               one-shot report (safe for scripts/CI)
     $PROGNAME --dry-run --pending    what is still waiting to be compressed
+    $PROGNAME --dedupe               full-library maintenance scan (manual)
+    $PROGNAME --recheck              refresh measurements without recompressing
     $PROGNAME --library /mnt/games   register a library outside Steam's VDF
     $PROGNAME --balance              finish the job with a filesystem balance
     $PROGNAME --stats                how much space has been reclaimed
@@ -157,13 +248,19 @@ FILES
         custom_libraries.txt   extra library roots, one per line
         throttle.conf          0 = full speed, 1 = nice/ionice eco mode
         auto_update            1 = check for a newer release once a day (default)
+        keep_languages         languages --slim keeps (codes or names, comma separated)
+        min_prune_mib          MiB a delete-only prune must free to be worth doing (default 1)
     $STATE_DIR
-        compressed_games.db    what has been compressed, and when
+        compressed_games.db    compression measurements and timestamps
+        dedupe_completed.db   successful dedupe passes used for COMPACTED status
+        dedupe_physical_history.db      measured dedupe results, separate from ZSTD
 
 REQUIREMENTS
-    btrfs filesystem must be mounted with a compress= option (zstd recommended).
-    btrfs-progs is required. btrfs-compsize is optional but without it the
-    savings figures cannot be measured and are reported as n/a.
+    Btrfs on Linux 6.15+ is required for explicit ZSTD compression levels.
+    The bundled bgc-native executable handles compression, measurement and
+    deduplication directly through Linux kernel interfaces. No btrfs-progs,
+    compsize or duperemove packages are required. Each game is deduped after its
+    compression using a temporary, bounded native index.
 EOF
 }
 
@@ -182,6 +279,93 @@ parse_args() {
             -V|--version)  version; exit 0 ;;
             -s|--status)   OPT_STATUS=1 ;;
             -n|--dry-run)  OPT_DRY_RUN=1 ;;
+            --dedupe)      OPT_DEDUPE=1 ;;
+            --recheck)     OPT_RECHECK=1 ;;
+            --export-fmod)
+                [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] || {
+                    echo "$PROGNAME: --export-fmod requires QUALITY FILE OUTPUT" >&2; exit 2;
+                }
+                OPT_FMOD_EXPORT=1; FMOD_QUALITY="$2"; FMOD_SOURCE="$3"; FMOD_OUTPUT="$4"
+                shift 3 ;;
+            --audit-container)
+                [ "$OPT_CONTAINER" -eq 0 ] || { echo "$PROGNAME: container modes cannot be combined" >&2; exit 2; }
+                [ -n "${2:-}" ] || { echo "$PROGNAME: --audit-container requires FILE" >&2; exit 2; }
+                OPT_CONTAINER=1; CONTAINER_ACTION=audit; CONTAINER_SOURCE="$2"
+                shift ;;
+            --audit-godot-textures)
+                [ "$OPT_CONTAINER" -eq 0 ] || { echo "$PROGNAME: container modes cannot be combined" >&2; exit 2; }
+                [ -n "${2:-}" ] && [ -n "${3:-}" ] || {
+                    echo "$PROGNAME: --audit-godot-textures requires PROFILE FILE" >&2; exit 2;
+                }
+                OPT_CONTAINER=1; CONTAINER_ACTION="$1"; CONTAINER_PROFILE="$2"; CONTAINER_SOURCE="$3"
+                shift 2 ;;
+            --audit-godot3-audio)
+                [ "$OPT_CONTAINER" -eq 0 ] || { echo "$PROGNAME: container modes cannot be combined" >&2; exit 2; }
+                [ -n "${2:-}" ] && [ -n "${3:-}" ] || {
+                    echo "$PROGNAME: --audit-godot3-audio requires PROFILE FILE" >&2; exit 2;
+                }
+                OPT_CONTAINER=1; CONTAINER_ACTION="$1"; CONTAINER_PROFILE="$2"; CONTAINER_SOURCE="$3"
+                shift 2 ;;
+            --export-godot3-audio)
+                [ "$OPT_CONTAINER" -eq 0 ] || { echo "$PROGNAME: container modes cannot be combined" >&2; exit 2; }
+                [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] || {
+                    echo "$PROGNAME: --export-godot3-audio requires PROFILE FILE OUTPUT" >&2; exit 2;
+                }
+                OPT_CONTAINER=1; CONTAINER_ACTION="$1"; CONTAINER_PROFILE="$2"; CONTAINER_SOURCE="$3"; CONTAINER_OUTPUT="$4"
+                shift 3 ;;
+            --export-godot-textures)
+                [ "$OPT_CONTAINER" -eq 0 ] || { echo "$PROGNAME: container modes cannot be combined" >&2; exit 2; }
+                [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] || {
+                    echo "$PROGNAME: --export-godot-textures requires PROFILE FILE OUTPUT" >&2; exit 2;
+                }
+                OPT_CONTAINER=1; CONTAINER_ACTION="$1"; CONTAINER_PROFILE="$2"; CONTAINER_SOURCE="$3"; CONTAINER_OUTPUT="$4"
+                shift 3 ;;
+            --export-unityfs|--export-godot)
+                [ "$OPT_CONTAINER" -eq 0 ] || { echo "$PROGNAME: container modes cannot be combined" >&2; exit 2; }
+                [ -n "${2:-}" ] && [ -n "${3:-}" ] || {
+                    echo "$PROGNAME: $1 requires FILE OUTPUT" >&2; exit 2;
+                }
+                OPT_CONTAINER=1; CONTAINER_ACTION="$1"; CONTAINER_SOURCE="$2"; CONTAINER_OUTPUT="$3"
+                shift 2 ;;
+            --assets|--apply-assets|--restore-assets|--finalize-assets)
+                [ -n "${2:-}" ] || { echo "$PROGNAME: $1 requires a game name or path" >&2; exit 2; }
+                OPT_ASSETS=1
+                ASSET_ACTION="$1"
+                ASSET_QUERY="$2"
+                shift ;;
+            --variants)
+                [ -n "${2:-}" ] || { echo "$PROGNAME: --variants requires a game name or path" >&2; exit 2; }
+                OPT_VARIANTS=1
+                VARIANT_QUERY="$2"
+                shift ;;
+            --opportunities) OPT_OPPORTUNITIES=1 ;;
+            --slim)
+                [ -n "${2:-}" ] || { echo "$PROGNAME: --slim requires a game name or path" >&2; exit 2; }
+                OPT_SLIM=1
+                SLIM_QUERY="$2"
+                shift ;;
+            --engines)
+                [ -n "${2:-}" ] || { echo "$PROGNAME: --engines requires a game name or path" >&2; exit 2; }
+                OPT_ENGINES=1
+                ENGINES_QUERY="$2"
+                shift ;;
+            --keep-languages)
+                [ -n "${2:-}" ] || { echo "$PROGNAME: --keep-languages requires a comma-separated list" >&2; exit 2; }
+                mkdir -p "$CONFIG_DIR"
+                KEEP_LANGUAGES=$(normalize_languages "$2")
+                printf '%s\n' "$KEEP_LANGUAGES" > "$KEEP_LANGUAGES_FILE"
+                if [ -n "$KEEP_LANGUAGES" ]; then
+                    printf 'Keeping languages: %s (other language packs are removed by --slim)\n' "$KEEP_LANGUAGES"
+                else
+                    printf 'Language list cleared; --slim will leave language packs untouched.\n'
+                fi
+                exit 0 ;;
+            --prune-assets|--prune-fallbacks)
+                [ -n "${2:-}" ] || { echo "$PROGNAME: $1 requires a game name or path" >&2; exit 2; }
+                OPT_PRUNE=1
+                PRUNE_QUERY="$2"
+                [ "$1" = --prune-fallbacks ] && PRUNE_FALLBACKS=1
+                shift ;;
             -l|--library)
                 if [ -z "$2" ]; then
                     echo "$PROGNAME: --library requires a directory" >&2
@@ -216,6 +400,7 @@ parse_args() {
             --yes|-y)      OPT_YES=1 ;;
             --json)        OPT_JSON=1 ;;
             --notify)      OPT_NOTIFY=1 ;;
+            --verbose)     OPT_VERBOSE=1 ;;
             --no-color)    OPT_NO_COLOR=1 ;;
             --)            shift; break ;;
             -*)            echo "$PROGNAME: unknown option '$1'" >&2
@@ -235,6 +420,16 @@ parse_args() {
     local -a modes=(
         "OPT_STATUS:--status:1"
         "OPT_DRY_RUN:--dry-run:0"
+        "OPT_DEDUPE:--dedupe:0"
+        "OPT_RECHECK:--recheck:0"
+        "OPT_ASSETS:--assets:0"
+        "OPT_PRUNE:--prune-assets/--prune-fallbacks:0"
+        "OPT_VARIANTS:--variants:0"
+        "OPT_OPPORTUNITIES:--opportunities:0"
+        "OPT_SLIM:--slim:0"
+        "OPT_ENGINES:--engines:0"
+        "OPT_FMOD_EXPORT:--export-fmod:0"
+        "OPT_CONTAINER:--audit-container/--audit-godot-textures/--audit-godot3-audio/--export-unityfs/--export-godot/--export-godot-textures/--export-godot3-audio:0"
         "OPT_BALANCE:--balance:0"
         "OPT_NOTIFY:--notify:0"
         "OPT_HISTORY:--history:0"
@@ -289,6 +484,7 @@ parse_args() {
 encode_field() {
     local value="${1//%/%25}"
     value="${value//|/%7C}"
+    value="${value//$'\t'/%09}"
     value="${value//$'\n'/%0A}"
     value="${value//$'\r'/%0D}"
     printf '%s' "$value"
@@ -297,6 +493,7 @@ encode_field() {
 decode_field() {
     DECODED_FIELD="${1//%0D/$'\r'}"
     DECODED_FIELD="${DECODED_FIELD//%0A/$'\n'}"
+    DECODED_FIELD="${DECODED_FIELD//%09/$'\t'}"
     DECODED_FIELD="${DECODED_FIELD//%7C/|}"
     DECODED_FIELD="${DECODED_FIELD//%25/%}"
 }
@@ -381,22 +578,42 @@ add_library_cli() {
 
 init_paths() {
     mkdir -p "$CONFIG_DIR" "$STATE_DIR"
-    touch "$STATE_FILE" "$CUSTOM_LIBS_FILE"
+    touch "$STATE_FILE" "$CUSTOM_LIBS_FILE" "$DEDUPE_HISTORY_FILE" "$DEDUPE_COMPLETION_FILE"
     # The version header is written lazily, by the first real state_upsert, so a
     # read-only run (--status, --dry-run) still leaves the state file untouched.
     [ -f "$THROTTLE_FILE" ] || echo "0" > "$THROTTLE_FILE"
     [ -f "$MIN_SIZE_FILE" ] || echo "1" > "$MIN_SIZE_FILE"
     [ -f "$LEVEL_FILE" ] || echo "auto" > "$LEVEL_FILE"
-    [ -f "$GAIN_FILE" ] || echo "32" > "$GAIN_FILE"
+    [ -f "$VISUAL_TARGET_FILE" ] || echo "native" > "$VISUAL_TARGET_FILE"
+    [ -f "$KEEP_LANGUAGES_FILE" ] || : > "$KEEP_LANGUAGES_FILE"
     [ -f "$PCT_FILE" ] || echo "5" > "$PCT_FILE"
+    [ -f "$DELETE_FILE" ] || echo "1" > "$DELETE_FILE"
     [ -f "$AUTO_UPDATE_FILE" ] || echo "1" > "$AUTO_UPDATE_FILE"
+}
+
+# Canonicalize a user language list ("en, de" / "English,German") into a
+# lowercase comma-separated set of short codes. Order is preserved, duplicates
+# removed. An empty result disables language pruning.
+normalize_languages() {
+    local raw="$1" out="" token
+    raw="${raw//,/ }"
+    for token in $raw; do
+        token="${token,,}"
+        case "$token" in
+            ''|*[!a-z0-9-]*) continue ;;
+        esac
+        case ",$out," in *",$token,"*) ;; *) out="${out:+$out,}$token" ;; esac
+    done
+    printf '%s' "$out"
 }
 
 load_config() {
     MIN_SIZE_MIB=1
     COMPRESS_LEVEL=auto
-    MIN_GAIN_MIB=32
+    VISUAL_TARGET=native
+    KEEP_LANGUAGES=""
     MIN_GAIN_PCT=5
+    MIN_PRUNE_MIB=1
     AUTO_UPDATE=1
     local val
 
@@ -420,12 +637,19 @@ load_config() {
         fi
     fi
 
-    if [ -f "$GAIN_FILE" ]; then
-        read -r val < "$GAIN_FILE" 2>/dev/null || val=""
-        if [[ "${val:-}" =~ ^[0-9]+$ ]]; then
-            MIN_GAIN_MIB="$val"
-        elif [ -n "${val:-}" ]; then
-            echo "$PROGNAME: ignoring invalid value in $GAIN_FILE (expected a whole number of MiB)" >&2
+    if [ -f "$VISUAL_TARGET_FILE" ]; then
+        read -r val < "$VISUAL_TARGET_FILE" 2>/dev/null || val=""
+        case "$val" in
+            native|lossless|ultra-performance|performance|balanced|quality|ultra-quality) VISUAL_TARGET="$val" ;;
+            *) echo "$PROGNAME: ignoring invalid visual target in $VISUAL_TARGET_FILE" >&2 ;;
+        esac
+    fi
+
+    if [ -f "$KEEP_LANGUAGES_FILE" ]; then
+        read -r val < "$KEEP_LANGUAGES_FILE" 2>/dev/null || val=""
+        KEEP_LANGUAGES=$(normalize_languages "$val")
+        if [ -n "${val:-}" ] && [ -z "$KEEP_LANGUAGES" ]; then
+            echo "$PROGNAME: ignoring invalid languages in $KEEP_LANGUAGES_FILE (expected codes or names, e.g. en,de)" >&2
         fi
     fi
 
@@ -435,6 +659,15 @@ load_config() {
             MIN_GAIN_PCT="$val"
         elif [ -n "${val:-}" ]; then
             echo "$PROGNAME: ignoring invalid value in $PCT_FILE (expected a percentage)" >&2
+        fi
+    fi
+
+    if [ -f "$DELETE_FILE" ]; then
+        read -r val < "$DELETE_FILE" 2>/dev/null || val=""
+        if [[ "${val:-}" =~ ^[0-9]+$ ]]; then
+            MIN_PRUNE_MIB="$val"
+        elif [ -n "${val:-}" ]; then
+            echo "$PROGNAME: ignoring invalid value in $DELETE_FILE (expected a whole number of MiB)" >&2
         fi
     fi
 
@@ -462,13 +695,24 @@ require_dependencies() {
     return 0
 }
 
+native_backend() {
+    if [ -n "${BTRFS_GAME_COMPRESSOR_BACKEND:-}" ]; then
+        printf '%s\n' "$BTRFS_GAME_COMPRESSOR_BACKEND"
+        return
+    fi
+    local dir
+    dir=$(dirname "$(self_script_path)")
+    printf '%s/bgc-native\n' "$dir"
+}
+
 require_btrfs() {
-    if ! command -v btrfs >/dev/null 2>&1; then
-        echo "$PROGNAME: 'btrfs' not found, cannot defragment." >&2
-        echo "          Install btrfs-progs (apt: 'btrfs-progs', pacman: 'btrfs-progs')." >&2
+    local backend
+    backend=$(native_backend)
+    if [ ! -x "$backend" ] || [ "$("$backend" --protocol-version 2>/dev/null)" != 1 ]; then
+        printf '%s: matching bundled bgc-native backend is missing or incompatible.\n' "$PROGNAME" >&2
+        printf 'Reinstall the complete release, or run make native in a source checkout.\n' >&2
         exit 1
     fi
-    return 0
 }
 
 detect_platform() {
@@ -556,7 +800,7 @@ mount_zstd_level() {
     parse_zstd_level "$opts"
 }
 
-# Resolve the level to hand to 'btrfs filesystem defragment -L'.
+# Resolve the explicit ZSTD level requested through the native backend.
 # A configured level always wins; 'auto' mirrors the filesystem's own level
 # so that a library stays uniformly compressed.
 effective_level() {
@@ -603,7 +847,9 @@ cleanup() {
         printf '\033[?25h' 2>/dev/null
     fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # State variables
 CURRENT_PAGE=1
@@ -674,8 +920,11 @@ to_mib() {
 
 game_index_by_path() {
     local want="$1" i
+    while [[ "$want" == */ && "$want" != "/" ]]; do want="${want%/}"; done
     for i in "${!GAMES_PATH[@]}"; do
-        if [ "${GAMES_PATH[$i]}" = "$want" ]; then
+        local have_path="${GAMES_PATH[$i]}"
+        while [[ "$have_path" == */ && "$have_path" != "/" ]]; do have_path="${have_path%/}"; done
+        if [ "$have_path" = "$want" ]; then
             echo "$i"
             return 0
         fi
@@ -683,16 +932,16 @@ game_index_by_path() {
     return 1
 }
 
-# Emits four fields: total file bytes, file count, whether anything is newer
-# than the reference timestamp, and a human-readable size. The last field is
-# produced here because this awk is already running; formatting it per game
-# later would mean forking one more process for every game in the library.
+# Emit current logical bytes and separate newer-than-compression / newer-than-dedupe flags.
+# The human size is also formatted here to avoid another process per game.
 scan_game_dir() {
-    local target="$1" since="${2:-0}"
-    find "$target" \( -type f -printf 'f %s %T@\n' \) -o \( -type d -printf 'd 0 %T@\n' \) 2>/dev/null |
-        awk -v since="$since" '
+    local target="$1" since="${2:-0}" dedupe_since="${3:-0}"
+    find "$target" -path "$target/.bgc-assets-backup" -prune -o \
+        \( -type f -printf 'f %s %T@\n' \) -o \( -type d -printf 'd 0 %T@\n' \) 2>/dev/null |
+        awk -v since="$since" -v dedupe_since="$dedupe_since" '
             $1 == "f" { bytes += $2; files++ }
             $3 + 0 > since + 0 { newer = 1 }
+            ($3 + 0) * 1000000000 > dedupe_since + 0 { dedupe_newer = 1 }
             END {
                 hum = bytes + 0
                 if (hum < 1024) {
@@ -703,7 +952,7 @@ scan_game_dir() {
                     while (hum >= 1024 && i < 5) { hum /= 1024; i++ }
                     human = sprintf("%.1f%c", hum, substr(units, i, 1))
                 }
-                printf "%d %d %d %s\n", bytes + 0, files + 0, newer + 0, human
+                printf "%d %d %d %s %d\n", bytes + 0, files + 0, newer + 0, human, dedupe_newer + 0
             }
         '
 }
@@ -788,6 +1037,7 @@ game_is_running() {
     # empty name has to be rejected before it reaches the array.
     local path="${1:-}"
     [ -n "$path" ] || return 1
+    while [[ "$path" == */ && "$path" != "/" ]]; do path="${path%/}"; done
     [ -n "${RUNNING_DIRS["$path"]:-}" ]
 }
 
@@ -806,17 +1056,346 @@ compress_directory() {
     prefix=$(get_cmd_prefix)
     level=$(effective_level "$target")
     if [ -n "$prefix" ]; then
-        $prefix btrfs filesystem defragment -r -czstd -L "$level" "$target"
+        $prefix "$(native_backend)" compress "$level" "$target"
     else
-        btrfs filesystem defragment -r -czstd -L "$level" "$target"
+        "$(native_backend)" compress "$level" "$target"
     fi
+}
+
+# FIEMAP reports logical mapped ranges and whether their extents are shared.
+# The exclusive-byte delta is a logical sharing estimate, not disk space freed.
+btrfs_usage_raw() {
+    local output="$1"
+    printf '%s\n' "$output" | awk '$1 ~ /^[0-9]+$/ { print $1 "|" $2 "|" $3; found=1; exit } END { if (!found) exit 1 }'
+}
+
+btrfs_usage_for() {
+    local path="$1" output
+    output=$("$(native_backend)" usage "$path" 2>/dev/null) || return 1
+    [[ "$output" =~ ^[0-9]+\|[0-9]+\|[0-9]+$ ]] || return 1
+    printf '%s\n' "$output"
+}
+
+# Return exact unique data-extent bytes. Btrfs restricts this metadata query to
+# privileged callers; when sudo has no cached credentials, show savings as unknown.
+run_measure_bytes() {
+    local output
+    if [ "$EUID" -eq 0 ]; then
+        output=$("$(native_backend)" measure-bytes "$1" 2>/dev/null) || return 1
+    else
+        output=$(sudo -n -- "$(native_backend)" measure-bytes "$1" 2>/dev/null) || return 1
+    fi
+    [[ "$output" =~ ^[0-9]+\|[0-9]+\|[0-9]+$ ]] || return 1
+    printf '%s\n' "$output"
+}
+
+load_dedupe_completions() {
+    DEDUPE_MAP=()
+    local stamp encoded path
+    [ -r "$DEDUPE_COMPLETION_FILE" ] || return 0
+    while IFS='|' read -r stamp encoded; do
+        [[ "$stamp" =~ ^[0-9]+$ ]] && [ -n "$encoded" ] || continue
+        decode_field "$encoded"
+        path="$DECODED_FIELD"
+        [ -n "$path" ] || continue
+        if [ "$stamp" -gt "${DEDUPE_MAP[$path]:-0}" ]; then
+            DEDUPE_MAP["$path"]="$stamp"
+        fi
+    done < "$DEDUPE_COMPLETION_FILE"
+}
+
+record_dedupe_completion() {
+    local path="$1" encoded stamp lockfile="$DEDUPE_COMPLETION_FILE.lock"
+    encoded=$(encode_field "$path")
+    stamp=$(date +%s%N)
+    exec 7>>"$lockfile" || return 1
+    flock -x 7 || { exec 7>&-; return 1; }
+    printf '%s|%s\n' "$stamp" "$encoded" >> "$DEDUPE_COMPLETION_FILE"
+    local rc=$?
+    flock -u 7 2>/dev/null || true
+    exec 7>&-
+    [ "$rc" -eq 0 ] || return "$rc"
+    DEDUPE_MAP["$path"]="$stamp"
+    DEDUPE_COMPLETION_RECORDED=1
+    return 0
+}
+
+record_dedupe_measurement() {
+    local common="$1" before="$2" after="$3" saved="$4"
+    local bt be bs at ae as encoded value
+    [ -n "$before" ] && [ -n "$after" ] || return 0
+    bt="${before%%|*}"; before="${before#*|}"; be="${before%%|*}"; bs="${before#*|}"
+    at="${after%%|*}"; after="${after#*|}"; ae="${after%%|*}"; as="${after#*|}"
+    for value in "$bt" "$be" "$bs" "$at" "$ae" "$as"; do
+        [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    done
+    [[ "$saved" =~ ^-?[0-9]+$ ]] || return 1
+    encoded=$(encode_field "$common")
+    # The record is a single append write. A truncated final line is ignored by
+    # readers, and a separate lock serializes appends from different libraries.
+    exec 8>>"$DEDUPE_HISTORY_FILE.lock" || return 1
+    flock -x 8 || { exec 8>&-; return 1; }
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$(date +%s)" "$encoded" "$bt" "$be" "$bs" "$at" "$ae" "$as" "$saved" >> "$DEDUPE_HISTORY_FILE"
+    local rc=$?
+    flock -u 8 2>/dev/null || true
+    exec 8>&-
+    return "$rc"
+}
+
+# A library lock serializes automatic game passes and manual library passes.
+# The native backend creates bounded temporary indexes for exactly this scope.
+dedupe_game() {
+    local game_path="$1" measure="${2:-0}" common="${3:-}" hash hashfile prefix running_path before after
+    local rc lockfile scope_hash logfile
+    local -a pipeline_status dedupe_cmd
+    [ -n "$common" ] || common="${game_path%/*}"
+    DEDUPE_RESULT=error
+    DEDUPE_COMPLETION_RECORDED=0
+    DEDUPE_SAVED_BYTES=0
+    DEDUPE_MEASURED=0
+    DEDUPE_BEFORE_USAGE=""
+    DEDUPE_AFTER_USAGE=""
+    DEDUPE_HISTORY_ERROR=0
+    DEDUPE_BEFORE_PHYSICAL=""
+    DEDUPE_AFTER_PHYSICAL=""
+    [ -x "$(native_backend)" ] || { DEDUPE_RESULT=unavailable; return 1; }
+    command -v flock >/dev/null 2>&1 || { DEDUPE_RESULT=lock_unavailable; return 1; }
+
+    discover_running_games
+    for running_path in "${!RUNNING_DIRS[@]}"; do
+        if [[ "$running_path" == "$game_path" || "$running_path" == "$game_path"/* ]]; then
+            DEDUPE_RESULT=running
+            return 2
+        fi
+    done
+
+    mkdir -p "$DEDUPE_HASH_DIR" 2>/dev/null || return 1
+    hash=$(printf '%s' "$common" | sha256sum | awk '{print $1}')
+    [ -n "$hash" ] || return 1
+    scope_hash=$(printf '%s' "$game_path" | sha256sum | awk '{print $1}')
+    # Scope-specific log; legacy databases are neither read nor modified.
+    hashfile="$DEDUPE_HASH_DIR/native-$scope_hash"
+    lockfile="$DEDUPE_HASH_DIR/$hash.db.lock"
+    exec 9>>"$lockfile" || { DEDUPE_RESULT=error; return 1; }
+    if ! flock -n 9; then
+        exec 9>&-
+        DEDUPE_RESULT=locked
+        return 3
+    fi
+    if [ "$measure" -eq 1 ]; then
+        before=$(btrfs_usage_for "$game_path" || true)
+        DEDUPE_BEFORE_PHYSICAL=$(run_measure_bytes "$game_path" || true)
+    else
+        before=""
+    fi
+    DEDUPE_BEFORE_USAGE="$before"
+    prefix=$(get_cmd_prefix)
+    logfile="$hashfile.log"
+    printf 'Checking duplicate data in %s (sector-aligned blocks)...\n' "$game_path" >&2
+    dedupe_cmd=("$(native_backend)" dedupe "$game_path" "$DEDUPE_HASH_DIR")
+    # Stream progress; command substitution used to hide all output until exit.
+    # Save both statuses immediately: tee must not hide native failures.
+    if [ -n "$prefix" ]; then
+        $prefix "${dedupe_cmd[@]}" 2>&1 | tee "$logfile" >&2
+        pipeline_status=("${PIPESTATUS[@]}")
+    else
+        "${dedupe_cmd[@]}" 2>&1 | tee "$logfile" >&2
+        pipeline_status=("${PIPESTATUS[@]}")
+    fi
+    rc=${pipeline_status[0]}
+    if [ "$rc" -eq 130 ] || [ "$rc" -eq 143 ]; then
+        flock -u 9 2>/dev/null || true
+        exec 9>&-
+        return "$rc"
+    fi
+    [ "${pipeline_status[1]}" -eq 0 ] || rc=1
+    if [ "$measure" -eq 1 ]; then
+        after=$(btrfs_usage_for "$game_path" || true)
+        DEDUPE_AFTER_PHYSICAL=$(run_measure_bytes "$game_path" || true)
+    else
+        after=""
+    fi
+    DEDUPE_AFTER_USAGE="$after"
+    if [ -n "$DEDUPE_BEFORE_PHYSICAL" ] && [ -n "$DEDUPE_AFTER_PHYSICAL" ]; then
+        local before_physical="${DEDUPE_BEFORE_PHYSICAL%%|*}" after_physical="${DEDUPE_AFTER_PHYSICAL%%|*}"
+        DEDUPE_MEASURED=1
+        DEDUPE_SAVED_BYTES=$((before_physical - after_physical))
+        if [ "$rc" -eq 0 ] && ! record_dedupe_measurement "$game_path" "$DEDUPE_BEFORE_PHYSICAL" "$DEDUPE_AFTER_PHYSICAL" "$DEDUPE_SAVED_BYTES"; then
+            DEDUPE_HISTORY_ERROR=1
+        fi
+    fi
+    flock -u 9 2>/dev/null || true
+    exec 9>&-
+    if [ "$rc" -ne 0 ]; then
+        DEDUPE_RESULT=error
+        return 1
+    fi
+    if ! record_dedupe_completion "$game_path"; then
+        printf 'Warning: dedupe completed, but its completion state could not be saved.\n' >&2
+    fi
+    DEDUPE_RESULT=done
+    return 0
+}
+
+print_dedupe_summary() {
+    local common="$1"
+    if [ -n "$DEDUPE_BEFORE_PHYSICAL" ] && [ -n "$DEDUPE_AFTER_PHYSICAL" ]; then
+        local before_bytes="${DEDUPE_BEFORE_PHYSICAL%%|*}" after_bytes="${DEDUPE_AFTER_PHYSICAL%%|*}"
+        local original_bytes compression_saved final_saved final_pct dedupe_saved="${DEDUPE_SAVED_BYTES:-0}"
+        original_bytes="${COMPRESS_ORIGINAL_BYTES:-}"
+        if [ "${COMPRESS_REPORT_PATH:-}" != "$common" ] || ! [[ "$original_bytes" =~ ^[0-9]+$ ]] || [ "$original_bytes" -le 0 ]; then
+            original_bytes=$(logical_game_bytes "$common")
+        fi
+        if [[ "$original_bytes" =~ ^[0-9]+$ ]] && [ "$original_bytes" -gt 0 ]; then
+            compression_saved=$((original_bytes - before_bytes))
+            final_saved=$((original_bytes - after_bytes))
+            final_pct=$(awk -v a="$original_bytes" -v b="$after_bytes" 'BEGIN {printf "%.1f%%", (a-b)*100/a}')
+            printf '%bFINAL GAME SIZE%b — %s\n  Original files: %s · Before dedupe: %s · After dedupe: %s\n  Saved before dedupe (compression/current footprint): %s · Dedupe saved this pass: %s\n  Total saved vs original: %s (%s)\n' \
+                "$CYAN" "$RESET" "$common" "$(bytes_human "$original_bytes")" \
+                "$(bytes_human "$before_bytes")" "$(bytes_human "$after_bytes")" \
+                "$(bytes_human "$compression_saved")" "$(bytes_human "$dedupe_saved")" \
+                "$(bytes_human "$final_saved")" "$final_pct"
+        else
+            printf '%bDEDUPLICATION%b — %s\n  Data extents: %s → %s · game data saved: %s\n' \
+                "$CYAN" "$RESET" "$common" "$(bytes_human "$before_bytes")" \
+                "$(bytes_human "$after_bytes")" "$(bytes_human "$dedupe_saved")"
+        fi
+    else
+        printf '%bDEDUPLICATION%b — %s\n  Savings unknown: before/after extent measurement unavailable (requires sudo).\n' "$CYAN" "$RESET" "$common"
+    fi
+    printf '  Savings measure the game data footprint; snapshots or other references may retain space. Negative savings mean growth.\n'
+    if [ "${DEDUPE_HISTORY_ERROR:-0}" -eq 1 ]; then
+        printf '%bWarning:%b could not append this measurement to dedupe history.\n' "$YELLOW" "$RESET" >&2
+    fi
+}
+
+# Shared runner for single-game, batch, and explicit dedupe operations. All
+# arguments are game or steamapps/common paths; duplicates are coalesced here.
+run_dedupe_paths() {
+    local label="$1" game_path common library_common saved=0 scanned=0 skipped=0 failed=0 unknown=0 lib path rc
+    shift
+    local -A seen=()
+    [ "$#" -gt 0 ] || return 0
+    if [ -n "$label" ]; then
+        echo
+        echo '================================================================================'
+        printf '  %s\n' "$label"
+        echo '================================================================================'
+    fi
+    require_btrfs
+    for path in "$@"; do
+        while [[ "$path" == */ && "$path" != "/" ]]; do path="${path%/}"; done
+        game_path="$path"
+        common="${game_path%/*}"
+        library_common="$common"
+        for lib in "${LIBS[@]}"; do
+            if [ "$game_path" = "$lib" ]; then
+                library_common="$lib"
+                break
+            fi
+        done
+        [ -z "${seen[$game_path]:-}" ] || continue
+        seen["$game_path"]=1
+        dedupe_game "$game_path" 1 "$library_common"; rc=$?
+        if [ "$rc" -eq 130 ] || [ "$rc" -eq 143 ]; then
+            printf 'Deduplication interrupted; remaining paths were not scanned.\n' >&2
+            return "$rc"
+        fi
+        if [ "$rc" -ne 0 ]; then
+            case "$DEDUPE_RESULT" in
+                running)
+                    printf 'Skipped %s: the game is running.\n' "$game_path"
+                    skipped=$((skipped + 1)) ;;
+                locked)
+                    printf 'Skipped %s: another process is deduplicating this library.\n' "$game_path"
+                    skipped=$((skipped + 1)) ;;
+                lock_unavailable)
+                    printf 'Skipped %s: flock is required to serialize library deduplication.\n' "$game_path" >&2
+                    failed=$((failed + 1)) ;;
+                *)
+                    printf 'Deduplication failed for %s.\n' "$game_path" >&2
+                    if [ "${DEDUPE_MEASURED:-0}" -eq 1 ]; then
+                        saved=$((saved + DEDUPE_SAVED_BYTES))
+                    else
+                        unknown=$((unknown + 1))
+                    fi
+                    print_dedupe_summary "$game_path"
+                    failed=$((failed + 1)) ;;
+            esac
+            continue
+        fi
+        scanned=$((scanned + 1))
+        if [ "${DEDUPE_MEASURED:-0}" -eq 1 ]; then
+            saved=$((saved + DEDUPE_SAVED_BYTES))
+        else
+            unknown=$((unknown + 1))
+        fi
+        print_dedupe_summary "$game_path"
+    done
+    COMPRESS_REPORT_PATH=""
+    local saved_label
+    saved_label=$(bytes_human "$saved")
+    [ "$unknown" -eq 0 ] || saved_label="unknown ($unknown unmeasured pass(es); $saved_label measured subtotal)"
+    printf 'Deduplication totals: %d scan(s) completed · %d skipped · %d failed · %s game data saved\n' \
+        "$scanned" "$skipped" "$failed" "$saved_label"
+    [ "$failed" -eq 0 ]
+}
+
+cmd_dedupe() {
+    require_btrfs
+    if [ "${#LIBS[@]}" -eq 0 ]; then
+        echo "No Btrfs Steam libraries found. Nothing to deduplicate."
+        return 0
+    fi
+    run_dedupe_paths 'DEDUPLICATION' "${LIBS[@]}"
+}
+
+cmd_recheck() {
+    local path name measured total original disk_bytes original_mib disk_mib saved_mib saved_label pct stamp encoded
+    local checked=0 failed=0
+    ensure_sudo
+    printf 'Refreshing current game measurements; no files will be recompressed.\n'
+    for path in "${GAMES_PATH[@]}"; do
+        name="${path##*/}"
+        measured=$(run_compsize "$path" || true)
+        total=$(printf '%s\n' "$measured" | awk '/^TOTAL/ {print; exit}')
+        original=$(logical_game_bytes "$path")
+        disk_bytes=$(printf '%s\n' "$total" | awk '{print $6}')
+        if [ -z "$total" ] || ! [[ "$disk_bytes" =~ ^[0-9]+$ ]] || ! [[ "$original" =~ ^[0-9]+$ ]]; then
+            printf '  %-32s measurement unavailable; existing record kept.\n' "$name"
+            failed=$((failed + 1))
+            continue
+        fi
+        original_mib=$((original / 1048576))
+        disk_mib=$((disk_bytes / 1048576))
+        saved_mib=$((original_mib - disk_mib))
+        saved_label=$(bytes_human "$((original - disk_bytes))")
+        pct=$(awk -v a="$original" -v b="$disk_bytes" 'BEGIN { if (a>0) printf "%.1f%%", (a-b)*100/a; else print "n/a" }')
+        stamp="${STATE_MAP[$path]:-}"
+        if [ -z "$stamp" ]; then
+            printf '  %-32s Current: %s · On disk: %s · not marked compressed\n' "$name" "$(bytes_human "$original")" "$(bytes_human "$disk_bytes")"
+            checked=$((checked + 1))
+            continue
+        fi
+        encoded=$(encode_field "$path")
+        if state_upsert "$encoded" "$(printf '%s|%s|%s|%s|%s|%s|%s|%s|%s' "$encoded" "$name" "$stamp" "$(bytes_human "$original")" "$(bytes_human "$disk_bytes")" "$saved_label" "$saved_mib" "$original_mib" "$disk_mib")"; then
+            printf '  %-32s Original: %s · On disk: %s · Saved: %s (%s) · compression date kept\n' "$name" "$(bytes_human "$original")" "$(bytes_human "$disk_bytes")" "$saved_label" "$pct"
+            checked=$((checked + 1))
+        else
+            printf '  %-32s could not update saved measurement.\n' "$name" >&2
+            failed=$((failed + 1))
+        fi
+    done
+    printf 'Rechecked %d game(s); %d measurement(s) unavailable or not saved.\n' "$checked" "$failed"
+    [ "$failed" -eq 0 ]
 }
 
 run_compsize() {
     if [ "$EUID" -eq 0 ]; then
-        compsize "$@" 2>/dev/null
+        "$(native_backend)" measure "$@" 2>/dev/null
     else
-        sudo -n compsize "$@" 2>/dev/null
+        sudo -n -- "$(native_backend)" measure "$@" 2>/dev/null
     fi
 }
 
@@ -824,11 +1403,11 @@ check_compsize() {
     if [ "$COMPSIZE_OK" -ne -1 ]; then
         return
     fi
-    if command -v compsize >/dev/null 2>&1; then
+    if [ -x "$(native_backend)" ]; then
         COMPSIZE_OK=1
     else
         COMPSIZE_OK=0
-        echo -e "${YELLOW}Warning: 'compsize' not found - savings stats will be unavailable.${RESET}" >&2
+        echo -e "${YELLOW}Warning: bundled native backend not found - savings stats will be unavailable.${RESET}" >&2
     fi
 }
 
@@ -836,7 +1415,7 @@ ensure_sudo() {
     check_compsize
     if [ "$COMPSIZE_OK" -eq 1 ] && [ "$EUID" -ne 0 ]; then
         if ! sudo -n true 2>/dev/null; then
-            echo -e "${YELLOW}sudo access is required for compsize (measuring real compression)...${RESET}"
+            echo -e "${YELLOW}sudo access is required to read Btrfs compression metadata...${RESET}"
             sudo -v
         fi
     fi
@@ -858,7 +1437,11 @@ state_upsert() {
     tmp=$(mktemp "$STATE_DIR/.games.db.XXXXXX" 2>/dev/null) || return 1
     # Preserve the header (which carries no '|' and so never matches a key) and
     # any other comment, while replacing the record for this key.
-    if ! awk -F'|' -v k="$key" '/^#/ { print; next } $1 != k' \
+    if ! awk -F'|' -v k="$key" '
+        function canonical_path(p) { while (p != "/" && p ~ /\/$/) sub(/\/$/, "", p); return p }
+        /^#/ { print; next }
+        canonical_path($1) != canonical_path(k)
+    ' \
             "$STATE_FILE" > "$tmp" 2>/dev/null; then
         rm -f "$tmp"
         return 1
@@ -876,14 +1459,21 @@ state_upsert() {
     return 0
 }
 
+logical_game_bytes() {
+    find "$1" -path "$1/.bgc-assets-backup" -prune -o -type f -printf '%D %i %s\n' 2>/dev/null | awk '
+        !seen[$1 ":" $2]++ { total += $3 }
+        END { printf "%.0f\n", total + 0 }
+    '
+}
+
 save_summary_record() {
     local name="$1"
     local path="$2"
     # Initialised empty: the script itself does not run with `set -u`, but the
     # test harness does, and an unset local referenced before assignment makes
     # the whole suite abort.
-    local after_raw="" after_total="" a_pct="" a_disk="" a_uncomp=""
-    local u_mib=0 d_mib=0 s_mib=0 saved_str="" record=0
+    local after_raw="" after_total="" a_pct="" a_disk="" a_uncomp="" a_disk_bytes="" a_raw_bytes=""
+    local u_mib=0 d_mib=0 s_mib=0 saved_str="" record=0 a_uncomp_bytes=0 saved_bytes=0
 
     name="${name//|/ }"
     local state_path
@@ -896,27 +1486,24 @@ save_summary_record() {
 
     if [ -n "$after_total" ]; then
         a_disk=$(echo "$after_total" | awk '{print $3}')
-        a_uncomp=$(echo "$after_total" | awk '{print $4}')
+        a_disk_bytes=$(echo "$after_total" | awk '{print $6}')
+        a_raw_bytes=$(echo "$after_total" | awk '{print $7}')
+        a_uncomp_bytes=$(logical_game_bytes "$path")
+        a_uncomp=$(bytes_human "$a_uncomp_bytes")
 
-        u_mib=$(to_mib "$a_uncomp")
-        d_mib=$(to_mib "$a_disk")
-        s_mib=$(( u_mib - d_mib ))
-        if [ "$s_mib" -lt 0 ]; then s_mib=0; fi
-
-        a_pct="$(awk -v u="$u_mib" -v d="$d_mib" 'BEGIN {
+        u_mib=$((a_uncomp_bytes / 1048576))
+        d_mib=$((a_disk_bytes / 1048576))
+        saved_bytes=$((a_uncomp_bytes - a_disk_bytes))
+        s_mib=$((saved_bytes / 1048576))
+        saved_str=$(bytes_human "$saved_bytes")
+        a_pct="$(awk -v u="$a_uncomp_bytes" -v d="$a_disk_bytes" 'BEGIN {
             if (u > 0) printf "%.1f%%", (u - d) * 100 / u;
             else print "0.0%"
         }')"
-
-        if [ "$s_mib" -ge 1024 ]; then
-            saved_str="$(awk -v m="$s_mib" 'BEGIN {printf "%.2f GB", m/1024}')"
-        else
-            saved_str="${s_mib} MB"
-        fi
         record=1
     else
         local du_val
-        du_val=$(du -sh "$path" 2>/dev/null | awk '{print $1}')
+        du_val=$(du -sh --exclude=.bgc-assets-backup "$path" 2>/dev/null | awk '{print $1}')
         a_uncomp="${du_val:-Desc}"
         a_disk="${du_val:-Desc}"
         saved_str="n/a"
@@ -926,9 +1513,10 @@ save_summary_record() {
         s_mib=0
     fi
 
-    # A successful defragmentation is remembered even when compsize could not
-    # measure it (compsize absent, or it failed on this tree). The zeroed
-    # trailing fields mark the record as unmeasured: every statistics reader
+    # Store logical file size as the stable original baseline, rather than
+    # deriving it from the current compressed extents. This keeps later checks
+    # from using a previous compression result as the game's original size.
+    # If extent measurement fails, the zeroed trailing fields mark it unmeasured.
     # skips a record whose uncompressed size is 0, but the presence of the
     # record still stops the game being re-compressed on every single run.
     if [ "$record" -eq 1 ]; then
@@ -939,27 +1527,48 @@ save_summary_record() {
             "$state_path" "$name" "$(date +%s)" "$a_uncomp" "$a_disk" "n/a" 0 0 0)"
     fi
 
-    printf "%s\n" "$a_uncomp|$a_disk|$saved_str|$a_pct"
+    printf "%s\n" "$a_uncomp|$a_disk|$saved_str|$a_pct|$a_disk_bytes|$a_raw_bytes"
 }
 
 # Keep state writes behind a successful defragmentation result. Callers may
 # capture the summary, but a failed btrfs command must never advance history.
 compress_and_record() {
-    local name="$1" path="$2"
+    local name="$1" path="$2" before_disk_bytes="${3:-}" before_raw_bytes="${4:-}" original_file_bytes="${5:-}" result
     compress_directory "$path" || return $?
-    save_summary_record "$name" "$path"
+    result=$(save_summary_record "$name" "$path") || return $?
+    printf '%s|%s|%s|%s\n' "$result" "$before_disk_bytes" "$before_raw_bytes" "$original_file_bytes"
 }
 
 print_summary_block() {
     local name="$1" b_disk="$2" result="$3"
-    local a_uncomp a_disk saved_str a_pct
-    IFS='|' read -r a_uncomp a_disk saved_str a_pct <<< "$result"
+    local a_uncomp a_disk saved_str a_pct after_bytes raw_bytes before_bytes before_raw_bytes original_file_bytes
+    IFS='|' read -r a_uncomp a_disk saved_str a_pct after_bytes raw_bytes before_bytes before_raw_bytes original_file_bytes <<< "$result"
+    COMPRESS_ORIGINAL_BYTES="${original_file_bytes:-}"
+    if ! [[ "$COMPRESS_ORIGINAL_BYTES" =~ ^[0-9]+$ ]]; then COMPRESS_ORIGINAL_BYTES="${before_bytes:-}"; fi
+    COMPRESS_REPORT_PATH="${4:-}"
+    COMPRESS_AFTER_BYTES="${after_bytes:-}"
+    COMPRESS_ZSTD_SAVED_BYTES=0
+    if [[ "$before_bytes" =~ ^[0-9]+$ ]] && [[ "$after_bytes" =~ ^[0-9]+$ ]] ; then
+        COMPRESS_ZSTD_SAVED_BYTES=$((before_bytes - after_bytes))
+    fi
     echo "--------------------------------------------------------------------------------"
     printf "  %-20s %s\n" "Game:" "$name"
-    printf "  %-20s %s\n" "Original Size:" "$a_uncomp"
+    if [[ "$original_file_bytes" =~ ^[0-9]+$ ]]; then
+        printf "  %-20s %s\n" "Original file size:" "$(bytes_human "$original_file_bytes")"
+    else
+        printf "  %-20s %s\n" "Raw unique extents:" "$a_uncomp"
+    fi
     printf "  %-20s %s\n" "Size Before:" "$b_disk"
     printf "  %-20s %s\n" "Size After (ZSTD):" "$a_disk"
-    printf "  %-20s %b\n" "Space Saved:" "${GREEN}${saved_str}${RESET} (${a_pct:-0.0%} saved)"
+    if [[ "$before_bytes" =~ ^[0-9]+$ ]] && [[ "$after_bytes" =~ ^[0-9]+$ ]] && [ "$before_bytes" -gt 0 ]; then
+        local zstd_pct zstd_action zstd_color="$GREEN"
+        zstd_pct=$(awk -v a="$before_bytes" -v b="$after_bytes" 'BEGIN {printf "%.1f%%", (a-b)*100/a}')
+        zstd_action=saved
+        if [ "$COMPRESS_ZSTD_SAVED_BYTES" -lt 0 ]; then zstd_action=increase; zstd_color="$YELLOW"; fi
+        printf "  %-20s %b\n" "ZSTD change this pass:" "${zstd_color}$(bytes_human "$COMPRESS_ZSTD_SAVED_BYTES")${RESET} ($zstd_pct $zstd_action)"
+    else
+        printf "  %-20s %s\n" "ZSTD change this pass:" "unavailable (sudo measurement required)"
+    fi
     echo "--------------------------------------------------------------------------------"
 }
 
@@ -988,7 +1597,9 @@ load_state() {
         IFS='|' read -r -a fields <<< "$state_line"
         if [ "${#fields[@]}" -ge 9 ]; then
             decode_field "${fields[0]}"
-            key="$DECODED_FIELD"; ts="${fields[2]}"
+            key="$DECODED_FIELD"
+            while [[ "$key" == */ && "$key" != "/" ]]; do key="${key%/}"; done
+            ts="${fields[2]}"
             u_mib="${fields[7]}"; d_mib="${fields[8]}"
             [ -n "$key" ] || continue
             STATE_MAP["$key"]="$ts"
@@ -1100,6 +1711,7 @@ discover_data() {
     done
 
     load_state
+    load_dedupe_completions
 
     GAMES_NAME=()
     GAMES_PATH=()
@@ -1113,7 +1725,9 @@ discover_data() {
     # only, never a held-back game, because only a local pass can measure it.
     GAMES_HINT=()
     GAMES_HINT_LOW=()
+    GAMES_DEDUPE_PENDING=()
     STAT_COMP_COUNT=0
+    STAT_COMPRESSED_ONLY_COUNT=0
     STAT_UPD_COUNT=0
     STAT_UNCOMP_COUNT=0
     LOW_YIELD_COUNT=0
@@ -1151,8 +1765,12 @@ discover_data() {
                 comp_time="${LEGACY_MAP["$name"]}"
                 legacy_used=1
             fi
-            local g_bytes g_files g_newer
-            read -r g_bytes g_files g_newer g_human <<< "$(scan_game_dir "$dir" "${comp_time:-0}")"
+            local dedupe_time g_bytes g_files g_newer g_human dedupe_newer dedupe_pending=0
+            dedupe_time="${DEDUPE_MAP[$game_path]:-${DEDUPE_MAP[$lib]:-0}}"
+            read -r g_bytes g_files g_newer g_human dedupe_newer <<< "$(scan_game_dir "$dir" "${comp_time:-0}" "$dedupe_time")"
+            if [ -z "$dedupe_time" ] || [ "$((dedupe_time / 1000000000))" -lt "${comp_time:-0}" ] || [ "${dedupe_newer:-1}" -eq 1 ]; then
+                dedupe_pending=1
+            fi
 
             if [ "${g_bytes:-0}" -lt "$min_bytes" ]; then
                 SKIPPED_STUB_COUNT=$(( SKIPPED_STUB_COUNT + 1 ))
@@ -1161,7 +1779,7 @@ discover_data() {
             fi
 
             GAMES_NAME+=("$name")
-            GAMES_PATH+=("$dir")
+            GAMES_PATH+=("$game_path")
             GAMES_BYTES+=("${g_bytes:-0}")
             GAMES_SIZE+=("${g_human:-0B}")
 
@@ -1169,8 +1787,10 @@ discover_data() {
             if [ -n "$comp_time" ]; then
                 if [ "${g_newer:-0}" -eq 1 ]; then
                     st="UPDATED"
-                else
+                elif [ "$dedupe_pending" -eq 1 ]; then
                     st="COMPRESSED"
+                else
+                    st="COMPACTED"
                 fi
                 if [ "$legacy_used" -eq 1 ]; then
                     ratio="${LEGACY_RATIO["$name"]:-}"
@@ -1182,27 +1802,22 @@ discover_data() {
                 st="UNCOMPRESSED"
             fi
 
-            # Is re-compressing this game worth the time?  A defragmentation
-            # pass has to push every byte of the game through zstd, so its cost
-            # scales with size; the saving is size * the game's measured
-            # compression ratio.  Benefit per unit of work is therefore just
-            # the ratio, independent of size - which is why the test is a
-            # percentage and not an absolute byte count.  A 100 GB game that
-            # only shrinks to 98 GB is not worth an hour, but neither is a
-            # 200 MB one.  The absolute floor exists only to avoid spending
-            # more effort on a 3 MB gain than it is worth.
+            # Cost-aware skip rule. Compressing is a *rewrite*: every byte of
+            # the game is pushed back through zstd, so its cost - and the SSD
+            # wear - scales with game size. The benefit is size * ratio, so the
+            # only meaningful test is the ratio itself: a percentage, not a
+            # fixed MiB number that would be huge for a 1 GB game and trivial
+            # for a 40 GB one. Deleting data (see --slim) has no such cost, so
+            # it is judged separately by a small absolute floor instead.
             #
             # Only games we have actually measured qualify here; a game with no
             # history has to be compressed once before anything is predictable.
-            if [ -n "$ratio" ] && [ "$st" != "COMPRESSED" ]; then
-                # The thresholds may be fractional, so the comparison has to
-                # happen in awk rather than in a bash integer test.
+            if [ -n "$ratio" ] && [[ "$st" != "COMPRESSED" && "$st" != "COMPACTED" ]]; then
                 read -r predicted low <<< "$(awk \
                     -v b="${g_bytes:-0}" -v r="$ratio" \
-                    -v mp="$MIN_GAIN_PCT" -v mm="$MIN_GAIN_MIB" \
+                    -v mp="$MIN_GAIN_PCT" \
                     'BEGIN { p = b * r / 1048576; low = 0
                              if (mp > 0 && r * 100 < mp) low = 1
-                             if (mm > 0 && p < mm)         low = 1
                              printf "%d %d", p, low }')"
                 if [ "$low" -eq 1 ]; then
                     st="LOW YIELD"
@@ -1219,7 +1834,8 @@ discover_data() {
             # Counted only once the final state is settled, so a game that is
             # both updated and running is not tallied under both.
             case "$st" in
-                "COMPRESSED")   STAT_COMP_COUNT=$((STAT_COMP_COUNT + 1)) ;;
+                "COMPACTED")   STAT_COMP_COUNT=$((STAT_COMP_COUNT + 1)) ;;
+                "COMPRESSED")  STAT_COMPRESSED_ONLY_COUNT=$((STAT_COMPRESSED_ONLY_COUNT + 1)) ;;
                 "UPDATED")      STAT_UPD_COUNT=$((STAT_UPD_COUNT + 1)) ;;
                 "UNCOMPRESSED") STAT_UNCOMP_COUNT=$((STAT_UNCOMP_COUNT + 1)) ;;
                 "LOW YIELD")    LOW_YIELD_COUNT=$((LOW_YIELD_COUNT + 1)) ;;
@@ -1240,6 +1856,7 @@ discover_data() {
             GAMES_PREDICT+=("$predicted")
             GAMES_HINT+=("$hint")
             GAMES_HINT_LOW+=("$hint_low")
+            GAMES_DEDUPE_PENDING+=("$dedupe_pending")
 
         done
     done
@@ -1257,7 +1874,7 @@ show_statistics() {
     echo "================================================================================"
     echo "  COMPRESSION STATISTICS"
     echo "================================================================================"
-    printf "${BOLD}%-36s %10s %10s %10s %8s${RESET}\n" "Game Name" "Original" "On Disk" "Saved" "Saved %"
+    printf "${BOLD}%-36s %10s %10s %10s %8s${RESET}\n" "Game Name" "Original" "On Disk" "ZSTD Saved" "Saved %"
     echo "--------------------------------------------------------------------------------"
 
     local totals
@@ -1307,7 +1924,7 @@ show_statistics() {
         printf "  %-26s %s\n" "Total Games Compressed:" "$count"
         printf "  %-26s %s\n" "Total Original Size:" "$t_uncomp_str"
         printf "  %-26s %s\n" "Total Size on Disk:" "$t_disk_str"
-        printf "  %-26s %b\n" "TOTAL SPACE SAVED:" "${GREEN}${t_saved_str}${RESET} (${overall_pct}% overall reduction)"
+        printf "  %-26s %b\n" "TOTAL ZSTD SAVED:" "${GREEN}${t_saved_str}${RESET} (${overall_pct}% overall reduction)"
     fi
     echo "================================================================================"
     echo -e "  ${DIM}Press any key to return to library...${RESET}"
@@ -1317,6 +1934,7 @@ show_statistics() {
 }
 
 manage_settings() {
+    SETTINGS_LIBS_CHANGED=0
     while true; do
         clear
         tput civis
@@ -1329,6 +1947,22 @@ manage_settings() {
         echo "  SETTINGS & PREFERENCES"
         echo "================================================================================"
         echo -e "  Performance Mode: $mode_desc"
+        echo "  ZSTD level: $COMPRESS_LEVEL (auto uses the filesystem setting)"
+        local target_desc
+        case "$VISUAL_TARGET" in
+            ultra-performance) target_desc="Ultra Performance (360p)" ;;
+            performance) target_desc="Performance (720p)" ;;
+            balanced) target_desc="Balanced (1080p)" ;;
+            quality) target_desc="Quality (1440p)" ;;
+            ultra-quality) target_desc="Ultra Quality (4K)" ;;
+            lossless) target_desc="Lossless (Hades LZ4 packages only)" ;;
+            *) target_desc="Native (no beta asset changes)" ;;
+        esac
+        echo "  Asset profile: $target_desc"
+        echo "  [BETA] Supported files: loose raster images, simple DDS textures, and simple mono/stereo WAV audio"
+        echo "  Resized RGB images use tiered color precision (alpha is retained); Ultra Performance PCM may be 11.025 kHz / 8-bit."
+        echo "  Higher audio tiers target up to 16-bit PCM without up-converting; Native makes no beta asset changes."
+        echo "  Packed game files and encoded audio are skipped; Opus replacement needs game-specific support."
         echo "--------------------------------------------------------------------------------"
         echo "Custom library paths:"
         if [ ! -s "$CUSTOM_LIBS_FILE" ]; then
@@ -1343,9 +1977,19 @@ manage_settings() {
         echo "  [1] Toggle Speed / Throttle mode"
         echo "  [2] Add custom library path"
         echo "  [3] Remove custom library path"
+        echo "  [4] Set ZSTD level (auto or 1-15)"
+        echo "  [5] Choose [BETA] asset profile (images, DDS, PCM WAV, Hades packages)"
+        echo "  [6] Languages to keep for --slim (removes other language packs)"
+        if [ -n "$KEEP_LANGUAGES" ]; then
+            echo "      currently keeping: $KEEP_LANGUAGES"
+        else
+            echo "      currently: (unset - language packs are never removed)"
+        fi
+        echo "  [7] Smallest saving worth a delete-only prune (MiB; compression uses the %, not this)"
+        echo "      currently: $MIN_PRUNE_MIB MiB freeing"
         echo "  [b] Back to main menu"
         echo "================================================================================"
-        echo -e "  ${DIM}Press a key [1, 2, 3, b]...${RESET}"
+        echo -e "  ${DIM}Press a key [1, 2, 3, 4, 5, 6, 7, b]...${RESET}"
 
         local s_opt
         read_input
@@ -1371,6 +2015,7 @@ manage_settings() {
                         echo -e "${YELLOW}Warning: Path is on $fs_type, NOT Btrfs.${RESET}" ; sleep 2
                     fi
                     echo "$new_path" >> "$CUSTOM_LIBS_FILE"
+                    SETTINGS_LIBS_CHANGED=1
                 fi ;;
             3)
                 if [ -s "$CUSTOM_LIBS_FILE" ]; then
@@ -1382,7 +2027,81 @@ manage_settings() {
                     # ignored rather than allowed to fail silently.
                     if [[ "$rem_num" =~ ^[0-9]+$ ]] && [ "$rem_num" -ge 1 ]; then
                         sed -i "${rem_num}d" "$CUSTOM_LIBS_FILE"
+                        SETTINGS_LIBS_CHANGED=1
                     fi
+                fi ;;
+            4)
+                tput cnorm
+                echo ""
+                read -r -p "ZSTD level [auto or 1-15]: " new_level
+                tput civis
+                if [ "$new_level" = auto ] || { [[ "$new_level" =~ ^([1-9]|1[0-5])$ ]]; }; then
+                    printf '%s\n' "$new_level" > "$LEVEL_FILE"
+                    COMPRESS_LEVEL="$new_level"
+                else
+                    echo -e "${RED}Expected auto or a level from 1 to 15.${RESET}"
+                    sleep 1
+                fi ;;
+            5)
+                tput cnorm
+                echo ""
+                echo "  [BETA] Asset profiles change supported media files in place; originals are kept for restore."
+                echo "  Lower profiles resize images/DDS and resample simple PCM WAV to lower sample rates."
+                echo "  Lossless only recompresses Hades v7 LZ4 packages; decoded assets stay identical."
+                echo "  Anti-cheat compatibility is not detected. Native disables all asset changes."
+                echo "  [1] Ultra Performance (360p)"
+                echo "  [2] Performance (720p)"
+                echo "  [3] Balanced (1080p)"
+                echo "  [4] Quality (1440p)"
+                echo "  [5] Ultra Quality (4K)"
+                echo "  [6] Native (disable asset optimization)"
+                echo "  [7] Lossless (Hades LZ4 packages only; no resizing/resampling)"
+                echo "  [b] Back"
+                echo -n "Choose profile [1-7/b]: "
+                read_input
+                target_choice="$KEY"
+                case "$target_choice" in
+                    1) VISUAL_TARGET=ultra-performance ;;
+                    2) VISUAL_TARGET=performance ;;
+                    3) VISUAL_TARGET=balanced ;;
+                    4) VISUAL_TARGET=quality ;;
+                    5) VISUAL_TARGET=ultra-quality ;;
+                    6) VISUAL_TARGET=native ;;
+                    7) VISUAL_TARGET=lossless ;;
+                    b|B|q|Q|$'\x1b'|"") NEEDS_FULL_CLEAR=1; return ;;
+                    *) echo -e "${RED}Choose a number from 1 to 7.${RESET}"; sleep 1; continue ;;
+                esac
+                printf '%s\n' "$VISUAL_TARGET" > "$VISUAL_TARGET_FILE" ;;
+            6)
+                tput cnorm
+                echo ""
+                echo "  Languages to keep, as codes or names separated by commas (e.g. en,de)."
+                echo "  --slim removes every other language's data. Keep the language your game"
+                echo "  defaults to, or startup can fail. Leave empty to disable language pruning."
+                read -r -p "Keep languages: " new_langs
+                tput civis
+                KEEP_LANGUAGES=$(normalize_languages "$new_langs")
+                printf '%s\n' "$KEEP_LANGUAGES" > "$KEEP_LANGUAGES_FILE"
+                if [ -n "$KEEP_LANGUAGES" ]; then
+                    echo "  Keeping: $KEEP_LANGUAGES"
+                else
+                    echo "  Language pruning disabled."
+                fi
+                sleep 1 ;;
+            7)
+                tput cnorm
+                echo ""
+                echo "  Deleting data is nearly free, so a small saving is still worth it."
+                echo "  A prune whose total saving reaches this many MiB is offered. This does"
+                echo "  NOT apply to compression, which is gated by the ratio (min_gain_pct)."
+                read -r -p "Minimum prune saving [MiB]: " new_abs
+                tput civis
+                if [[ "$new_abs" =~ ^[0-9]+$ ]]; then
+                    MIN_PRUNE_MIB="$new_abs"
+                    printf '%s\n' "$new_abs" > "$DELETE_FILE"
+                else
+                    echo -e "${RED}Expected a whole number of MiB.${RESET}"
+                    sleep 1
                 fi ;;
             b|B|q|Q|$'\x1b'|"")
                 NEEDS_FULL_CLEAR=1
@@ -1409,19 +2128,19 @@ draw_progress_bar() {
 batch_compress_routine() {
     clear
     tput cnorm
-    local pending=0
+    local pending=0 all_mode=0 choice="" allow_assets=0
     local -a targets_idx=() skipped_low=()
-    # LOW YIELD is disabled only when *both* thresholds are zero. Testing just
-    # min_gain_mib here let a game held back by a nonzero min_gain_pct be
-    # compressed anyway, contradicting --status and --dry-run.
+    # Compression's only skip gate is the ratio (min_gain_pct), so LOW YIELD is
+    # disabled exactly when that gate is off.
     local low_disabled
-    low_disabled=$(awk -v p="$MIN_GAIN_PCT" -v m="$MIN_GAIN_MIB" \
-        'BEGIN { print (p + 0 == 0 && m + 0 == 0) ? 1 : 0 }')
+    low_disabled=$(awk -v p="$MIN_GAIN_PCT" \
+        'BEGIN { print (p + 0 == 0) ? 1 : 0 }')
     for i in "${!GAMES_STATUS[@]}"; do
         case "${GAMES_STATUS[$i]}" in
             "UNCOMPRESSED"|"UPDATED") targets_idx+=("$i") ;;
+            "COMPRESSED") targets_idx+=("$i") ;; # compressed already; dedupe only
             "LOW YIELD")
-                if [ "$low_disabled" -eq 1 ]; then
+                if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] || [ "$low_disabled" -eq 1 ]; then
                     targets_idx+=("$i")
                 else
                     skipped_low+=("$i")
@@ -1431,12 +2150,53 @@ batch_compress_routine() {
     done
     pending=${#targets_idx[@]}
 
+    # A finished filesystem compaction does not imply that optional visual
+    # assets were processed. Recheck mode visits every installed game while
+    # keeping filesystem compression limited to games that actually need it.
+    if [ -t 0 ]; then
+        echo "Batch mode:"
+        echo "  [1] Process pending games (compress if needed, then optimize assets, then deduplicate)"
+        echo "  [2] Optimize assets in every installed game ([BETA]; never recompresses whole games)"
+        echo "      Processes supported media across each game folder; changed games are deduplicated."
+        echo "  [c] Cancel"
+        read -r -p "Choose [1/2/c]: " choice || choice=c
+        case "$choice" in
+            2) all_mode=1; targets_idx=(); skipped_low=() ;;
+            1|"") ;;
+            *) NEEDS_FULL_CLEAR=1; return ;;
+        esac
+    fi
+    if [ "$all_mode" -eq 1 ]; then
+        for i in "${!GAMES_STATUS[@]}"; do
+            targets_idx+=("$i")
+        done
+        pending=${#targets_idx[@]}
+    fi
+    if [ "$all_mode" -eq 1 ] && [ "${VISUAL_TARGET:-native}" = native ]; then
+        echo "Asset-only batch stopped: Native disables beta asset optimization. Choose a profile in Settings first."
+        NEEDS_FULL_CLEAR=1
+        return
+    fi
+    if [ "${VISUAL_TARGET:-native}" != native ] && [ "$pending" -gt 0 ] && [ -t 0 ]; then
+        echo
+        echo "[BETA] Asset profile: $VISUAL_TARGET"
+        echo "Images and DDS textures may lose detail; PCM WAV audio may be resampled. Opus conversion is not attempted because games expect their original codec/container."
+        echo "Anti-cheat is not detected automatically; modified online-game assets may be rejected. Originals are retained for restore."
+        read -r -p "Apply beta asset optimization during this batch? [y/N] " choice || choice=n
+        [[ "$choice" = y || "$choice" = Y ]] && allow_assets=1
+    fi
+
     if [ "$pending" -eq 0 ]; then
+        if [ "$all_mode" -eq 1 ]; then
+            echo "No installed games were found to scan."
+            NEEDS_FULL_CLEAR=1
+            return
+        fi
         if [ "${#skipped_low[@]}" -gt 0 ]; then
             echo -e "${YELLOW}Nothing to compress: ${#skipped_low[@]} game(s) are held back as low yield.${RESET}"
-            echo "    Set min_gain_pct=0 and min_gain_mib=0 to compress them anyway."
+            echo "    Set min_gain_pct=0 to compress them anyway."
         else
-            echo -e "${GREEN}All games are already compressed!${RESET}"
+            echo -e "${GREEN}All games are already compacted (compressed and deduplicated).${RESET}"
         fi
         if [ "$STAT_RUNNING_COUNT" -gt 0 ]; then
             echo -e "${YELLOW}$STAT_RUNNING_COUNT game(s) are running right now and were left alone.${RESET}"
@@ -1448,20 +2208,31 @@ batch_compress_routine() {
     fi
 
     ensure_sudo
+    BATCH_ASSET_DONE=0 BATCH_ASSET_NONE=0 BATCH_ASSET_FAILED=0 BATCH_ASSET_SCANNED=0
+    BATCH_ASSET_PACKED=0 BATCH_ASSET_AUDIO=0
+    BATCH_ASSET_IMAGES=0 BATCH_ASSET_TEXTURES=0 BATCH_ASSET_WAV=0 BATCH_ASSET_PACKAGES=0
+    BATCH_ASSET_FILES=0 BATCH_ASSET_BYTES_BEFORE=0 BATCH_ASSET_BYTES_AFTER=0
+    BATCH_ASSET_FOOTPRINT_SAVED=0 BATCH_ASSET_FOOTPRINT_MEASURED=0
 
-    echo "================================================================================"
-    echo "  BATCH COMPRESSION (Target games: $pending)"
+    if [ "$all_mode" -eq 1 ]; then
+        echo "================================================================================"
+        echo "  BATCH ASSET OPTIMIZATION (Target games: $pending)"
+        echo "  Whole-game compression is disabled; only games with changed assets are deduplicated."
+    else
+        echo "================================================================================"
+        echo "  BATCH COMPACTION (Target games: $pending)"
+    fi
     if [ "$STAT_RUNNING_COUNT" -gt 0 ]; then
         echo "  $STAT_RUNNING_COUNT running game(s) skipped - close them to include them."
     fi
     if [ "${#skipped_low[@]}" -gt 0 ]; then
-        echo "  ${#skipped_low[@]} low-yield game(s) held back (set min_gain_pct/min_gain_mib to 0 to include them)."
+        echo "  ${#skipped_low[@]} low-yield game(s) held back (compressing rewrites the whole game, so a low ratio is skipped; set min_gain_pct=0 to include them)."
     fi
     echo "  Press Ctrl+C anytime to cancel safely."
     echo "================================================================================"
     echo ""
 
-    local done_count=0 skipped_running=0 failed_count=0
+    local done_count=0 skipped_running=0 failed_count=0 dedupe_failed=0 dedupe_rc asset_rc
     for idx in "${targets_idx[@]}"; do
         local g_name="${GAMES_NAME[$idx]}"
         local g_path="${GAMES_PATH[$idx]}"
@@ -1474,33 +2245,73 @@ batch_compress_routine() {
         if game_is_running "$g_path"; then
             echo -e "${YELLOW}  Skipping ${g_name}: it started running since the list was built.${RESET}"
             skipped_running=$(( skipped_running + 1 ))
+            done_count=$((done_count + 1))
             continue
         fi
 
-        echo ""
-        echo -e "${BOLD}[$((done_count + 1))/$pending] Compressing: ${CYAN}$g_name${RESET}..."
+        local game_status="${GAMES_STATUS[$idx]}" needs_dedupe=0
         draw_progress_bar "$done_count" "$pending"
-
-        local b_raw b_disk result
-        b_raw=$(run_compsize "$g_path" || true)
-        b_disk=$(echo "$b_raw" | awk '/^TOTAL/ {print $3}')
-        [ -n "$b_disk" ] || b_disk="N/A"
-
-        local s_t e_t
-        s_t=$(date +%s)
-        if ! result=$(compress_and_record "$g_name" "$g_path"); then
-            echo -e "${RED}  Defragmentation failed for ${g_name}; leaving its saved state unchanged.${RESET}"
-            failed_count=$(( failed_count + 1 ))
-            done_count=$(( done_count + 1 ))
-            continue
+        BATCH_ASSET_CHANGED=0
+        if [ "$all_mode" -eq 1 ]; then
+            : # Explicit asset-only mode: never whole-game compress or baseline-dedupe.
+        elif [ "$game_status" = "COMPACTED" ] || \
+            { [ "$game_status" = "LOW YIELD" ] && [ "${GAMES_DEDUPE_PENDING[$idx]:-0}" -ne 1 ]; }; then
+            : # The all-games mode is checking assets only for this game.
+        elif [ "$game_status" = "COMPRESSED" ] || \
+            { [ "$game_status" = "LOW YIELD" ] && [ "${GAMES_DEDUPE_PENDING[$idx]:-0}" -eq 1 ]; }; then
+            needs_dedupe=1
+        else
+            echo -e "${BOLD}[$((done_count + 1))/$pending] Compressing: ${CYAN}$g_name${RESET}..."
+            local b_raw b_disk result b_disk_bytes b_raw_bytes s_t e_t
+            b_raw=$(run_compsize "$g_path" || true)
+            b_disk=$(echo "$b_raw" | awk '/^TOTAL/ {print $3}')
+            [ -n "$b_disk" ] || b_disk="N/A"
+            b_disk_bytes=$(echo "$b_raw" | awk '/^TOTAL/ {print $6}')
+            b_raw_bytes=$(echo "$b_raw" | awk '/^TOTAL/ {print $7}')
+            s_t=$(date +%s)
+            result=$(compress_and_record "$g_name" "$g_path" "$b_disk_bytes" "$b_raw_bytes" "$(logical_game_bytes "$g_path")"); dedupe_rc=$?
+            case "$dedupe_rc" in 130|143) return "$dedupe_rc" ;; esac
+            if [ "$dedupe_rc" -ne 0 ]; then
+                echo -e "${RED}  Defragmentation failed for ${g_name}; leaving its saved state unchanged.${RESET}"
+                failed_count=$(( failed_count + 1 ))
+                done_count=$(( done_count + 1 ))
+                continue
+            fi
+            e_t=$(( $(date +%s) - s_t ))
+            print_summary_block "$g_name" "$b_disk" "$result" "$g_path"
+            echo -e "    ${GREEN}✓ Finished in ${e_t}s${RESET}"
+            needs_dedupe=1
+            CHECKED_STATE[${GAMES_PATH[$idx]}]=0
         fi
-        e_t=$(( $(date +%s) - s_t ))
 
-        print_summary_block "$g_name" "$b_disk" "$result"
-        echo -e "    ${GREEN}✓ Finished in ${e_t}s${RESET}"
+        if [ "$allow_assets" -eq 1 ]; then
+            printf '  Asset scan %d/%d: %s (%s)...\n' "$((done_count + 1))" "$pending" "$g_name" "$VISUAL_TARGET"
+            batch_asset_game "$g_name" "$g_path"; asset_rc=$?
+            case "$asset_rc" in
+                130|143)
+                    if [ "$BATCH_ASSET_CHANGED" -eq 1 ]; then
+                        GAMES_STATUS[$idx]="COMPRESSED"
+                        GAMES_DEDUPE_PENDING[$idx]=1
+                    fi
+                    return "$asset_rc" ;;
+            esac
+            [ "$BATCH_ASSET_CHANGED" -eq 1 ] && needs_dedupe=1
+        fi
 
-        GAMES_STATUS[$idx]="COMPRESSED"
-        CHECKED_STATE[${GAMES_PATH[$idx]}]=0
+        # One final dedupe scan sees both the original game data and any
+        # resized assets. This avoids the old two-scan-per-game batch path.
+        if [ "$needs_dedupe" -eq 1 ]; then
+            echo -e "${BOLD}  Deduplicating $g_name...${RESET}"
+            run_dedupe_paths "DEDUPLICATION: $g_name" "$g_path"; dedupe_rc=$?
+            case "$dedupe_rc" in 130|143) return "$dedupe_rc" ;; 0) ;; *) dedupe_failed=1 ;; esac
+            if [ "$dedupe_rc" -eq 0 ] && [ "${DEDUPE_COMPLETION_RECORDED:-0}" -eq 1 ]; then
+                GAMES_STATUS[$idx]="COMPACTED"
+                GAMES_DEDUPE_PENDING[$idx]=0
+            else
+                GAMES_STATUS[$idx]="COMPRESSED"
+                GAMES_DEDUPE_PENDING[$idx]=1
+            fi
+        fi
         done_count=$(( done_count + 1 ))
     done
 
@@ -1510,10 +2321,27 @@ batch_compress_routine() {
         echo -e "${YELLOW}$skipped_running game(s) were skipped because they started running.${RESET}"
     fi
     echo ""
-    if [ "$failed_count" -gt 0 ]; then
-        echo -e "${YELLOW}Batch finished with $failed_count defragmentation failure(s). Press any key to return...${RESET}"
+    if [ "${VISUAL_TARGET:-native}" = native ]; then
+        echo "[BETA] Asset optimization: disabled (target is Native). Choose an asset profile in Settings to enable it."
+    elif [ "$allow_assets" -eq 0 ]; then
+        echo "[BETA] Asset optimization: not run (not selected or not confirmed)."
     else
-        echo -e "${GREEN}Batch compression finished! Press any key to return...${RESET}"
+        echo "[BETA] Asset results: scanned $BATCH_ASSET_SCANNED game(s) · changed assets in $BATCH_ASSET_DONE · no eligible assets $BATCH_ASSET_NONE · failed $BATCH_ASSET_FAILED."
+        echo "  Changed files: images $BATCH_ASSET_IMAGES · DDS textures $BATCH_ASSET_TEXTURES · PCM WAV $BATCH_ASSET_WAV · lossless Hades packages $BATCH_ASSET_PACKAGES."
+        echo "  Logical sizes of changed files: $(bytes_human "$BATCH_ASSET_BYTES_BEFORE") → $(bytes_human "$BATCH_ASSET_BYTES_AFTER") · reduction: $(bytes_human "$((BATCH_ASSET_BYTES_BEFORE-BATCH_ASSET_BYTES_AFTER))") across $BATCH_ASSET_FILES file(s)."
+        if [ "$BATCH_ASSET_FOOTPRINT_MEASURED" -gt 0 ]; then
+            echo "  Live game data footprint after optimization: $(bytes_human "$BATCH_ASSET_FOOTPRINT_SAVED") lower in aggregate (restore data and snapshots can still occupy space)."
+        else
+            echo "  Physical game-data footprint change: unavailable; originals remain in restore copies, so logical reduction is not free space."
+        fi
+        echo "  Files identified: packed/media containers $BATCH_ASSET_PACKED · audio files $BATCH_ASSET_AUDIO (only Hades v7 LZ4 bundles can be recompressed; Bink/FMOD are not re-encoded)."
+        echo "  WAV stays WAV. Converting to Opus needs explicit game/engine support and matching asset references; this tool does not rewrite those."
+        echo "  Changed files keep their original path and container; restore copies remain. Asset size reductions are not free-space savings until restore copies are finalized."
+    fi
+    if [ "$failed_count" -gt 0 ] || [ "$dedupe_failed" -eq 1 ] || [ "${BATCH_ASSET_FAILED:-0}" -gt 0 ]; then
+        if [ "$all_mode" -eq 1 ]; then echo -e "${YELLOW}Asset batch finished with issue(s). Press any key to return...${RESET}"; else echo -e "${YELLOW}Batch finished with compression or deduplication issue(s). Press any key to return...${RESET}"; fi
+    else
+        if [ "$all_mode" -eq 1 ]; then echo -e "${GREEN}Asset optimization batch finished! Press any key to return...${RESET}"; else echo -e "${GREEN}Batch compression and deduplication finished! Press any key to return...${RESET}"; fi
     fi
     read_input
     tput civis
@@ -1530,6 +2358,7 @@ join_stub_names() {
 
 bytes_human() {
     awk -v b="${1:-0}" 'BEGIN {
+        if (b < 0) { printf "-"; b = -b }
         if (b < 1024) { printf "%dB\n", b; exit }
         units = "KMGTPE"
         i = 0
@@ -1580,7 +2409,8 @@ bar() {
 # Map a game state to a colour, so a wide report reads at a glance.
 status_color() {
     case "$1" in
-        COMPRESSED)   printf '%s' "$GREEN" ;;
+        COMPACTED)   printf '%s' "$GREEN" ;;
+        COMPRESSED)  printf '%s' "$YELLOW" ;;
         UPDATED)      printf '%s' "$MAGENTA" ;;
         UNCOMPRESSED) printf '%s' "$YELLOW" ;;
         "LOW YIELD")  printf '%s' "$DIM" ;;
@@ -1601,7 +2431,7 @@ cmd_status() {
         printf '  %bBTRFS GAME COMPRESSOR%b %bv%s%b   %d game(s) across %d library(ies)\n' \
             "${BOLD}${CYAN}" "$RESET" "$DIM" "$VERSION" "$RESET" \
             "${#GAMES_NAME[@]}" "${#LIBS[@]}"
-        printf '  [%s] %d%% compressed\n' \
+        printf '  [%s] %d%% compacted\n' \
             "$(bar "$STAT_COMP_COUNT" "${#GAMES_NAME[@]}")" "$pct"
         printf '%s\n' "================================================================================"
         printf '\n'
@@ -1611,13 +2441,17 @@ cmd_status() {
     printf '%s\n' "--------------------------------------------------------------------------------"
     for i in "${!GAMES_NAME[@]}"; do
         local st="${GAMES_STATUS[$i]}"
-        if [ "$OPT_PENDING_ONLY" -eq 1 ] && [ "$st" = "COMPRESSED" ]; then
+        if [ "$OPT_PENDING_ONLY" -eq 1 ] && [[ "$st" == "COMPACTED" ]]; then
             continue
         fi
         n_total=$(( n_total + 1 ))
         local note=""
         case "$st" in
-            "COMPRESSED")   n_shown=$(( n_shown + 1 )) ;;
+            "COMPRESSED")
+                n_pending=$((n_pending + 1))
+                note="dedupe pending"
+                ;;
+            "COMPACTED") n_shown=$((n_shown + 1)) ;;
             "UPDATED"|"UNCOMPRESSED")
                 n_pending=$(( n_pending + 1 ))
                 # A community hint is shown only when the library's zstd level
@@ -1634,6 +2468,7 @@ cmd_status() {
             "LOW YIELD")
                 n_low=$(( n_low + 1 ))
                 note=$(printf ' ~%s expected' "$(bytes_human "$(( ${GAMES_PREDICT[$i]:-0} * 1048576 ))")")
+                [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] && note="$note · dedupe pending"
                 ;;
             "RUNNING")
                 n_running=$(( n_running + 1 ))
@@ -1645,14 +2480,14 @@ cmd_status() {
             "$NAME_FIT" "$(status_color "$st")" "$st" "$RESET" "${GAMES_SIZE[$i]}" "$note"
     done
     printf '%s\n' "--------------------------------------------------------------------------------"
-    printf 'libraries: %d   games: %d   pending: %d   compressed: %d   low-yield: %d' \
-        "${#LIBS[@]}" "$n_total" "$n_pending" "$n_shown" "$n_low"
+    printf 'libraries: %d   games: %d   pending: %d   compacted: %d   compressed only: %d   low-yield: %d' \
+        "${#LIBS[@]}" "$n_total" "$n_pending" "$n_shown" "$STAT_COMPRESSED_ONLY_COUNT" "$n_low"
     if [ "$n_running" -gt 0 ]; then
         printf '   running: %d' "$n_running"
     fi
     printf '\n'
-    if [ "$n_pending" -eq 0 ] && [ "$n_total" -gt 0 ] && [ "$n_running" -eq 0 ]; then
-        printf '%bAll games compressed - nothing to do.%b\n' "$GREEN" "$RESET"
+    if [ "$n_pending" -eq 0 ] && [ "$n_low" -eq 0 ] && [ "$n_total" -gt 0 ] && [ "$n_running" -eq 0 ]; then
+        printf '%bAll games compacted - nothing to do.%b\n' "$GREEN" "$RESET"
     fi
     if [ "$SKIPPED_STUB_COUNT" -gt 0 ]; then
         printf 'skipped:   %d empty install(s) under %d MiB (%s)\n' \
@@ -1682,7 +2517,7 @@ cmd_status() {
         *)         printf 'platform:  %s\n' "$PLATFORM" ;;
     esac
     if [ "$COMPSIZE_OK" -ne 1 ]; then
-        printf 'note: btrfs-compsize not found - savings figures unavailable (run --status for structure only)\n'
+        printf 'note: native backend not found - savings figures unavailable (run --status for structure only)\n'
     fi
     if [ "${#LIBS[@]}" -eq 0 ]; then
         printf 'note: no btrfs Steam libraries found. Add one with --library /path/to/library\n'
@@ -1691,7 +2526,7 @@ cmd_status() {
 }
 
 cmd_status_json() {
-    local i comma="" n_total=0 n_pending=0 n_compressed=0 n_low=0 n_running=0
+    local i comma="" n_total=0 n_pending=0 n_compressed=0 n_compacted=0 n_low=0 n_running=0
     printf '{"version":%s,"libraries":[' "$(json_quote "$VERSION")"
     for i in "${!LIBS[@]}"; do
         [ "$i" -gt 0 ] && printf ','
@@ -1700,11 +2535,12 @@ cmd_status_json() {
     printf '],"games":['
     for i in "${!GAMES_NAME[@]}"; do
         local st="${GAMES_STATUS[$i]}"
-        if [ "$OPT_PENDING_ONLY" -eq 1 ] && [ "$st" = "COMPRESSED" ]; then
+        if [ "$OPT_PENDING_ONLY" -eq 1 ] && [[ "$st" == "COMPACTED" ]]; then
             continue
         fi
         case "$st" in
-            COMPRESSED) n_compressed=$((n_compressed + 1)) ;;
+            COMPACTED) n_compressed=$((n_compressed + 1)); n_compacted=$((n_compacted + 1)) ;;
+            COMPRESSED) n_compressed=$((n_compressed + 1)); n_pending=$((n_pending + 1)) ;;
             UPDATED|UNCOMPRESSED) n_pending=$((n_pending + 1)) ;;
             "LOW YIELD") n_low=$((n_low + 1)) ;;
             RUNNING) n_running=$((n_running + 1)) ;;
@@ -1723,8 +2559,8 @@ cmd_status_json() {
         printf '}'
         comma=,
     done
-    printf '],"summary":{"game_count":%d,"pending":%d,"compressed":%d,"low_yield":%d,"running":%d,"skipped_empty":%d}}\n' \
-        "$n_total" "$n_pending" "$n_compressed" "$n_low" "$n_running" "$SKIPPED_STUB_COUNT"
+    printf '],"summary":{"game_count":%d,"pending":%d,"compressed":%d,"compacted":%d,"compressed_only":%d,"low_yield":%d,"running":%d,"skipped_empty":%d}}\n' \
+        "$n_total" "$n_pending" "$n_compressed" "$n_compacted" "$((n_compressed - n_compacted))" "$n_low" "$n_running" "$SKIPPED_STUB_COUNT"
 }
 
 cmd_notify() {
@@ -1739,7 +2575,7 @@ cmd_notify() {
     fi
     for i in "${!GAMES_NAME[@]}"; do
         case "${GAMES_STATUS[$i]}" in
-            UPDATED|UNCOMPRESSED)
+            COMPRESSED|UPDATED|UNCOMPRESSED)
                 # A community hint rides along with the name so the notice says
                 # what to expect, but only at the level the library actually uses.
                 entry="${GAMES_NAME[$i]}"
@@ -1749,10 +2585,16 @@ cmd_notify() {
                 pending_names+=("$entry")
                 count=$((count + 1))
                 ;;
+            "LOW YIELD")
+                if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ]; then
+                    pending_names+=("${GAMES_NAME[$i]} (dedupe pending)")
+                    count=$((count + 1))
+                fi
+                ;;
         esac
     done
     if [ "$count" -eq 0 ]; then
-        printf 'No actionable games need compression.\n'
+        printf 'No games need compression or deduplication.\n'
         return 0
     fi
     for name in "${pending_names[@]}"; do
@@ -1764,7 +2606,7 @@ cmd_notify() {
         names="$names$name"
     done
     [ "$extra" -gt 0 ] && names="$names, and $extra more"
-    notify-send "Btrfs Game Compressor" "$count game(s) changed and can be compressed: $names" \
+    notify-send "Btrfs Game Compressor" "$count game(s) need compression or deduplication: $names" \
         || { echo "$PROGNAME: desktop notification could not be delivered." >&2; return 1; }
     return 0
 }
@@ -1848,6 +2690,38 @@ STATE_AWK_FUNCS='
     }
 '
 
+# Dedupe measurement ledger is separate from compression state. Its summary
+# reports the latest pass per library rather than summing repeated operations.
+dedupe_history_summary() {
+    awk -F'|' '
+        NF >= 9 && $1 ~ /^[0-9]+$/ && $2 != "" && $9 ~ /^-?[0-9]+$/ {
+            passes++
+            path = $2
+            ts = $1 + 0
+            if (!(path in newest) || ts >= newest[path]) {
+                newest[path] = ts
+                latest_saved[path] = $9 + 0
+            }
+            if (ts > newest_ts) newest_ts = ts
+        }
+        END {
+            for (path in newest) { libraries++; saved += latest_saved[path] }
+            printf "%d\t%d\t%d\t%d\n", passes + 0, libraries + 0, saved + 0, newest_ts + 0
+        }
+    ' "$DEDUPE_HISTORY_FILE" 2>/dev/null
+}
+
+dedupe_history_rows() {
+    local tzoff="$1"
+    awk -F'|' -v tzoff="$tzoff" "$STATE_AWK_FUNCS"'
+        NF >= 9 && $1 ~ /^[0-9]+$/ && $2 != "" && $9 ~ /^-?[0-9]+$/ {
+            ts = $1 + 0
+            printf "%012d\t%s\t%s\t%s\t%s\t%s\n", ts, civildate(ts + tzoff), \
+                cleantab(unescape($2)), $3, $6, $9
+        }
+    ' "$DEDUPE_HISTORY_FILE" 2>/dev/null | sort -r | cut -f2-
+}
+
 # Format one epoch second as local YYYY-MM-DD HH:MM without forking `date`.
 epoch_local() {
     awk -v t="${1:-0}" -v o="$(tz_offset_seconds)" "$STATE_AWK_FUNCS"'
@@ -1901,25 +2775,45 @@ benchmark_rows() {
 }
 
 cmd_history() {
-    local rows tzoff when name before after savedstr n=0
+    local rows dedupe_rows tzoff when name before after savedstr n=0 d=0 path before_excl after_excl new_shared
     tzoff=$(tz_offset_seconds)
     rows=$(history_rows "$tzoff")
-    if [ -z "$rows" ]; then
+    dedupe_rows=$(dedupe_history_rows "$tzoff")
+    if [ -z "$rows" ] && [ -z "$dedupe_rows" ]; then
         printf 'No compression history yet. Run a compression pass to start recording.\n'
         return 0
     fi
-    printf '%b%-44s  %-16s  %10s %14s  %10s%b\n' "$BOLD" \
-        "GAME" "WHEN" "RAW" "ON DISK" "SAVED" "$RESET"
-    printf '%s\n' "------------------------------------------------------------------------------------------------"
-    while IFS=$'\t' read -r when name before after savedstr; do
-        [ -n "$name" ] || continue
-        fit_name "$name" 44
-        printf '%-44s  %-16s  %10s -> %-10s  %10s\n' \
-            "$NAME_FIT" "$when" "$before" "$after" "$savedstr"
-        n=$(( n + 1 ))
-    done <<< "$rows"
-    printf '%s\n' "------------------------------------------------------------------------------------------------"
-    printf '%d record(s)\n' "$n"
+    if [ -n "$rows" ]; then
+        echo 'ZSTD COMPRESSION HISTORY'
+        printf '%b%-44s  %-16s  %10s %14s  %10s%b\n' "$BOLD" \
+            "GAME" "WHEN" "RAW" "ON DISK" "ZSTD SAVED" "$RESET"
+        printf '%s\n' "------------------------------------------------------------------------------------------------"
+        while IFS=$'\t' read -r when name before after savedstr; do
+            [ -n "$name" ] || continue
+            fit_name "$name" 44
+            printf '%-44s  %-16s  %10s -> %-10s  %10s\n' \
+                "$NAME_FIT" "$when" "$before" "$after" "$savedstr"
+            n=$(( n + 1 ))
+        done <<< "$rows"
+        printf '%s\n' "------------------------------------------------------------------------------------------------"
+        printf '%d compression record(s)\n\n' "$n"
+    fi
+    if [ -n "$dedupe_rows" ]; then
+        echo 'DEDUPLICATION HISTORY (physical game data before → after)'
+        printf '%b%-16s  %-40s  %14s  %14s  %14s%b\n' "$BOLD" \
+            "WHEN" "LIBRARY" "BEFORE" "AFTER" "SAVED" "$RESET"
+        printf '%s\n' "---------------------------------------------------------------------------------------------------------------"
+        while IFS=$'\t' read -r when path before_excl after_excl new_shared; do
+            [ -n "$path" ] || continue
+            fit_name "$path" 40
+            printf '%-16s  %-40s  %14s  %14s  %14s\n' \
+                "$when" "$NAME_FIT" "$(bytes_human "$before_excl")" \
+                "$(bytes_human "$after_excl")" "$(bytes_human "$new_shared")"
+            d=$(( d + 1 ))
+        done <<< "$dedupe_rows"
+        printf '%s\n' "---------------------------------------------------------------------------------------------------------------"
+        printf '%d deduplication measurement(s)\n' "$d"
+    fi
     return 0
 }
 
@@ -1936,23 +2830,665 @@ cmd_stats() {
     if [ "$rows" -eq 0 ]; then
         echo "  No compressed games recorded yet."
         echo "  Run the interactive batch ('b') or compress a game to populate this."
-        echo "================================================================================"
-        return 0
+    else
+        printf "  %-40s %s\n" "Games compressed:" "$rows"
+        printf "  %-40s %s\n" "Total original size:" "$(mib_human "$tu")"
+        printf "  %-40s %s\n" "Total size on disk:" "$(mib_human "$td")"
+        printf "  %-40s %b\n" "Total ZSTD saved:" \
+            "${GREEN}$(mib_human "$saved")${RESET} (${BOLD}${overall}%${RESET} overall)"
+        if [ "${newest:-0}" -gt 0 ]; then
+            printf "  %-40s %s\n" "Most recent compression:" "$(epoch_local "$newest")"
+        fi
     fi
-    printf "  %-26s %s\n" "Games compressed:" "$rows"
-    printf "  %-26s %s\n" "Total original size:" "$(mib_human "$tu")"
-    printf "  %-26s %s\n" "Total size on disk:" "$(mib_human "$td")"
-    printf "  %-26s %b\n" "Total space saved:" \
-        "${GREEN}$(mib_human "$saved")${RESET} (${BOLD}${overall}%${RESET} overall)"
-    if [ "${newest:-0}" -gt 0 ]; then
-        printf "  %-26s %s\n" "Most recent compression:" "$(epoch_local "$newest")"
+    local dedupe_line dedupe_passes dedupe_libs dedupe_latest dedupe_newest
+    dedupe_line=$(dedupe_history_summary)
+    IFS=$'\t' read -r dedupe_passes dedupe_libs dedupe_latest dedupe_newest <<< "$dedupe_line"
+    echo '--------------------------------------------------------------------------------'
+    echo '  DEDUPLICATION MEASUREMENTS (game data footprint)'
+    if [ "${dedupe_passes:-0}" -eq 0 ]; then
+        echo '  No measured dedupe passes recorded yet.'
+    else
+        printf "  %-40s %s\n" "Measured passes:" "$dedupe_passes"
+        printf "  %-40s %s\n" "Directories with recorded passes:" "$dedupe_libs"
+        printf "  %-40s %s\n" "Latest measured savings¹:" "$(bytes_human "$dedupe_latest")"
+        printf "  %-40s %s\n" "Most recent pass:" "$(epoch_local "$dedupe_newest")"
+        echo '  ¹ Sum of the latest measured pass for each directory; overlapping scopes may double-count. Not a cumulative total.'
     fi
     echo "================================================================================"
     return 0
 }
 
+cmd_export_fmod() {
+    local result tag before after changed skipped status
+    result=$(BGC_ASSET_PROGRESS=1 "$(native_backend)" fmod-reencode "$FMOD_QUALITY" "$FMOD_SOURCE" "$FMOD_OUTPUT") || return $?
+    IFS='|' read -r tag before after changed skipped status <<< "$result"
+    [ "$tag" = FMOD ] || { printf 'Invalid FMOD backend response.\n' >&2; return 1; }
+    if [ "$status" = EXPORTED ]; then
+        printf '[EXPERIMENTAL] FMOD export: %s\n' "$FMOD_OUTPUT"
+        printf 'Re-encoded %s stream(s), retained %s; logical file size %s → %s (reduction %s).\n' \
+            "$changed" "$skipped" "$(bytes_human "$before")" "$(bytes_human "$after")" "$(bytes_human "$((before-after))")"
+        printf 'Source unchanged. Export is lossy and not enabled for automatic asset replacement. Verify audio, loops and event timing in-game before using it. This is not net disk savings.\n'
+    else
+        printf 'No smaller FMOD export produced; source unchanged and no output file written.\n'
+    fi
+}
+
+# Container transforms are intentionally not part of automatic installed apply.
+# Their write gate uses savings/output bytes, not total game size. Audit stays
+# read-only; successful export retains the source and therefore is not net savings.
+cmd_container() {
+    local backend result status before after tag rest command
+    backend=$(native_backend) || return $?
+    if [ "$CONTAINER_ACTION" = audit ]; then
+        printf 'Read-only packed-container audit; byte counts are logical, not physical savings.\n'
+        "$backend" container-audit "$CONTAINER_SOURCE"
+        return $?
+    fi
+    if [ "$CONTAINER_ACTION" = --audit-godot-textures ]; then
+        printf 'Read-only PCK texture estimate for profile %s; nothing is written.\n' "$CONTAINER_PROFILE"
+        result=$("$backend" godot-texture-audit "$CONTAINER_PROFILE" "$CONTAINER_SOURCE") || return $?
+        IFS='|' read -r tag before after entries transformed skipped saved eff status <<< "$result"
+        if [[ "$tag" != GODOT_TEXTURE ]]; then
+            printf 'Invalid texture backend response.\n' >&2; return 1
+        fi
+        if [[ "$status" = NO_PROFILE ]]; then
+            printf 'Native/Lossless makes no texture changes.\n'
+            return 0
+        fi
+        printf 'PCK %s → %s: rewritable textures %s, unchanged %s, logical saving %s (%s%%).\n' \
+            "$(bytes_human "$before")" "$(bytes_human "$after")" "$transformed" "$skipped" "$(bytes_human "$saved")" "$eff"
+        printf 'Estimate only: no export written, no physical or in-game validation.\n'
+        return 0
+    fi
+    if [ "$CONTAINER_ACTION" = --audit-godot3-audio ]; then
+        printf 'Read-only Godot 3 packed-audio estimate for profile %s; nothing is written.\n' "$CONTAINER_PROFILE"
+        result=$("$backend" godot3-audit "$CONTAINER_PROFILE" "$CONTAINER_SOURCE") || return $?
+        IFS='|' read -r tag before after entries converted skipped wav_converted wav_skipped saved eff status <<< "$result"
+        if [[ "$tag" != GODOT3 ]]; then
+            printf 'Invalid Godot 3 audio backend response.\n' >&2; return 1
+        fi
+        if [[ "$status" = NO_PROFILE ]]; then
+            printf 'Native/Lossless makes no audio changes.\n'
+            return 0
+        fi
+        printf 'PCK %s → %s: re-encodable MP3 tracks %s, unchanged %s, logical saving %s (%s%%).\n' \
+            "$(bytes_human "$before")" "$(bytes_human "$after")" "$converted" "$skipped" "$(bytes_human "$saved")" "$eff"
+        printf 'PCM samples: %s reducible in sample rate/bit depth, %s unchanged.\n' "$wav_converted" "$wav_skipped"
+        printf 'Estimate only: no export written, no physical or in-game validation.\n'
+        return 0
+    fi
+    case "$CONTAINER_ACTION" in
+        --export-unityfs) command=unityfs-recompress ;;
+        --export-godot) command=godot-dedup-export ;;
+        --export-godot-textures)
+            result=$("$backend" godot-texture-export "$CONTAINER_PROFILE" "$MIN_GAIN_PCT" "$CONTAINER_SOURCE" "$CONTAINER_OUTPUT") || return $?
+            IFS='|' read -r tag before after entries transformed skipped saved eff status <<< "$result"
+            if [[ "$tag" != GODOT_TEXTURE ]]; then
+                printf 'Invalid texture backend response.\n' >&2; return 1
+            fi
+            if [[ "$status" = NO_PROFILE ]]; then
+                printf 'Native/Lossless makes no texture changes; nothing written.\n'
+                return 0
+            fi
+            if [[ "$status" = EXPORTED ]]; then
+                printf '[EXPERIMENTAL LOSSY] Texture export: %s\n' "$CONTAINER_OUTPUT"
+                printf 'Logical file size %s → %s; rewrote %s textures (%s skipped). Source unchanged.\n' \
+                    "$(bytes_human "$before")" "$(bytes_human "$after")" "$transformed" "$skipped"
+                printf 'Lossy profile %s: unsupported textures were copied unchanged. In-game loading and physical savings still need validation.\n' "$CONTAINER_PROFILE"
+                return 0
+            fi
+            printf 'No export written: %s (minimum gain/output-write efficiency %s%%). Source unchanged.\n' "$status" "$MIN_GAIN_PCT"
+            return 0 ;;
+        --export-godot3-audio)
+            result=$("$backend" godot3-optimize "$CONTAINER_PROFILE" "$MIN_GAIN_PCT" "$CONTAINER_SOURCE" "$CONTAINER_OUTPUT") || return $?
+            IFS='|' read -r tag before after entries converted skipped wav_converted wav_skipped saved eff status <<< "$result"
+            if [[ "$tag" != GODOT3 ]]; then
+                printf 'Invalid Godot 3 audio backend response.\n' >&2; return 1
+            fi
+            if [[ "$status" = NO_PROFILE ]]; then
+                printf 'Native/Lossless makes no audio changes; nothing written.\n'
+                return 0
+            fi
+            if [[ "$status" = EXPORTED ]]; then
+                printf '[EXPERIMENTAL LOSSY] Godot 3 audio export: %s\n' "$CONTAINER_OUTPUT"
+                printf 'Logical file size %s → %s; re-encoded %s MP3 tracks as Ogg Vorbis (%s skipped). Source unchanged.\n' \
+                    "$(bytes_human "$before")" "$(bytes_human "$after")" "$converted" "$skipped"
+                printf 'PCM samples: %s reduced in sample rate/bit depth, %s unchanged.\n' "$wav_converted" "$wav_skipped"
+                printf 'Lossy profile %s: matching .import stubs were retyped. In-game playback/looping and physical savings still need validation.\n' "$CONTAINER_PROFILE"
+                return 0
+            fi
+            printf 'No export written: %s (minimum gain/output-write efficiency %s%%). Source unchanged.\n' "$status" "$MIN_GAIN_PCT"
+            return 0 ;;
+        *) printf 'Unknown container action.\n' >&2; return 2 ;;
+    esac
+    result=$("$backend" "$command" "$MIN_GAIN_PCT" "$CONTAINER_SOURCE" "$CONTAINER_OUTPUT") || return $?
+    IFS='|' read -r tag before after rest <<< "$result"
+    status=${result##*|}
+    if [[ "$tag" != UNITYFS && "$tag" != GODOT_DEDUP ]] || [[ ! "$before" =~ ^[0-9]+$ || ! "$after" =~ ^[0-9]+$ ]]; then
+        printf 'Invalid container backend response.\n' >&2; return 1
+    fi
+    if [ "$status" = EXPORTED ]; then
+        printf '[EXPERIMENTAL LOSSLESS] Container export: %s\n' "$CONTAINER_OUTPUT"
+        printf 'Logical file size %s → %s. Source unchanged; game loading and physical savings still need validation.\n' \
+            "$(bytes_human "$before")" "$(bytes_human "$after")"
+    elif [[ "$status" = NO_GAIN || "$status" = LOW_EFFICIENCY ]]; then
+        printf 'No export written: %s (minimum gain/output-write efficiency %s%%). Source unchanged.\n' "$status" "$MIN_GAIN_PCT"
+    else
+        printf 'Unknown container export status.\n' >&2; return 1
+    fi
+}
+
+# A lossless logical reduction is not necessarily a physical reduction after
+# the filesystem's own codec. Rollback is safe only for a fresh backup set.
+lossless_guard_ready() {
+    local game="$1" baseline="$2"
+    if [ -e "$game/.bgc-assets-backup" ] || [ -L "$game/.bgc-assets-backup" ]; then
+        printf 'Lossless physical guard: restore or finalize existing asset backups before a new pass.\n' >&2
+        return 1
+    fi
+    if [[ ! "$baseline" =~ ^[0-9]+$ ]]; then
+        printf 'Lossless physical guard: exact Btrfs measurement is required; game unchanged.\n' >&2
+        return 1
+    fi
+}
+
+# Return 0 for a smaller live footprint, 2 for a successful rollback, and 1
+# if rollback failed. Never discard a pre-existing backup set (checked above).
+lossless_guard_verify() {
+    local game="$1" baseline="$2" measured selection relative original_bytes candidate_bytes
+    LOSSLESS_GUARD_REJECTED=0 LOSSLESS_GUARD_BEFORE=0 LOSSLESS_GUARD_AFTER=0
+    selection=$(mktemp) || return 1
+    local selection_rc
+    if [ "$(id -u)" -eq 0 ]; then
+        "$(native_backend)" assets-physical-rejections "$game" >"$selection" 2>/dev/null; selection_rc=$?
+    else
+        sudo -n -- "$(native_backend)" assets-physical-rejections "$game" >"$selection" 2>/dev/null; selection_rc=$?
+    fi
+    if [ "$selection_rc" -eq 0 ]; then
+        while IFS= read -r -d '' relative; do
+            IFS= read -r -d '' original_bytes && IFS= read -r -d '' candidate_bytes || {
+                rm -f "$selection"; return 1;
+            }
+            [[ "$original_bytes" =~ ^[0-9]+$ && "$candidate_bytes" =~ ^[0-9]+$ ]] || {
+                rm -f "$selection"; return 1;
+            }
+            "$(native_backend)" assets-restore-file "$game" "$relative" >/dev/null || {
+                rm -f "$selection"; return 1;
+            }
+            LOSSLESS_GUARD_REJECTED=$((LOSSLESS_GUARD_REJECTED+1))
+            LOSSLESS_GUARD_BEFORE=$((LOSSLESS_GUARD_BEFORE+original_bytes))
+            LOSSLESS_GUARD_AFTER=$((LOSSLESS_GUARD_AFTER+candidate_bytes))
+        done < "$selection"
+    fi
+    rm -f "$selection"
+    if [ "$LOSSLESS_GUARD_REJECTED" -gt 0 ]; then
+        printf 'Lossless physical guard: restored %s package(s) that did not improve physical storage.\n' "$LOSSLESS_GUARD_REJECTED" >&2
+    fi
+    measured=$(asset_usage_bytes "$game") || measured=""
+    if [[ "$measured" =~ ^[0-9]+$ ]] && [ "$measured" -lt "$baseline" ]; then
+        return 0
+    fi
+    printf 'Lossless physical guard: live storage did not improve or measurement failed; restoring originals.\n' >&2
+    "$(native_backend)" assets restore lossless 0 "$game" >/dev/null || {
+        printf 'Automatic restore failed; originals remain available for --restore-assets.\n' >&2
+        return 1
+    }
+    return 2
+}
+
+# Remove unused, non-gameplay files into the same restorable backup tree used
+# by asset transforms, so --restore-assets and --finalize-assets already apply.
+cmd_prune_assets() {
+    local game="" matches=0 i
+    for i in "${!GAMES_PATH[@]}"; do
+        if [ "$PRUNE_QUERY" = "${GAMES_PATH[$i]}" ] || [ "$PRUNE_QUERY" = "${GAMES_NAME[$i]}" ]; then
+            game="${GAMES_PATH[$i]}"
+            matches=$(( matches + 1 ))
+        fi
+    done
+    if [ "$matches" -ne 1 ]; then
+        printf '%s: expected one installed game, found %d for %s\n' "$PROGNAME" "$matches" "$PRUNE_QUERY" >&2
+        return 2
+    fi
+    require_btrfs
+    local rels=() candidate
+    if [ "$PRUNE_FALLBACKS" -eq 1 ]; then
+        for candidate in "Content/Movies/720p" "Content/Win/Packages/720p" "Content/Win/Packages/BC3"; do
+            [ -d "$game/$candidate" ] && rels+=("$candidate")
+        done
+        if [ "${#rels[@]}" -eq 0 ]; then
+            printf 'No low-resolution or BC3 fallback suites found for %s.\n' "$game"
+        fi
+    fi
+    discover_running_games
+    if [ -n "${RUNNING_DIRS[$game]:-}" ]; then
+        printf 'Close %s before pruning its files.\n' "$game" >&2
+        return 1
+    fi
+    local plan count bytes
+    plan=$("$(native_backend)" prune-plan "$game" --debug "${rels[@]}") || {
+        printf 'Prune scan failed.\n' >&2; return 1
+    }
+    IFS='|' read -r tag _ count bytes <<< "$plan"
+    [ "$tag" = PRUNE ] || { printf 'Invalid prune response from the native backend.\n' >&2; return 1; }
+    if [ "${count:-0}" -eq 0 ]; then
+        printf 'Nothing to prune: no debug symbols or requested fallback suites found. Game unchanged.\n'
+        return 0
+    fi
+    if [ "$MIN_PRUNE_MIB" -gt 0 ] && [ "${bytes:-0}" -lt "$(( MIN_PRUNE_MIB * 1048576 ))" ]; then
+        printf 'Nothing worth pruning: only %s is reclaimable, under the %s MiB prune floor. Game unchanged.\n' \
+            "$(bytes_human "${bytes:-0}")" "$MIN_PRUNE_MIB"
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        printf '%s needs an interactive terminal to confirm pruning %s file(s).\n' "$PROGNAME" "$count" >&2
+        return 2
+    fi
+    printf 'Prune candidates: %s unused file(s), %s of logical data.\n' "$count" "$(bytes_human "$bytes")"
+    printf 'Debug symbols are compiled-out data the released game does not load. '
+    if [ "$PRUNE_FALLBACKS" -eq 1 ]; then
+        printf 'The 720p/BC3 suites are only loaded when the engine selects low-resolution assets (a weak GPU or that setting); removing them can break playback on such a system.\n'
+    else
+        printf 'Fallback suites are left untouched; add --prune-fallbacks to remove them too.\n'
+    fi
+    printf 'Originals stay in a local restore copy: free space returns only after you test the game and run --finalize-assets. Continue? [y/N] '
+    local reply; read -r reply || reply=""
+    [[ "$reply" = y || "$reply" = Y ]] || return 0
+    ensure_sudo
+    local before after result
+    before=$(asset_usage_bytes "$game") || before=""
+    result=$("$(native_backend)" prune-apply "$game" --debug "${rels[@]}") || {
+        printf 'Pruning stopped. Some files may be missing; run --restore-assets to recover.\n' >&2
+        return 1
+    }
+    IFS='|' read -r tag _ count bytes <<< "$result"
+    [ "$tag" = PRUNE ] || { printf 'Invalid prune response from the native backend.\n' >&2; return 1; }
+    after=$(asset_usage_bytes "$game") || after=""
+    printf 'Pruned %s unused file(s): %s logical bytes; originals retained for restore.\n' "$count" "$(bytes_human "$bytes")"
+    if [ -n "$before" ] && [ -n "$after" ]; then
+        printf 'Live game data on disk (excludes restore copies): %s → %s · footprint reduction: %s.\n' \
+            "$(bytes_human "$before")" "$(bytes_human "$after")" "$(bytes_human "$((before-after))")"
+        printf 'Free space returns after --finalize-assets; snapshots may still retain the blocks.\n'
+    fi
+}
+
+# Read-only engine/container report. Explains where a game's bytes live so the
+# right optimization (prune, or a future format-aware pass) can be chosen.
+cmd_engines() {
+    local game="" matches=0 i
+    for i in "${!GAMES_PATH[@]}"; do
+        if [ "$ENGINES_QUERY" = "${GAMES_PATH[$i]}" ] || [ "$ENGINES_QUERY" = "${GAMES_NAME[$i]}" ]; then
+            game="${GAMES_PATH[$i]}"
+            matches=$(( matches + 1 ))
+        fi
+    done
+    if [ "$matches" -ne 1 ]; then
+        printf '%s: expected one installed game, found %d for %s\n' "$PROGNAME" "$matches" "$ENGINES_QUERY" >&2
+        return 2
+    fi
+    local output
+    output=$("$(native_backend)" engine-scan "$game") || {
+        printf 'Engine scan failed.\n' >&2; return 1
+    }
+    printf 'Engine and containers for %s (read-only; nothing changed):\n' "$game"
+    local line engines=0 tag class bytes files path
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        case "$line" in
+            ENGINE\|*)
+                engines=$(( engines + 1 ))
+                IFS='|' read -r tag class path <<< "$line"
+                printf '  engine: %s (%s)\n' "$class" "$path" ;;
+        esac
+    done <<< "$output"
+    if [ "$engines" -eq 0 ]; then
+        printf '  engine: not recognized\n'
+    fi
+    printf '  largest containers:\n'
+    while IFS='|' read -r tag class bytes files path; do
+        [ "$tag" = CONTAINER ] || continue
+        printf '    %10s  %-15s %6s files  %s\n' "$(bytes_human "${bytes:-0}")" "$class" "${files:-0}" "${path:-.}"
+    done < <(printf '%s\n' "$output" | awk -F'|' '$1=="CONTAINER"{print $3"|"$0}' | sort -rn | cut -d'|' -f2-)
+    printf '  Nothing was changed. Inspect candidates with --variants or supported packed files with --audit-container. Texture resizing inside packed assets is not available yet.\n'
+}
+
+# One-shot, format-agnostic slimming: keep the highest resolution tier and the
+# host-platform build, remove the rest plus debug symbols, all restorable.
+cmd_slim() {
+    local game="" matches=0 i
+    for i in "${!GAMES_PATH[@]}"; do
+        if [ "$SLIM_QUERY" = "${GAMES_PATH[$i]}" ] || [ "$SLIM_QUERY" = "${GAMES_NAME[$i]}" ]; then
+            game="${GAMES_PATH[$i]}"
+            matches=$(( matches + 1 ))
+        fi
+    done
+    if [ "$matches" -ne 1 ]; then
+        printf '%s: expected one installed game, found %d for %s\n' "$PROGNAME" "$matches" "$SLIM_QUERY" >&2
+        return 2
+    fi
+    require_btrfs
+    discover_running_games
+    if [ -n "${RUNNING_DIRS[$game]:-}" ]; then
+        printf 'Close %s before slimming it.\n' "$game" >&2
+        return 1
+    fi
+    local -a rels=()
+    local slims total=0 count=0 line bytes path
+    slims=$("$(native_backend)" variants-slim "$game" "$KEEP_LANGUAGES") || {
+        printf 'Slim scan failed.\n' >&2; return 1
+    }
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        [ "${line#SLIM|}" != "$line" ] || continue
+        bytes="${line#SLIM|}"; bytes="${bytes%%|*}"
+        path="${line##*|}"
+        [[ "$bytes" =~ ^[0-9]+$ && -n "$path" ]] || continue
+        rels+=("$path")
+        total=$(( total + bytes ))
+        count=$(( count + 1 ))
+    done <<< "$slims"
+    local debug_plan dbgcount=0 dbgbytes=0
+    debug_plan=$("$(native_backend)" prune-plan "$game" --debug) || true
+    IFS='|' read -r _ _ dbgcount dbgbytes <<< "$debug_plan"
+    dbgcount=${dbgcount:-0}; dbgbytes=${dbgbytes:-0}
+    local grand=$(( total + dbgbytes )) grandcount=$(( count + dbgcount ))
+    if [ "$grandcount" -eq 0 ]; then
+        printf 'Nothing to slim in %s: no unused fallback suites or debug symbols found. Game unchanged.\n' "$game"
+        printf 'Use --variants for a full report, including language and architecture suites you may want to prune manually.\n'
+        return 0
+    fi
+    # Deleting is cheap, so pruning is judged by a small absolute floor rather
+    # than by a ratio: a low percentage is fine when nothing has to be rewritten.
+    if [ "$MIN_PRUNE_MIB" -gt 0 ] && [ "$grand" -lt "$(( MIN_PRUNE_MIB * 1048576 ))" ]; then
+        printf 'Nothing worth pruning in %s: only %s is reclaimable, under the %s MiB prune floor. Game unchanged.\n' \
+            "$game" "$(bytes_human "$grand")" "$MIN_PRUNE_MIB"
+        return 0
+    fi
+    printf 'Slim plan for %s:\n' "$game"
+    if [ "$count" -gt 0 ]; then
+        printf '  unused fallback suites (%s, %s):\n' "$count" "$(bytes_human "$total")"
+        for path in "${rels[@]}"; do printf '    %s\n' "$path"; done
+    fi
+    printf '  developer debug symbols: %s file(s), %s\n' "$dbgcount" "$(bytes_human "$dbgbytes")"
+    if [ -n "$KEEP_LANGUAGES" ]; then
+        printf '  languages kept: %s (all other language packs removed)\n' "$KEEP_LANGUAGES"
+    else
+        printf '  languages: none selected - language packs are left untouched (set with --keep-languages en,de or in Settings)\n'
+    fi
+    printf '  total logical: %s\n' "$(bytes_human "$grand")"
+    printf 'Kept: the highest resolution tier, the host-platform build, your languages and every non-variant file. Removing fallbacks is only visible if the engine selects a lower tier or another platform.\n'
+    if [ -n "$KEEP_LANGUAGES" ]; then
+        printf 'Warning: keep the language the game starts with (usually the first/English one); removing it can prevent startup. If in doubt, test and use --restore-assets.\n'
+    fi
+    if [ ! -t 0 ]; then
+        printf '%s needs an interactive terminal to confirm slimming %s item(s).\n' "$PROGNAME" "$grandcount" >&2
+        return 2
+    fi
+    printf 'Originals stay in a local restore copy: free space returns only after you test the game and run --finalize-assets. Continue? [y/N] '
+    local reply; read -r reply || reply=""
+    [[ "$reply" = y || "$reply" = Y ]] || return 0
+    ensure_sudo
+    local before after result
+    before=$(asset_usage_bytes "$game") || before=""
+    result=$("$(native_backend)" prune-apply "$game" --debug ${rels[@]+"${rels[@]}"}) || {
+        printf 'Slimming stopped. Some files may be missing; run --restore-assets to recover.\n' >&2
+        return 1
+    }
+    IFS='|' read -r _ _ count bytes <<< "$result"
+    after=$(asset_usage_bytes "$game") || after=""
+    printf 'Slimmed %s unused file(s): %s logical bytes; originals retained for restore.\n' "$count" "$(bytes_human "${bytes:-0}")"
+    if [ -n "$before" ] && [ -n "$after" ]; then
+        printf 'Live game data on disk (excludes restore copies): %s → %s · footprint reduction: %s.\n' \
+            "$(bytes_human "$before")" "$(bytes_human "$after")" "$(bytes_human "$((before-after))")"
+        printf 'Free space returns after --finalize-assets; snapshots may still retain the blocks.\n'
+    fi
+}
+
+# Read-only, format-agnostic report of sibling suites that share a file-name
+# layout (architecture builds, renderer/shader suites, resolution tiers,
+# language packs). Nothing is measured with privilege and nothing changes.
+cmd_variants() {
+    local game="" matches=0 i
+    for i in "${!GAMES_PATH[@]}"; do
+        if [ "$VARIANT_QUERY" = "${GAMES_PATH[$i]}" ] || [ "$VARIANT_QUERY" = "${GAMES_NAME[$i]}" ]; then
+            game="${GAMES_PATH[$i]}"
+            matches=$(( matches + 1 ))
+        fi
+    done
+    if [ "$matches" -ne 1 ]; then
+        printf '%s: expected one installed game, found %d for %s\n' "$PROGNAME" "$matches" "$VARIANT_QUERY" >&2
+        return 2
+    fi
+    local output
+    output=$("$(native_backend)" variants-scan "$game") || {
+        printf 'Variant scan failed.\n' >&2; return 1
+    }
+    if [ -z "$output" ]; then
+        printf 'No redundant asset variants detected for %s.\n' "$game"
+        printf 'Sibling directories sharing an identical file-name set but different data (architecture, renderer, resolution or language suites) are reported here. Nothing was changed.\n'
+        return 0
+    fi
+    printf 'Redundant asset variants in %s (read-only; nothing changed):\n' "$game"
+    local total=0
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        local -a f=(); IFS='|' read -r -a f <<< "$line"
+        local n=$(( (${#f[@]}-1)/4 )) best=0 sum=0 j
+        for (( j=0; j<n; j++ )); do
+            local b="${f[$((1+j*4))]}"
+            [[ "$b" =~ ^[0-9]+$ ]] || continue
+            sum=$(( sum + b ))
+            (( b > best )) && best=$b
+        done
+        local potential=$(( sum - best ))
+        total=$(( total + potential ))
+        printf '\n  Potential to reclaim: %s (keep the largest member)\n' "$(bytes_human "$potential")"
+        for (( j=0; j<n; j++ )); do
+            local b="${f[$((1+j*4))]}" files="${f[$((2+j*4))]}" flag="${f[$((3+j*4))]}" path="${f[$((4+j*4))]}"
+            local mark=""
+            [ "$flag" = 1 ] && mark=" [variant-like name]"
+            printf '    %10s  %6s files  %s%s\n' "$(bytes_human "$b")" "$files" "${path:-.}" "$mark"
+        done
+    done <<< "$output"
+    printf '\nTotal potentially reclaimable: %s (logical). Confirm which member the engine actually loads before removing a suite; reuse --prune-assets/--restore-assets for a reversible change.\n' "$(bytes_human "$total")"
+}
+
+asset_usage_bytes() {
+    local line
+    if [ "$EUID" -eq 0 ]; then
+        line=$("$(native_backend)" measure-bytes "$1" 2>/dev/null) || return 1
+    else
+        line=$(sudo -n -- "$(native_backend)" measure-bytes "$1" 2>/dev/null) || return 1
+    fi
+    printf '%s\n' "${line%%|*}"
+}
+
+asset_scan_summary() {
+    local packed="${1:-0}" audio="${2:-0}" raster="${3:-0}" total="${4:-0}" packed_bytes="${5:-0}" audio_bytes="${6:-0}"
+    printf 'Asset inventory: loose images %s · packed/textures/video %s · audio files %s.\n' "$raster" "$packed" "$audio"
+    if [ "$total" -gt 0 ]; then
+        printf 'Scanned logical data: %s · packed/textures/video: %s · audio: %s (not disk-space savings).\n' \
+            "$(bytes_human "$total")" "$(bytes_human "$packed_bytes")" "$(bytes_human "$audio_bytes")"
+    fi
+    printf 'Hades v7 LZ4 packages can be recompressed losslessly; other archives/XNB, Bink/video and encoded audio are not converted.\n'
+}
+
+asset_workflow() {
+    local query="$1" requested="$2" confirmed="${3:-0}" target="$VISUAL_TARGET" game="" matches=0 i
+    local action=plan result tag reported_target count before after retained packed audio images textures wavs raster total packed_bytes audio_bytes packages disk_before="" disk_after="" level=0
+    for i in "${!GAMES_PATH[@]}"; do
+        if [ "$query" = "${GAMES_PATH[$i]}" ] || [ "$query" = "${GAMES_NAME[$i]}" ]; then
+            game="${GAMES_PATH[$i]}"
+            matches=$(( matches + 1 ))
+        fi
+    done
+    if [ "$matches" -ne 1 ]; then
+        printf '%s: expected one installed game, found %d for %s\n' "$PROGNAME" "$matches" "$query" >&2
+        return 2
+    fi
+    case "$requested" in
+        --apply-assets) action=apply ;;
+        --restore-assets) action=restore; target=native ;;
+        --finalize-assets) action=finalize; target=native ;;
+    esac
+    require_btrfs
+    if [ "$action" != plan ]; then
+        discover_running_games
+        if [ -n "${RUNNING_DIRS[$game]:-}" ]; then
+            printf 'Close %s before changing its assets.\n' "$query" >&2
+            return 1
+        fi
+        if [ "$action" = apply ]; then
+            result=$("$(native_backend)" assets plan "$target" 0 "$game") || return 1
+            IFS='|' read -r tag _ reported_target count before after _ packed audio images textures wavs raster total packed_bytes audio_bytes packages <<< "$result"
+            [ "$tag" = ASSETS ] || return 1
+            ASSET_PREVIEW_COUNT="$count"
+            if [ "$count" -eq 0 ]; then
+                printf '[BETA] No supported asset files can be reduced for this profile. No files changed. Bink/FMOD and unsupported package formats are not rewritten.\n'
+                asset_scan_summary "$packed" "$audio" "$raster" "$total" "$packed_bytes" "$audio_bytes"
+                return 0
+            fi
+            printf '[BETA] Asset profile: %s · images %s, DDS textures %s, PCM WAV %s, lossless Hades packages %s · estimated logical sizes: %s → %s (reduction %s)\n' \
+                "$reported_target" "${images:-0}" "${textures:-0}" "${wavs:-0}" "${packages:-0}" "$(bytes_human "$before")" "$(bytes_human "$after")" \
+                "$(bytes_human "$((before-after))")"
+            if [ "$confirmed" != 1 ] && [ ! -t 0 ]; then
+                printf '%s needs an interactive terminal to confirm asset changes.\n' "$requested" >&2
+                return 2
+            fi
+            if [ "$confirmed" != 1 ]; then
+                printf '[BETA] Images/DDS may lose visual detail; PCM WAV may be resampled. Anti-cheat is not detected automatically. Originals are retained for restore. Apply to %s? [y/N] ' "$query"
+            fi
+        elif [ "$action" = finalize ]; then
+            if [ ! -t 0 ]; then
+                printf '%s needs an interactive terminal to confirm asset changes.\n' "$requested" >&2
+                return 2
+            fi
+            printf 'Discard the local restore copy for %s? Steam verification may be needed to recover originals. [y/N] ' "$query"
+        fi
+        if [ "$action" = apply ] || [ "$action" = finalize ]; then
+            local reply
+            read -r reply || reply=""
+            [[ "$reply" = y || "$reply" = Y ]] || return 0
+        fi
+        ensure_sudo
+        disk_before=$(asset_usage_bytes "$game") || disk_before=""
+        if [ "$action" = apply ]; then level=$(effective_level "$game"); fi
+        if [ "$action" = apply ] && [ "$target" = lossless ]; then
+            lossless_guard_ready "$game" "$disk_before" || return 1
+        fi
+    fi
+    result=$("$(native_backend)" assets "$action" "$target" "$level" "$game") || {
+        printf 'Asset action stopped. Some files may have changed; use --restore-assets after checking the error.\n' >&2
+        return 1
+    }
+    IFS='|' read -r tag action reported_target count before after retained packed audio images textures wavs raster total packed_bytes audio_bytes packages <<< "$result"
+    [ "$tag" = ASSETS ] || { printf 'Invalid response from native asset backend.\n' >&2; return 1; }
+    if [ "$action" = apply ] && [ "$target" = lossless ] && [ "$count" -gt 0 ]; then
+        local guard_rc
+        lossless_guard_verify "$game" "$disk_before"; guard_rc=$?
+        case "$guard_rc" in
+            1) return 1 ;;
+            0) count=$((count-LOSSLESS_GUARD_REJECTED)); packages=$((packages-LOSSLESS_GUARD_REJECTED))
+               before=$((before-LOSSLESS_GUARD_BEFORE)); after=$((after-LOSSLESS_GUARD_AFTER))
+               retained=$((retained-LOSSLESS_GUARD_BEFORE)) ;;
+            2) count=0; before=0; after=0; retained=0; packages=0
+               printf 'Lossless candidates rejected: original game assets restored; no package savings accepted.\n' ;;
+        esac
+    fi
+    printf '[BETA] Game: %s · Asset profile: %s · images %s, DDS textures %s, PCM WAV %s, lossless Hades packages %s\n' "$query" "$reported_target" "${images:-0}" "${textures:-0}" "${wavs:-0}" "${packages:-0}"
+    case "$action" in
+        plan)
+            ASSET_PREVIEW_COUNT="$count"
+            asset_scan_summary "$packed" "$audio" "$raster" "$total" "$packed_bytes" "$audio_bytes"
+            if [ "$count" -eq 0 ]; then
+                printf 'No supported assets can be reduced for this profile. Game files are unchanged.\n'
+            else
+                printf 'Candidate asset bytes: %s → %s · possible logical reduction: %s\n' \
+                    "$(bytes_human "$before")" "$(bytes_human "$after")" "$(bytes_human "$((before-after))")"
+                printf 'Images/DDS are resized; simple PCM WAV may be resampled. Hades v7 LZ4 packages are recompressed without changing decoded assets. Bink/FMOD and other packages remain unchanged. These are logical sizes, not net disk savings.\n'
+            fi ;;
+        apply|restore|finalize)
+            disk_after=$(asset_usage_bytes "$game") || disk_after=""
+            if [ -n "$disk_before" ] && [ -n "$disk_after" ]; then
+                printf 'Live game data on disk (excludes restore copies): %s → %s · footprint reduction: %s\n' \
+                    "$(bytes_human "$disk_before")" "$(bytes_human "$disk_after")" "$(bytes_human "$((disk_before-disk_after))")"
+            else
+                printf 'Physical game measurement unavailable.\n'
+            fi
+            if [ "$action" = apply ]; then
+                printf 'Changed %s asset file(s): logical bytes %s → %s · reduction %s (not net disk savings).\n' \
+                    "$count" "$(bytes_human "$before")" "$(bytes_human "$after")" "$(bytes_human "$((before-after))")"
+                printf 'Restore copy retained: %s of original asset data. Free space is not reclaimed until that copy is finalized; snapshots may also retain data.\n' "$(bytes_human "$retained")"
+            elif [ "$action" = finalize ]; then
+                printf 'Discarded restore copy: %s logical bytes. Snapshots or other references may retain the blocks.\n' "$(bytes_human "$retained")"
+            fi ;;
+    esac
+}
+
+# Batch asset pass. The caller obtains one consent for the whole batch; each
+# game's plan is still checked immediately before mutation, so unsupported or
+# already-small assets are reported as such without changing them.
+batch_asset_game() {
+    local name="$1" game="$2" target="$VISUAL_TARGET" result tag reported count before after retained packed audio images textures wavs raster total packed_bytes audio_bytes packages level native_rc
+    BATCH_ASSET_SCANNED=$((BATCH_ASSET_SCANNED+1))
+    if [ "$target" = native ]; then
+        return 0
+    fi
+    level=$(effective_level "$game")
+    local physical_before="" guard_rc
+    if [ "$target" = lossless ]; then
+        physical_before=$(asset_usage_bytes "$game") || physical_before=""
+        if ! lossless_guard_ready "$game" "$physical_before"; then
+            BATCH_ASSET_FAILED=$((BATCH_ASSET_FAILED+1)); return 1
+        fi
+    fi
+    # The batch has already obtained consent. Applying directly performs one
+    # scan/encode pass instead of planning (which encodes estimates) and then
+    # repeating the same work to apply them.
+    BATCH_ASSET_CHANGED=1
+    result=$(BGC_ASSET_PROGRESS=1 "$(native_backend)" assets apply "$target" "$level" "$game"); native_rc=$?
+    case "$native_rc" in 130|143) return "$native_rc" ;; esac
+    if [ "$native_rc" -ne 0 ]; then
+        printf '  Asset processing failed for %s; check the error above and use Restore Assets if needed.\n' "$name"
+        BATCH_ASSET_FAILED=$((BATCH_ASSET_FAILED+1)); return 1
+    fi
+    IFS='|' read -r tag _ reported count before after retained packed audio images textures wavs raster total packed_bytes audio_bytes packages <<< "$result"
+    if [ "$tag" != ASSETS ]; then
+        printf '  Assets: invalid result for %s.\n' "$name"; BATCH_ASSET_FAILED=$((BATCH_ASSET_FAILED+1)); return 1
+    fi
+    if [ "$target" = lossless ] && [ "${count:-0}" -gt 0 ]; then
+        lossless_guard_verify "$game" "$physical_before"; guard_rc=$?
+        case "$guard_rc" in
+            1) BATCH_ASSET_FAILED=$((BATCH_ASSET_FAILED+1)); return 1 ;;
+            0) count=$((count-LOSSLESS_GUARD_REJECTED)); packages=$((packages-LOSSLESS_GUARD_REJECTED))
+               before=$((before-LOSSLESS_GUARD_BEFORE)); after=$((after-LOSSLESS_GUARD_AFTER))
+               retained=$((retained-LOSSLESS_GUARD_BEFORE)) ;;
+            2) count=0; before=0; after=0; retained=0; packages=0 ;;
+        esac
+    fi
+    BATCH_ASSET_PACKED=$((BATCH_ASSET_PACKED + ${packed:-0}))
+    BATCH_ASSET_AUDIO=$((BATCH_ASSET_AUDIO + ${audio:-0}))
+    BATCH_ASSET_IMAGES=$((BATCH_ASSET_IMAGES + ${images:-0}))
+    BATCH_ASSET_TEXTURES=$((BATCH_ASSET_TEXTURES + ${textures:-0}))
+    BATCH_ASSET_WAV=$((BATCH_ASSET_WAV + ${wavs:-0}))
+    BATCH_ASSET_PACKAGES=$((${BATCH_ASSET_PACKAGES:-0} + ${packages:-0}))
+    BATCH_ASSET_FILES=$((${BATCH_ASSET_FILES:-0} + ${count:-0}))
+    BATCH_ASSET_BYTES_BEFORE=$((${BATCH_ASSET_BYTES_BEFORE:-0} + ${before:-0}))
+    BATCH_ASSET_BYTES_AFTER=$((${BATCH_ASSET_BYTES_AFTER:-0} + ${after:-0}))
+    if [ "${count:-0}" -eq 0 ]; then
+        printf '  Assets: %s — no supported files can be reduced; no asset-size savings.\n' "$name"
+        asset_scan_summary "$packed" "$audio" "$raster" "$total" "$packed_bytes" "$audio_bytes"
+        BATCH_ASSET_CHANGED=0
+        BATCH_ASSET_NONE=$((BATCH_ASSET_NONE+1)); return 0
+    fi
+    printf '  [BETA] Assets: %s — images %s, DDS textures %s, PCM WAV %s, lossless Hades packages %s; logical sizes %s → %s (reduction %s). Originals retained, so this is not a free-space figure.\n' \
+        "$reported" "${images:-0}" "${textures:-0}" "${wavs:-0}" "${packages:-0}" "$(bytes_human "$before")" "$(bytes_human "$after")" \
+        "$(bytes_human "$((before-after))")"
+    BATCH_ASSET_DONE=$((BATCH_ASSET_DONE+1))
+}
+
 # The benchmark is the honest version of the marketing claim: instead of an
-# invented headline it reports what the recorded, compsize-measured numbers
+# invented headline it reports what the recorded, Btrfs-measured numbers
 # actually say, per game and overall. Every figure is derivable from the state
 # database on the machine running it, so anyone can reproduce or dispute it.
 cmd_benchmark() {
@@ -1981,12 +3517,12 @@ cmd_benchmark() {
     table=$(benchmark_rows)
     if [ -z "$table" ]; then
         printf 'No measured games yet. Compress at least one game, then run this again.\n'
-        printf 'The benchmark reports compsize-measured results only - nothing is estimated.\n'
+        printf 'The benchmark reports Btrfs-measured results only - nothing is estimated.\n'
         return 0
     fi
 
     local name u d pct
-    printf '%b%-40s %14s %14s %8s%b\n' "$BOLD" "GAME" "BEFORE" "AFTER" "SAVED" "$RESET"
+    printf '%b%-40s %14s %14s %8s%b\n' "$BOLD" "GAME" "BEFORE" "AFTER" "ZSTD SAVED" "$RESET"
     printf '%s\n' "-------------------------------------------------------------------------------------"
     while IFS=$'\t' read -r name u d pct; do
         [ -n "$name" ] || continue
@@ -2005,7 +3541,7 @@ cmd_benchmark() {
     printf "  %-30s %s (%s%%)\n" "Best single game:" "${best_name:-n/a}" "${best_pct:-0}"
     printf "  %-30s %s\n" "Games saving over 50%:" "${over50:-0}"
     echo "================================================================================"
-    printf "  %bAll figures come from compsize on this machine, not an estimate.%b\n" "$DIM" "$RESET"
+    printf "  %bAll figures come from Btrfs extent metadata on this machine, not an estimate.%b\n" "$DIM" "$RESET"
     return 0
 }
 
@@ -2283,7 +3819,7 @@ cmd_export_ratios() {
 
     printf '{\n'
     printf '  "schema": 1,\n'
-    printf '  "measured_with": %s,\n' "$(json_quote "btrfs filesystem defragment -czstd -L <level> + btrfs-compsize")"
+    printf '  "measured_with": %s,\n' "$(json_quote "bgc-native: Btrfs ZSTD defrag and extent metadata")"
     printf '  "contributor_note": %s,\n' "$(json_quote "Generated by $PROGNAME $VERSION --export-ratios. Ratios are per zstd level.")"
     printf '  "games": {\n'
     LC_ALL=C sort -t$'\t' -k1,1 -k2,2 "$out" |
@@ -2330,8 +3866,8 @@ cmd_render_ratios() {
         return 1
     fi
     printf '# Community compression ratios\n\n'
-    printf 'Per-game savings measured with `btrfs filesystem defragment -czstd` and\n'
-    printf '`btrfs-compsize`. **Every row names the zstd level it was measured at**, because\n'
+    printf 'Per-game savings measured from Btrfs extent metadata (older submissions used compsize).\n'
+    printf '**Every row names the zstd level it was measured at**, because\n'
     printf 'a game compresses differently at level 1 and level 6. `Samples` is how many\n'
     printf 'independent measurements the average is built from.\n\n'
     printf '> Generated from [`ratios/games.json`](games.json). Do not edit by hand.\n'
@@ -2517,7 +4053,7 @@ cmd_check_update() {
 # scribbled over). Returns 0 updated/already-current, 2 package-managed,
 # 3 cannot write, 1 network/verification failure.
 do_self_update() {
-    local quiet="${1:-0}" self tag tmp archive base expected actual new dep
+    local quiet="${1:-0}" self tag tmp archive base expected actual new dep backend_new backend_dest arch
     self=$(self_script_path)
 
     if package_managed_path "$self"; then
@@ -2554,7 +4090,9 @@ do_self_update() {
     fi
 
     tmp=$(mktemp -d 2>/dev/null) || return 1
-    archive="$PROGNAME-$tag.tar.gz"
+    arch=$(uname -m)
+    case "$arch" in x86_64|aarch64) ;; *) printf 'Unsupported architecture: %s\n' "$arch" >&2; rm -rf "$tmp"; return 1 ;; esac
+    archive="$PROGNAME-$tag-linux-$arch.tar.gz"
     base="https://github.com/$REPO/releases/download/v$tag"
     if ! curl -fsSL --max-time 300 "$base/$archive" -o "$tmp/$archive" 2>/dev/null; then
         printf '%s: download failed: %s/%s\n' "$PROGNAME" "$base" "$archive" >&2
@@ -2585,10 +4123,28 @@ do_self_update() {
         printf '%s: release archive does not contain a valid script.\n' "$PROGNAME" >&2
         rm -rf "$tmp"; return 1
     fi
-    # Replace the file on disk. The running process keeps the old inode, so the
-    # update lands atomically and takes effect on the next run.
-    if ! install -m 0755 "$new" "$self"; then
-        printf '%s: could not replace %s\n' "$PROGNAME" "$self" >&2
+    backend_new="$tmp/$PROGNAME-$tag/bgc-native"
+    backend_dest="$(dirname "$self")/bgc-native"
+    if [ ! -s "$backend_new" ]; then
+        printf 'Release archive has no native backend; refusing incomplete update.\n' >&2
+        rm -rf "$tmp"; return 1
+    fi
+    chmod +x "$backend_new"
+    if [ "$("$backend_new" --protocol-version 2>/dev/null)" != 1 ]; then
+        printf 'Release native backend is incompatible.\n' >&2
+        rm -rf "$tmp"; return 1
+    fi
+    # Both files use protocol 1. Stage in the destination filesystem, then
+    # rename so a running executable is never truncated in place.
+    local staged_script staged_backend
+    staged_script=$(mktemp "${self}.XXXXXX") || { rm -rf "$tmp"; return 1; }
+    staged_backend=$(mktemp "${backend_dest}.XXXXXX") || { rm -f "$staged_script"; rm -rf "$tmp"; return 1; }
+    if ! install -m 0755 "$new" "$staged_script" ||
+       ! install -m 0755 "$backend_new" "$staged_backend" ||
+       ! mv -f "$staged_backend" "$backend_dest" ||
+       ! mv -f "$staged_script" "$self"; then
+        printf '%s: could not replace the application files.\n' "$PROGNAME" >&2
+        rm -f "$staged_script" "$staged_backend"
         rm -rf "$tmp"; return 1
     fi
     rm -rf "$tmp"
@@ -2628,7 +4184,7 @@ cmd_uninstall() {
     dotdir="$HOME/.config/systemd/user"
 
     printf '%s will remove:\n' "$PROGNAME"
-    printf '  %s\n' "$self"
+    printf '  %s\n' "$self" "$(dirname "$self")/bgc-native"
     [ -e "$man" ] && printf '  %s\n' "$man"
     [ -d "$ratios_dir" ] && printf '  %s/\n' "$ratios_dir"
     for unit in btrfs-game-compressor-notify.service btrfs-game-compressor-notify.timer; do
@@ -2652,7 +4208,7 @@ cmd_uninstall() {
     fi
 
     # rm of the running script is safe: the process keeps the open inode.
-    rm -f "$self"
+    rm -f "$self" "$(dirname "$self")/bgc-native"
     rm -f "$man"
     rm -f "$ratios_dir/ratios/games.json" "$ratios_dir/GAMES.md"
     rmdir "$ratios_dir/ratios" "$ratios_dir" 2>/dev/null || true
@@ -2699,12 +4255,12 @@ cmd_balance() {
     echo "  FILESYSTEM BALANCE"
     echo "================================================================================"
     echo "Defragmenting rewrites a game's extents, which leaves them scattered across"
-    echo "the filesystem. 'btrfs balance start -m' puts them back together so the space"
-    echo "they freed can actually be reused. This is the other half of the standard"
+    echo "the filesystem. A metadata balance relocates metadata block groups. It is"
+    echo "not required to reclaim deduplicated file data. This follows the optional"
     echo "SteamOS recipe, and it is opt-in because it is a whole-filesystem operation:"
     echo ""
     for mp in "${mnt[@]}"; do
-        echo "  sudo btrfs balance start -m $mp"
+        printf '  sudo %q balance %q\n' "$(native_backend)" "$mp"
     done
     echo ""
     echo "  It needs root, it is I/O heavy, and on a large filesystem it can run for"
@@ -2736,10 +4292,10 @@ cmd_balance() {
         echo ""
         echo ">>> balancing $mp"
         if [ "$EUID" -eq 0 ]; then
-            $prefix btrfs balance start -m "$mp" || rc=1
+            $prefix "$(native_backend)" balance "$mp" || rc=1
         else
             sudo -v
-            $prefix sudo btrfs balance start -m "$mp" || rc=1
+            $prefix sudo -- "$(native_backend)" balance "$mp" || rc=1
         fi
     done
     if [ "$rc" -eq 0 ]; then
@@ -2756,7 +4312,7 @@ cmd_dry_run() {
     local i n=0 n_low=0 n_running=0 n_advised=0
     for i in "${!GAMES_NAME[@]}"; do
         local st="${GAMES_STATUS[$i]}"
-        if [ "$st" = "COMPRESSED" ]; then
+        if [[ "$st" == "COMPACTED" ]]; then
             continue
         fi
         if [ "$st" = "RUNNING" ]; then
@@ -2766,7 +4322,20 @@ cmd_dry_run() {
                 "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}" "(game is running)"
             continue
         fi
+        if [ "$st" = "COMPRESSED" ]; then
+            n=$((n + 1))
+            fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
+            printf 'dedupe only    %-40s %-14s %10s\n' "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}"
+            continue
+        fi
+        if [ "$st" = "COMPACTED" ]; then continue; fi
         if [ "$st" = "LOW YIELD" ]; then
+            if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ]; then
+                n=$((n + 1)); n_low=$((n_low + 1))
+                fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
+                printf 'dedupe only    %-40s %-14s %10s (compression held: low yield)\n' "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}"
+                continue
+            fi
             n_low=$(( n_low + 1 ))
             fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
             printf 'skipping       %-40s %-14s %10s ~%s expected\n' \
@@ -2789,17 +4358,17 @@ cmd_dry_run() {
             "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}" "$advice"
     done
     if [ "$n" -eq 0 ] && [ "$n_low" -eq 0 ] && [ "$n_running" -eq 0 ]; then
-        printf 'nothing to do - every game is already compressed.\n'
+        printf 'nothing to do - every game is already compacted.\n'
     elif [ "$n" -eq 0 ] && [ "$n_low" -eq 0 ]; then
         printf 'nothing to do right now - every remaining game is running.\n'
     elif [ "$n" -eq 0 ] && [ "$n_running" -eq 0 ]; then
         printf 'nothing worth compressing - the remaining %d game(s) are not expected to gain enough.\n' "$n_low"
     else
-        printf '%d game(s) would be compressed. Nothing was changed (--dry-run).\n' "$n"
+        printf '%d game(s) would be processed. Nothing was changed (--dry-run).\n' "$n"
     fi
     if [ "$n_low" -gt 0 ]; then
-        printf '%d game(s) skipped as low yield (under %s%% or %s MiB expected). Set min_gain_pct=0 and min_gain_mib=0 to compress anyway.\n' \
-            "$n_low" "$MIN_GAIN_PCT" "$MIN_GAIN_MIB"
+        printf '%d game(s) skipped as low yield (under %s%% expected; compressing rewrites the whole game, so a low ratio is not worth the SSD wear). Set min_gain_pct=0 to compress anyway.\n' \
+            "$n_low" "$MIN_GAIN_PCT"
     fi
     if [ "$n_advised" -gt 0 ]; then
         printf '%d game(s) are unmeasured but the community table expects under %s%%; they are still listed, but may not be worth the time.\n' \
@@ -2813,10 +4382,21 @@ cmd_dry_run() {
 
 # --- Entry Point ---
 parse_args "$@"
+if [ "$OPT_VERBOSE" -eq 1 ]; then export BGC_VERBOSE=1; else unset BGC_VERBOSE; fi
 init_paths
 load_config
 detect_platform
 require_dependencies
+
+if [ "$OPT_FMOD_EXPORT" -eq 1 ]; then
+    cmd_export_fmod
+    exit $?
+fi
+
+if [ "$OPT_CONTAINER" -eq 1 ]; then
+    cmd_container
+    exit $?
+fi
 
 # Modes that read only the state file, the configuration or the ratio table run
 # before any library is discovered. Walking a 250k-file library is the most
@@ -2878,6 +4458,50 @@ if [ "$OPT_SUBMIT_RATIOS" -eq 1 ]; then
     exit $?
 fi
 
+if [ "$OPT_DEDUPE" -eq 1 ]; then
+    require_btrfs
+    discover_data
+    cmd_dedupe
+    exit $?
+fi
+
+if [ "$OPT_RECHECK" -eq 1 ]; then
+    require_btrfs
+    discover_data
+    cmd_recheck
+    exit $?
+fi
+
+if [ "$OPT_ASSETS" -eq 1 ]; then
+    discover_data
+    asset_workflow "$ASSET_QUERY" "$ASSET_ACTION"
+    exit $?
+fi
+
+if [ "$OPT_PRUNE" -eq 1 ]; then
+    discover_data
+    cmd_prune_assets
+    exit $?
+fi
+
+if [ "$OPT_VARIANTS" -eq 1 ]; then
+    discover_data
+    cmd_variants
+    exit $?
+fi
+
+if [ "$OPT_SLIM" -eq 1 ]; then
+    discover_data
+    cmd_slim
+    exit $?
+fi
+
+if [ "$OPT_ENGINES" -eq 1 ]; then
+    discover_data
+    cmd_engines
+    exit $?
+fi
+
 check_compsize
 discover_data
 
@@ -2932,7 +4556,7 @@ while true; do
         name="${GAMES_NAME[$i]}"
         st="${GAMES_STATUS[$i]}"
 
-        if [ "$VIEW_PENDING_ONLY" -eq 1 ] && [ "$st" = "COMPRESSED" ]; then
+        if [ "$VIEW_PENDING_ONLY" -eq 1 ] && [[ "$st" == "COMPACTED" ]]; then
             continue
         fi
 
@@ -2978,9 +4602,9 @@ while true; do
     [ "${#GAMES_NAME[@]}" -gt 0 ] && tui_pct=$(( STAT_COMP_COUNT * 100 / ${#GAMES_NAME[@]} ))
     echo "================================================================================"
     echo -e "  ${BOLD}${CYAN}BTRFS GAME COMPRESSOR${RESET} ${DIM}v$VERSION${RESET}   ${DIM}${#GAMES_NAME[@]} game(s) · ${#LIBS[@]} library(ies)${RESET}"
-    printf "  [%s] %d%% compressed\n" "$(bar "$STAT_COMP_COUNT" "${#GAMES_NAME[@]}")" "$tui_pct"
-    printf "  ${GREEN}%d Compressed${RESET}  │  ${MAGENTA}%d Updated${RESET}  │  ${YELLOW}%d Uncompressed${RESET}" \
-        "$STAT_COMP_COUNT" "$STAT_UPD_COUNT" "$STAT_UNCOMP_COUNT"
+    printf "  [%s] %d%% compacted\n" "$(bar "$STAT_COMP_COUNT" "${#GAMES_NAME[@]}")" "$tui_pct"
+    printf "  ${GREEN}%d Compacted${RESET}  │  ${YELLOW}%d Compressed only${RESET}  │  ${MAGENTA}%d Updated${RESET}  │  ${YELLOW}%d Uncompressed${RESET}" \
+        "$STAT_COMP_COUNT" "$STAT_COMPRESSED_ONLY_COUNT" "$STAT_UPD_COUNT" "$STAT_UNCOMP_COUNT"
     if [ "$STAT_RUNNING_COUNT" -gt 0 ]; then
         printf "  │  ${CYAN}%d Running${RESET}" "$STAT_RUNNING_COUNT"
     fi
@@ -3019,7 +4643,8 @@ while true; do
             g_st="${GAMES_STATUS[$r_idx]}"
 
             case "$g_st" in
-                "COMPRESSED")   tag="${GREEN}[COMPRESSED]  ${RESET}" ;;
+                "COMPACTED")   tag="${GREEN}[COMPACTED]   ${RESET}" ;;
+                "COMPRESSED")  tag="${YELLOW}[COMPRESSED]  ${RESET}" ;;
                 "UPDATED")      tag="${MAGENTA}[UPDATED]     ${RESET}" ;;
                 "UNCOMPRESSED") tag="${YELLOW}[UNCOMPRESSED]${RESET}" ;;
                 "LOW YIELD")    tag="${DIM}[LOW YIELD]   ${RESET}" ;;
@@ -3049,13 +4674,14 @@ while true; do
     fi
 
     echo "--------------------------------------------------------------------------------"
-    action_txt="Compress highlighted"
+    action_txt="Process highlighted"
     if [ "$CHECKED_COUNT" -gt 0 ]; then
-        action_txt="${CYAN}Compress $CHECKED_COUNT selected${RESET}"
+        action_txt="${CYAN}Process $CHECKED_COUNT selected${RESET}"
     fi
 
     echo -e "  Page ${BOLD}${CURRENT_PAGE}/${TOTAL_PAGES}${RESET}  │  ${BOLD}↑/↓${RESET}: Move  │  ${BOLD}←/→${RESET}: Page  │  ${BOLD}Space${RESET}: Select  │  ${BOLD}Enter/c${RESET}: $action_txt\033[K"
-    echo -e "  Shortcuts: [${BOLD}a${RESET}] All page  [${BOLD}f${RESET}] Search  [${BOLD}v${RESET}] Pending  [${BOLD}b${RESET}] Batch  [${BOLD}t${RESET}] Stats  [${BOLD}s${RESET}] Config  [${BOLD}q${RESET}] Quit\033[K"
+    echo -e "  Actions: [${BOLD}b${RESET}] Batch menu (pending work or asset scan all)  [${BOLD}o${RESET}] Preview/apply assets for highlighted game\033[K"
+    echo -e "  Browse: [${BOLD}↑/↓${RESET}] Move  [${BOLD}Space${RESET}] Select  [${BOLD}a${RESET}] All page  [${BOLD}f${RESET}] Search  [${BOLD}s${RESET}] Settings  [${BOLD}q${RESET}] Quit\033[K"
     echo "================================================================================"
 
     if ! read_input; then
@@ -3135,11 +4761,31 @@ while true; do
             continue ;;
         s|S)
             manage_settings
-            discover_data
+            if [ "${SETTINGS_LIBS_CHANGED:-0}" -eq 1 ]; then discover_data; fi
             continue ;;
         b|B)
             batch_compress_routine
             discover_data
+            continue ;;
+        o|O)
+            if [ "$ITEMS_ON_PAGE" -gt 0 ]; then
+                cur_path="${GAMES_PATH[${FILTERED_INDICES[$(( START_IDX + CURSOR_POS ))]}]}"
+                clear
+                tput cnorm
+                ASSET_PREVIEW_COUNT=0
+                asset_workflow "$cur_path" --assets
+                if [ "$VISUAL_TARGET" != native ] && [ "${ASSET_PREVIEW_COUNT:-0}" -gt 0 ]; then
+                    read -r -p "[BETA] Apply this profile to supported images, DDS textures and PCM WAV audio? Originals are retained; anti-cheat is not detected. [y/N] " asset_reply || asset_reply=""
+                    if [[ "$asset_reply" = y || "$asset_reply" = Y ]]; then
+                        asset_workflow "$cur_path" --apply-assets 1
+                        discover_data
+                    fi
+                fi
+                printf 'Press any key to return...'
+                read_input
+                tput civis
+                NEEDS_FULL_CLEAR=1
+            fi
             continue ;;
         c|C)
             TARGETS=()
@@ -3163,8 +4809,29 @@ while true; do
 
             if [ ${#TARGETS[@]} -eq 1 ]; then
                 sel_path="${TARGETS[0]}"
-                tgt_name=${sel_path%/*}; tgt_name=${tgt_name##*/}
+                tgt_name=${sel_path##*/}
                 tgt_path="$sel_path"
+                sel_idx=$(game_index_by_path "$tgt_path" || true)
+                if [ -n "$sel_idx" ] && { [ "${GAMES_STATUS[$sel_idx]}" = "COMPRESSED" ] || { [ "${GAMES_STATUS[$sel_idx]}" = "LOW YIELD" ] && [ "${GAMES_DEDUPE_PENDING[$sel_idx]:-0}" -eq 1 ]; }; }; then
+                    echo "================================================================================"
+                    echo "  GAME DEDUPLICATION: $tgt_name"
+                    echo "================================================================================"
+                    echo "  This game is already compressed; only deduplication will run."
+                    echo -e "Press [${BOLD}y${RESET}] to deduplicate, or any other key to cancel..."
+                    read_input
+                    if [[ "$KEY" =~ ^[Yy]$ ]]; then
+                        run_dedupe_paths "DEDUPLICATION: $tgt_name" "$tgt_path"
+                        case "$?" in 130) exit 130 ;; 143) exit 143 ;; esac
+                        if [ -n "$sel_idx" ] && [ "${DEDUPE_COMPLETION_RECORDED:-0}" -eq 1 ]; then
+                            GAMES_STATUS[$sel_idx]="COMPACTED"
+                            GAMES_DEDUPE_PENDING[$sel_idx]=0
+                        fi
+                        echo "Press any key to return..."
+                        read_input
+                    fi
+                    NEEDS_FULL_CLEAR=1
+                    continue
+                fi
 
                 echo "================================================================================"
                 echo "  GAME COMPRESSION: $tgt_name"
@@ -3175,13 +4842,16 @@ while true; do
                 b_raw=$(run_compsize "$tgt_path" || true)
                 b_total=$(echo "$b_raw" | grep "^TOTAL" || true)
                 b_disk="N/A"
+                b_disk_bytes=""; b_raw_bytes=""
                 if [ -n "$b_total" ]; then
                     b_disk=$(echo "$b_total" | awk '{print $3}')
                     u_disk=$(echo "$b_total" | awk '{print $4}')
                     ratio=$(echo "$b_total" | awk '{print $2}')
+                    b_disk_bytes=$(echo "$b_total" | awk '{print $6}')
+                    b_raw_bytes=$(echo "$b_total" | awk '{print $7}')
                     echo "  Current footprint on disk: $b_disk (Raw: $u_disk, Extent ratio: $ratio)"
                 elif [ "$COMPSIZE_OK" -ne 1 ]; then
-                    echo -e "  ${YELLOW}compsize unavailable - compression will run, but savings cannot be measured.${RESET}"
+                    echo -e "  ${YELLOW}Native measurement unavailable - savings cannot be measured.${RESET}"
                 fi
                 echo "--------------------------------------------------------------------------------"
                 echo -e "Press [${BOLD}y${RESET}] to compress with ZSTD, or any other key to cancel..."
@@ -3195,20 +4865,26 @@ while true; do
                         continue
                     fi
                     echo ""
-                    echo ">>> Compressing files with ZSTD... (please wait)"
+                    echo ">>> Compressing game with ZSTD... (please wait)"
                     s_t=$(date +%s)
-                    if ! result=$(compress_and_record "$tgt_name" "$tgt_path"); then
+                    result=$(compress_and_record "$tgt_name" "$tgt_path" "$b_disk_bytes" "$b_raw_bytes" "$(logical_game_bytes "$tgt_path")"); compression_rc=$?
+                    case "$compression_rc" in 130|143) exit "$compression_rc" ;; esac
+                    if [ "$compression_rc" -ne 0 ]; then
                         echo -e "${RED}  Defragmentation failed for $tgt_name; saved state was not changed.${RESET}"
                         read_input
                         NEEDS_FULL_CLEAR=1
                         continue
                     fi
                     e_t=$(( $(date +%s) - s_t ))
-                    print_summary_block "$tgt_name" "$b_disk" "$result"
+                    print_summary_block "$tgt_name" "$b_disk" "$result" "$tgt_path"
                     echo -e "    ${GREEN}✓ Finished in ${e_t}s${RESET}"
+                    run_dedupe_paths "DEDUPLICATION: $tgt_name" "$tgt_path"
+                    case "$?" in 130) exit 130 ;; 143) exit 143 ;; esac
                     CHECKED_STATE[$sel_path]=0
                     sel_idx=$(game_index_by_path "$sel_path" || true)
-                    [ -n "$sel_idx" ] && GAMES_STATUS[$sel_idx]="COMPRESSED"
+                    if [ -n "$sel_idx" ]; then
+                        if [ "${DEDUPE_COMPLETION_RECORDED:-0}" -eq 1 ]; then GAMES_STATUS[$sel_idx]="COMPACTED"; else GAMES_STATUS[$sel_idx]="COMPRESSED"; fi
+                    fi
                     echo "Press any key to return..."
                     read_input
                 fi
@@ -3227,6 +4903,19 @@ while true; do
                     for t_path in "${TARGETS[@]}"; do
                         tgt_name=$(basename "$t_path")
                         tgt_path="$t_path"
+                        t_idx=$(game_index_by_path "$tgt_path" || true)
+                        if [ -n "$t_idx" ] && { [ "${GAMES_STATUS[$t_idx]}" = "COMPRESSED" ] || { [ "${GAMES_STATUS[$t_idx]}" = "LOW YIELD" ] && [ "${GAMES_DEDUPE_PENDING[$t_idx]:-0}" -eq 1 ]; }; }; then
+                            echo ""
+                            echo "Deduplicating only: $tgt_name (already compressed)"
+                            run_dedupe_paths "DEDUPLICATION: $tgt_name" "$tgt_path"
+                            case "$?" in 130) exit 130 ;; 143) exit 143 ;; esac
+                            if [ "${DEDUPE_COMPLETION_RECORDED:-0}" -eq 1 ]; then
+                                GAMES_STATUS[$t_idx]="COMPACTED"
+                                GAMES_DEDUPE_PENDING[$t_idx]=0
+                            fi
+                            t_cur=$((t_cur + 1))
+                            continue
+                        fi
                         # See batch_compress_routine: the guarantee has to hold
                         # at the moment of the write, not when the list was built.
                         discover_running_games
@@ -3241,17 +4930,25 @@ while true; do
                         b_raw=$(run_compsize "$tgt_path" || true)
                         b_disk=$(echo "$b_raw" | awk '/^TOTAL/ {print $3}')
                         [ -n "$b_disk" ] || b_disk="N/A"
-                        if ! result=$(compress_and_record "$tgt_name" "$tgt_path"); then
+                        b_disk_bytes=$(echo "$b_raw" | awk '/^TOTAL/ {print $6}')
+                        b_raw_bytes=$(echo "$b_raw" | awk '/^TOTAL/ {print $7}')
+                        result=$(compress_and_record "$tgt_name" "$tgt_path" "$b_disk_bytes" "$b_raw_bytes" "$(logical_game_bytes "$tgt_path")"); compression_rc=$?
+                        case "$compression_rc" in 130|143) exit "$compression_rc" ;; esac
+                        if [ "$compression_rc" -ne 0 ]; then
                             echo -e "${RED}  Defragmentation failed for $tgt_name; saved state was not changed.${RESET}"
                             t_cur=$(( t_cur + 1 ))
                             continue
                         fi
                         e_t=$(( $(date +%s) - s_t ))
-                        print_summary_block "$tgt_name" "$b_disk" "$result"
+                        print_summary_block "$tgt_name" "$b_disk" "$result" "$tgt_path"
                         echo -e "    ${GREEN}✓ Finished in ${e_t}s${RESET}"
+                        run_dedupe_paths "DEDUPLICATION: $tgt_name" "$tgt_path"
+                        case "$?" in 130) exit 130 ;; 143) exit 143 ;; esac
                         CHECKED_STATE[$t_path]=0
                         t_idx=$(game_index_by_path "$tgt_path" || true)
-                        [ -n "$t_idx" ] && GAMES_STATUS[$t_idx]="COMPRESSED"
+                        if [ -n "$t_idx" ]; then
+                            if [ "${DEDUPE_COMPLETION_RECORDED:-0}" -eq 1 ]; then GAMES_STATUS[$t_idx]="COMPACTED"; else GAMES_STATUS[$t_idx]="COMPRESSED"; fi
+                        fi
                         t_cur=$(( t_cur + 1 ))
                     done
                     echo "Press any key to return..."

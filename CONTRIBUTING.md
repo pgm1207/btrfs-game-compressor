@@ -1,14 +1,14 @@
 # Contributing
 
-Thanks for helping out. This is a single-file bash tool with no build step, so
-the bar for a patch is low — but a few conventions keep it reviewable.
+The application consists of a Bash interface and a small Rust backend.
 
 ## Ground rules
 
-- **Keep it one file.** The whole point is that `btrfs-game-compressor` is a
-  single self-contained script you can drop on any Linux box. Do not introduce a
-  dependency on a language runtime, a package manager, or a library we would have
-  to vendor.
+- **No external filesystem tools or runtime packages.** Use the bundled native
+  backend for filesystem operations. It has no third-party crates and never
+  launches subprocesses. Release executables are statically linked.
+- **Keep unsafe code limited to Linux UAPI calls.** Validate returned lengths,
+  preserve file contents, and use kernel byte comparison before sharing data.
 - **Standard POSIX-ish bash only.** Target bash 4+ (`${var,,}`, associative
   arrays). Avoid bash 5-only features so it still runs on Ubuntu 18.04-era bash.
 - **No `set -e`.** The TUI deliberately tolerates non-zero exits from probing
@@ -22,10 +22,13 @@ the bar for a patch is low — but a few conventions keep it reviewable.
 bash -n btrfs-game-compressor          # syntax
 shellcheck btrfs-game-compressor       # lint
 ./test/smoke.sh                        # behavioural tests
-make check                             # all three
+make native                            # build the static backend offline
+make check                             # shell and Rust tests
+BGC_TEST_BTRFS_DIR=/path/on/btrfs cargo test --manifest-path native/Cargo.toml
 ```
 
-`make check` is what CI runs. If it passes locally it will pass there.
+Builds require Rust/Cargo 1.89+ and a C linker. Real filesystem tests create and
+remove only their own fixtures; omit BGC_TEST_BTRFS_DIR for ordinary CI tests.
 
 ## Things that will get a PR rejected
 
@@ -36,7 +39,7 @@ make check                             # all three
   needs a genuinely read-only mode should be explicit about that.
 - Writing outside `~/.config/btrfs-game-compressor/` and
   `~/.local/state/btrfs-game-compressor/`. No files in `/etc`, no global state.
-- Requiring `sudo` for anything other than `compsize` and `btrfs` itself.
+- Requiring `sudo` for anything other than native metadata measurement and balance.
 - Locale-dependent number parsing. `LC_ALL=C` is exported on purpose.
 - New interactive keys without a matching entry in the README key table.
 
@@ -45,8 +48,7 @@ make check                             # all three
 Open an issue with:
 
 - output of `btrfs-game-compressor --version`
-- your distro, and the `btrfs-progs` / `btrfs-compsize` versions
-  (`pacman -Q btrfs-progs` or `dpkg -l btrfs-progs`)
+- your distro, kernel version (`uname -r`), and `bgc-native --version`
 - the mount options for the library's filesystem (`findmnt -no OPTIONS --target /path/to/library`)
 - `btrfs-game-compressor --status --no-color` output
 

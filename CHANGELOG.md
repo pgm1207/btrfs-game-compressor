@@ -1,8 +1,156 @@
 # Changelog
 
+## 0.2.0 — Native filesystem backend
+
+- Initial Godot support: plain PCK v1–4 inventory/deduplication, Godot 3
+  GDST and Godot 4 GST2 profile-aware texture exports, plus Godot 3 music/PCM
+  exports. Preserve logical texture sizes, rebuild resized mip chains, retain
+  codecs, verify hashes and unchanged entries, and gate writes on savings.
+  Ultra Performance uses a 640-pixel maximum edge and 4-bit-equivalent RGB;
+  Godot 3 PCM uses 11,025 Hz / 8-bit. Native remains unchanged.
+- Add independent Godot 3/4 pack verification and measured library-trial
+  reports. Brotato passed manual playtesting; Godot 4 still needs per-game
+  tests. Godot 4 audio, embedded-pack replacement and unknown encodings are
+  not automatically rewritten. Packed transforms remain explicit exports,
+  separate from `--apply-assets`; no game launch or automatic replacement.
+- Require Rust 1.89+ to match the pinned MP3 decoder's minimum version.
+- Add experimental export-only native UnityFS v6–8 LZ4/HC recompression and
+  Godot PCK v1–4 duplicate-resource sharing. Verify every finished output's
+  decoded blocks/resource bytes; refuse overwrites, unknown layouts and low
+  logical gain/output-write efficiency before writing. No installed auto-apply.
+- Add `--audit-container FILE`, `--export-unityfs FILE OUTPUT` and
+  `--export-godot FILE OUTPUT`. Godot inventory includes resource types and
+  GST2 texture encoding/format/dimension/mip statistics; Unreal Pak inspection
+  reports footer version, index encryption and declared codecs (not entry usage).
+- Add experimental export-only Godot 3 (PCK v1) packed-audio rewriting:
+  `--audit-godot3-audio PROFILE FILE` and
+  `--export-godot3-audio PROFILE FILE OUTPUT`. `AudioStreamMP3` (`.mp3str`)
+  resources are decoded with a pure-Rust decoder and re-encoded as Ogg Vorbis
+  (`vorbis_rs`) under the same entry name, and the matching `.import` stub is
+  retyped to `AudioStreamOGGVorbis`. Other entries are copied byte for byte and
+  byte-compared. Lossy, profile-gated, export-only. On Brotato this takes the
+  pack from 147.9 MB to 88.6 MB (ultra-performance) or 101.4 MB (balanced).
+- Add experimental export-only Godot PCK texture downscaling:
+  `--audit-godot-textures PROFILE FILE` and
+  `--export-godot-textures PROFILE FILE OUTPUT`. Supported `.ctex` (GST2)
+  textures (WebP/PNG and BC1/BC2/BC3/BC7, via bundled `image_dds`/`bcdec_rs`/
+  `intel_tex_2`) are resized to the profile's longest edge and re-encoded in the
+  same format; unsupported encodings and already-small textures are copied
+  unchanged. The pack is rebuilt with relocated offsets and recomputed MD5, then
+  re-parsed and byte-compared for untouched entries. Lossy, profile-gated,
+  export-only; it never overwrites the installed pack and is not auto-applied.
+- Correct FMOD/Wwise/CRI classification and distinguish Godot `GDPC` packs
+  from Wwise `AKPK` packs. Include extensionless UnityFS bundles, `.unity3d`
+  bundles and Amplify virtual-texture containers in engine inventories.
+
+- Add a `keep_languages` setting, a Settings-menu entry and `--keep-languages
+  LIST`, letting `--slim` remove language packs the user did not select
+  (localized audio, subtitles, `locale/` data) in any engine, whether packaged
+  as a language folder or as language-named files (`voiceover_fr.bundle`).
+  Groups are skipped unless a kept language is present, so a language set is
+  never emptied. Across a 329-game library this finds removable language data in
+   59 titles (heuristic candidates, not proven safely removable resources).
+- Add `--engines GAME`, a read-only report of the game engine (Unity, Unreal,
+  Godot, RE Engine, GameMaker) and its largest containers classified by kind.
+  It is the foundation for the format-aware passes and never changes anything.
+- Make the skip rule cost-aware. Compression is a rewrite of the whole game, so
+  it is gated by the ratio (`min_gain_pct`) only, never by a fixed MiB number
+  that would be large for a 1 GB game and trivial for a 40 GB one. Deleting is
+  gated separately by `min_prune_mib` (default 1), because deleting is nearly
+  free: a 1% saving on a huge game is taken when it needs no rewrite.
+- Add `--slim GAME`: one offline, reversible pass that keeps the highest
+  resolution tier and the host-platform build, removing other resolution
+  fallbacks, non-host platform folders and debug symbols. It is format-agnostic,
+  uses no runtime component and never touches groups it cannot classify
+  unambiguously. Validated across 329 installed games.
+- Add `--variants GAME`, a read-only, format-agnostic detector for redundant
+  asset suites (architecture/renderer builds, resolution tiers, platform folders
+  and language packs) that share a file-name layout. It suppresses sequential
+  content folders that merely reuse names, so it is safe to run on any game.
+- Add opt-in `--prune-assets` and `--prune-fallbacks` to move unused developer
+  debug symbols, and optionally low-resolution/BC3 fallback suites, into the
+  restorable backup tree. Restore/finalize already apply. Backups now fall back
+  to a real copy when the filesystem does not support reflinks.
+- Require fresh backups and exact physical measurements for shell Lossless
+  applies; automatically restore originals if live Btrfs storage does not
+  improve. Lossless package size reductions can worsen filesystem compression.
+- Add conservative/balanced FMOD export profiles, sparse aligned decoded-PCM
+  quality rejection guards, and minimum per-stream savings including seek
+  metadata. Add a disposable-copy Btrfs level benchmark for developers.
+- Add experimental native FMOD Vorbis transcoding through `--export-fmod`,
+  rebuilding FSB5 v1/RIFF-FEV banks while preserving sample ordering, playback
+  rates, declared durations, identity and non-codec metadata. Rebuild seek data,
+  trim decoder padding, and export only to new files; automatic replacement is
+  disabled pending in-game validation. Bink 2 encoding remains unimplemented.
+- Add lossless Hades v7 LZ4 package recompression with a statically bundled HC
+  encoder, per-block round-trip verification, original chunk boundaries and
+  unchanged manifests. Add a Lossless-only asset profile and package counts.
+- Keep Bink re-encoding unimplemented and FMOD exports separate from automatic
+  asset optimization: detecting containers is not counted as optimization.
+- Add an optional visual target setting and a native raster resizer for loose
+  PNG, JPEG, WebP, BMP and TGA assets, with preview, measured sizes and restore.
+- Process asset previews and changes one file at a time, and stream restore
+  checksum verification to avoid game-sized memory usage.
+- Inventory PKG/XNB bundles and Bink/video files, report scanned logical bytes
+  even when no assets are eligible, and label live disk measurements as excluding
+  restore copies rather than implying net disk-space savings.
+- Preserve unrecognized restore-directory contents and pre-existing temporary
+  files on errors; reject restore paths through symlinked directories or mounts.
+- Reject invalid asset actions and oversized DDS headers; propagate interrupted
+  WAV resampling instead of treating it as an unsupported file.
+- Expose the system-default or explicit ZSTD level in TUI settings; compression
+  still runs once before deduplication.
+- Add `--recheck` to refresh current file-size and extent measurements without recompression.
+- Track dedupe completion and show `COMPACTED` only after both compression and dedupe.
+- Batch and selection actions deduplicate compressed-only games without recompressing.
+- Base saved compression statistics on logical game-file size, not prior compressed extents.
+- Report this pass’s compression change separately from total savings versus original files.
+
+- Bundle a static Rust backend with codecs linked into the executable; no image
+  programs or runtime codec packages are invoked.
+- Use Linux ioctls for ZSTD compression, extent measurement, deduplication and balance.
+- Remove runtime requirements for btrfs-progs, compsize and duperemove.
+- Bound dedupe memory using sorted temporary indexes; never submit ranges past EOF.
+- Preserve paths and contents, reject symlinks and nested mounts, skip holes, and clean
+  temporary state on errors and handled signals. Kernel comparison verifies hashes.
+- Stream progress, propagate interruption, fix selected-game titles and distinguish
+  logical sharing from physical storage savings.
+- Keep per-file output behind `--verbose`; default compression progress is time-limited.
+- Fix exact-byte measurement dispatch and use one disk baseline for per-step and total
+  savings. Report unknown measurements and negative savings honestly.
+- Keep physical dedupe history separate from legacy logical-sharing estimates.
+- Package architecture-specific releases and install/update/uninstall both components.
+
+
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- Optional Btrfs extent deduplication with `duperemove` after a game is
+  compressed, using a persistent hashfile per Steam `common` directory.
+- `--dedupe` to run a measured pass over discovered libraries even when games
+  are already compressed; it reports before/after Btrfs usage and newly shared
+  bytes, and skips libraries with a running game.
+- Append-only dedupe measurement history, summarized separately from ZSTD
+  compression savings by `--history` and `--stats`.
+- Per-library `flock` protection so concurrent processes cannot use one
+  duperemove hashfile at the same time.
+- Single and batch compression deduplicate each game immediately after its
+  defragmentation, using a shared hashfile per library. Compression summaries
+  and history label ZSTD savings separately from dedupe's newly shared bytes.
+- A project goal to measure real compression plus deduplication savings, inspired
+  by the reported Helldivers 2 package reduction while making clear that it is
+  not a generic expected result.
+
+### Fixed
+
+- Canonicalized game paths with trailing slashes so duplicate state records and
+  incorrect parent-library hashfile keys are not created for one install under
+  two path spellings.
 
 ## [0.1.1] - 2026-09-28
 

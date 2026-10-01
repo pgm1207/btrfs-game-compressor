@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/pgm1207/btrfs-game-compressor/main/install.sh | sh
 #
 # Verifies and installs a tagged release archive into a directory on PATH.
-# No build is needed; installation only writes the selected executable.
+# Release archives include the Bash interface and a static native backend.
 
 set -eu
 
@@ -27,7 +27,7 @@ say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-for dep in curl tar install sha256sum awk grep head chmod; do
+for dep in curl tar install sha256sum awk grep head chmod mv uname; do
     have "$dep" || die "required command not found: $dep"
 done
 
@@ -40,7 +40,10 @@ if [ -z "$VERSION" ]; then
     VERSION="${TAG#v}"
 fi
 [ -n "$VERSION" ] || die "could not determine the latest release; pin one with BTRFS_GAME_COMPRESSOR_VERSION=x.y.z"
-ARCHIVE="$PROG-$VERSION.tar.gz"
+ARCH=$(uname -m)
+case "$ARCH" in x86_64|aarch64) ;; *) die "unsupported architecture: $ARCH" ;; esac
+[ "$(uname -s)" = Linux ] || die "Linux is required"
+ARCHIVE="$PROG-$VERSION-linux-$ARCH.tar.gz"
 
 RELEASE_URL="https://github.com/$REPO/releases/download/v$VERSION"
 
@@ -61,40 +64,10 @@ head -n1 "$SCRIPT" | grep -q '^#!' || die "release executable is not a script"
 
 chmod +x "$SCRIPT"
 
-# --- distribution detection ------------------------------------------------
-# The packages that provide 'btrfs' and 'compsize' are named differently across
-# distributions. This maps the running one to the right command; it is only ever
-# offered, never run silently.
-
-distro_fields() {
-    [ -r /etc/os-release ] || { printf 'unknown '; return; }
-    awk -F= '
-        $1 == "ID"      { v = $2; gsub(/"/, "", v); id = v }
-        $1 == "ID_LIKE" { v = $2; gsub(/"/, "", v); like = v }
-        END { print (id ? id : "unknown") " " like }
-    ' /etc/os-release 2>/dev/null
-}
-
-pkg_command() {
-    # distro_fields prints "ID ID_LIKE"; splitting that into $1 and $2 is exactly
-    # what is wanted here, so the word-splitting warning is silenced on purpose.
-    # shellcheck disable=SC2046
-    set -- $(distro_fields)
-    # The compsize package is named 'compsize' on Arch, Fedora and openSUSE, but
-    # 'btrfs-compsize' on Debian and Ubuntu. Getting this wrong makes the
-    # offered install command fail, so the two are kept separate.
-    case "${1:-unknown} ${2:-}" in
-        *arch*|*cachyos*|*endeavouros*|*manjaro*|*steamos*|*garuda*)
-            printf 'pacman -S btrfs-progs compsize' ;;
-        *fedora*|*bazzite*|*nobara*|*rhel*|*centos*)
-            printf 'dnf install btrfs-progs compsize' ;;
-        *opensuse*|*suse*)
-            printf 'zypper install btrfs-progs compsize' ;;
-        *ubuntu*|*debian*|*pop*|*mint*|*elementary*|*zorin*)
-            printf 'apt install btrfs-progs btrfs-compsize' ;;
-        *) : ;;
-    esac
-}
+BACKEND="$SRCDIR/bgc-native"
+[ -s "$BACKEND" ] || die "release archive does not contain bgc-native"
+chmod +x "$BACKEND"
+[ "$("$BACKEND" --protocol-version)" = 1 ] || die "incompatible native backend"
 
 # --- install ---------------------------------------------------------------
 
@@ -110,7 +83,10 @@ if [ -t 0 ]; then
 fi
 
 mkdir -p "$BINDIR"
-install -m 0755 "$SCRIPT" "$BINDIR/$PROG"
+install -m 0755 "$BACKEND" "$BINDIR/.bgc-native.new"
+mv -f "$BINDIR/.bgc-native.new" "$BINDIR/bgc-native"
+install -m 0755 "$SCRIPT" "$BINDIR/.$PROG.new"
+mv -f "$BINDIR/.$PROG.new" "$BINDIR/$PROG"
 
 # The manpage and the community ratio table go where the script looks for them
 # at run time: <prefix>/share/.... The table has to be installed, not just
@@ -127,43 +103,6 @@ fi
 
 say ""
 say "installed $BINDIR/$PROG"
-
-# --- optional dependencies -------------------------------------------------
-
-MISSING=""
-have btrfs    || MISSING="$MISSING btrfs"
-have compsize || MISSING="$MISSING compsize"
-MISSING="${MISSING# }"
-
-if [ -n "$MISSING" ]; then
-    PKGS=$(pkg_command)
-    say ""
-    say "optional: $MISSING not found."
-    if [ -n "$PKGS" ]; then
-        say "          install with:  sudo $PKGS"
-        if [ -t 0 ]; then
-            if [ "$(id -u)" -eq 0 ] || have sudo; then
-                printf 'Install them now? [y/N] '
-                read -r reply
-                case "$reply" in
-                    [Yy]*)
-                        if [ "$(id -u)" -eq 0 ]; then
-                            # shellcheck disable=SC2086
-                            $PKGS || say "install command failed; run it by hand."
-                        else
-                            # shellcheck disable=SC2086
-                            sudo $PKGS || say "install command failed; run it by hand."
-                        fi ;;
-                    *) say "skipped - install them yourself when ready." ;;
-                esac
-            else
-                say "          (sudo is not available; run it as root)"
-            fi
-        fi
-    else
-        say "          install them with your distribution's package manager."
-    fi
-fi
 
 # --- PATH ------------------------------------------------------------------
 

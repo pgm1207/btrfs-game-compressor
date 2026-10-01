@@ -1,0 +1,142 @@
+[
+  {
+    "file": "ChaosRealm.bank",
+    "profile": "conservative",
+    "returncode": 0,
+    "result": "FMOD|150528|150528|0|3|NO_OUTPUT",
+    "diagnostics": "Experimental lossy FMOD export; source stays unchanged. In-game playback/loop testing is required before replacement."
+  },
+  {
+    "file": "ChaosRealm.bank",
+    "profile": "balanced",
+    "returncode": 0,
+    "result": "FMOD|150528|131248|2|1|EXPORTED",
+    "diagnostics": "Experimental lossy FMOD export; source stays unchanged. In-game playback/loop testing is required before replacement.",
+    "audits": [
+      {
+        "path": "/home/pgm1207/.local/share/Steam/steamapps/common/Hades/Content/Audio/FMOD/Build/Desktop/ChaosRealm.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|3|462016|15.042961|0.020826|5",
+        "diagnostics": "Sampled offline lewton decoder benchmark; excludes I/O and setup. Not in-game FMOD CPU or seek validation."
+      },
+      {
+        "path": "/home/pgm1207/Documents/Scripts/btrfs-game-compressor/native/target/hades-fmod-guarded-1790844050274531007/balanced-ChaosRealm.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|3|462016|15.042961|0.020531|5",
+        "diagnostics": "Sampled offline lewton decoder benchmark; excludes I/O and setup. Not in-game FMOD CPU or seek validation."
+      }
+    ]
+  },
+  {
+    "file": "Tartarus.bank",
+    "profile": "conservative",
+    "returncode": 0,
+    "result": "FMOD|3672192|3620496|1|155|EXPORTED",
+    "diagnostics": "Experimental lossy FMOD export; source stays unchanged. In-game playback/loop testing is required before replacement.",
+    "audits": [
+      {
+        "path": "/home/pgm1207/.local/share/Steam/steamapps/common/Hades/Content/Audio/FMOD/Build/Desktop/Tartarus.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|481408|13.373215|0.014084|5",
+        "diagnostics": "Sampled offline lewton decoder benchmark; excludes I/O and setup. Not in-game FMOD CPU or seek validation."
+      },
+      {
+        "path": "/home/pgm1207/Documents/Scripts/btrfs-game-compressor/native/target/hades-fmod-guarded-1790844050274531007/conservative-Tartarus.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|481408|13.373215|0.014049|5",
+        "diagnostics": "Sampled offline lewton decoder benchmark; excludes I/O and setup. Not in-game FMOD CPU or seek validation."
+      }
+    ]
+  },
+  {
+    "file": "Tartarus.bank",
+    "profile": "balanced",
+    "returncode": 0,
+    "result": "FMOD|3672192|3500640|28|128|EXPORTED",
+    "diagnostics": "Experimental lossy FMOD export; source stays unchanged. In-game playback/loop testing is required before replacement.",
+    "audits": [
+      {
+        "path": "/home/pgm1207/.local/share/Steam/steamapps/common/Hades/Content/Audio/FMOD/Build/Desktop/Tartarus.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|481408|13.373215|0.014047|5",
+        "diagnostics": "Sampled offline lewton decoder benchmark; excludes I/O and setup. Not in-game FMOD CPU or seek validation."
+      },
+      {
+        "path": "/home/pgm1207/Documents/Scripts/btrfs-game-compressor/native/target/hades-fmod-guarded-1790844050274531007/balanced-Tartarus.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|481920|13.389215|0.013924|5",
+        "diagnostics": "Sampled offline lewton decoder benchmark; excludes I/O and setup. Not in-game FMOD CPU or seek validation."
+      }
+    ]
+  },
+  {
+    "file": "DeathArea.bank",
+    "profile": "conservative",
+    "returncode": 0,
+    "result": "FMOD|3838272|3778592|4|54|EXPORTED",
+    "diagnostics": "Experimental lossy FMOD export; source stays unchanged. In-game playback/loop testing is required before replacement.",
+    "audits": [
+      {
+        "path": "/home/pgm1207/.local/share/Steam/steamapps/common/Hades/Content/Audio/FMOD/Build/Desktop/DeathArea.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|725248|17.793864|0.023212|5",
+        "diagnostics": "Sampled offline lewton decoder benchmark; excludes I/O and setup. Not in-game FMOD CPU or seek validation."
+      },
+      {
+        "path": "/home/pgm1207/Documents/Scripts/btrfs-game-compressor/native/target/hades-fmod-guarded-1790844050274531007/conservative-DeathArea.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|725248|17.793864|0.023258|5",
+        "diagnostics": "Sampled offline lewton decoder benchmark; excludes I/O and setup. Not in-game FMOD CPU or seek validation."
+      }
+    ]
+  },
+  {
+    "file": "DeathArea.bank",
+    "profile": "balanced",
+    "returncode": 0,
+    "result": "FMOD|3838272|3730736|6|52|EXPORTED",
+    "diagnostics": "Experimental lossy FMOD export; source stays unchanged. In-game playback/loop testing is required before replacement.",
+    "audits": [
+      {
+        "path": "/home/pgm1207/.local/share/Steam/steamapps/common/Hades/Content/Audio/FMOD/Build/Desktop/DeathArea.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|725248|17.793864|0.023403|5",
+        "diagnostics": "Sampled offline lewton decoder benchmark; excludes I/O and setup. Not in-game FMOD CPU or seek validation."
+      },
+      {
+        "path": "/home/pgm1207/Documents/Scripts/btrfs-game-compressor/native/target/hades-fmod-guarded-1790844050274531007/balanced-DeathArea.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|725376|17.797864|0.023577|5",
+        "diagnostics": "Sampled offline lewton decoder benchmark; excludes I/O and setup. Not in-game FMOD CPU or seek validation."
+      }
+    ]
+  },
+  {
+    "file": "Enemies.bank",
+    "profile": "conservative",
+    "returncode": 0,
+    "result": "FMOD|2966912|2966912|0|398|NO_OUTPUT",
+    "diagnostics": "Experimental lossy FMOD export; source stays unchanged. In-game playback/loop testing is required before replacement."
+  },
+  {
+    "file": "Enemies.bank",
+    "profile": "balanced",
+    "returncode": 0,
+    "result": "FMOD|2966912|2952336|13|385|EXPORTED",
+    "diagnostics": "Experimental lossy FMOD export; source stays unchanged. In-game playback/loop testing is required before replacement.",
+    "audits": [
+      {
+        "path": "/home/pgm1207/.local/share/Steam/steamapps/common/Hades/Content/Audio/FMOD/Build/Desktop/Enemies.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|214656|5.504585|0.005359|5",
+        "diagnostics": "Sampled offline lewton decoder benchmark; excludes I/O and setup. Not in-game FMOD CPU or seek validation."
+      },
+      {
+        "path": "/home/pgm1207/Documents/Scripts/btrfs-game-compressor/native/target/hades-fmod-guarded-1790844050274531007/balanced-Enemies.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|214656|5.504585|0.005282|5",
+        "diagnostics": "Sampled offline lewton decoder benchmark; excludes I/O and setup. Not in-game FMOD CPU or seek validation."
+      }
+    ]
+  }
+]

@@ -1,0 +1,9 @@
+{
+  "game": "/mnt/storage/Games/SteamLibrary/steamapps/common/Brotato",
+  "before_final_dedupe_extents": [90562700, 144838813, 144838813],
+  "current_install_logical": 144827895,
+  "final_install_extents": [90562700, 144838813, 144838813],
+  "final_pack_extents": [55099392, 64626688, 64626688],
+  "dedupe_referenced_disk_delta": 0,
+  "installed_sha256": "54b634fa09f573a4b12b5ba64e75b215269ca1f8bdd648c5a5a05c9b7bbfe0cb"
+}

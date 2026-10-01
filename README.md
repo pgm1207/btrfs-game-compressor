@@ -1,8 +1,8 @@
 # btrfs-game-compressor
 
-**Reclaim 15–40% of your game library on Btrfs — losslessly, with no change in game
-quality and essentially no performance cost. Unusually compressible titles reach 90%
-(`MechHavoc`), measured with `compsize`.**
+**Reduce the disk footprint of Steam games on Btrfs while keeping their files
+byte for byte intact. Actual savings depend on the game; unusually compressible
+titles can save much more than games built from compressed assets.**
 
 [![CI](https://github.com/pgm1207/btrfs-game-compressor/actions/workflows/ci.yml/badge.svg)](https://github.com/pgm1207/btrfs-game-compressor/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -15,7 +15,7 @@ your library is sitting on disk **uncompressed**, even though compression is swi
 on. This tool finds those games, compresses them with ZSTD, and remembers what it has
 done so it never repeats work.
 
-It is a single bash script. No daemon, no root service, no telemetry, no config files
+It is a Bash interface with a bundled, statically linked Rust backend. No daemon, no root service, no telemetry, no config files
 outside your home. It tells you what it is going to do before it does it, never
 touches a game that is running, and knows when re-compressing is not worth your time.
 
@@ -26,16 +26,16 @@ touches a game that is running, and knows when re-compressing is not worth your 
 ```console
 $ btrfs-game-compressor --status
 ================================================================================
-  BTRFS GAME COMPRESSOR v0.1.1   225 game(s) across 1 library(ies)
-  [########################....] 92% compressed
+  BTRFS GAME COMPRESSOR v0.2.0   225 game(s) across 1 library(ies)
+  [########################....] 92% compacted
 ================================================================================
 GAME                                     STATUS               SIZE EXPECTED GAIN
 --------------------------------------------------------------------------------
-Hades                                    COMPRESSED          11.2G
+Hades                                    COMPACTED           11.2G
 Caves of Qud                             UPDATED             1.8G
 Factorio                                 UNCOMPRESSED        2.1G  table says ~44% (zstd1)
 --------------------------------------------------------------------------------
-libraries: 1   games: 225   pending: 12   compressed: 213   low-yield: 0
+libraries: 1   games: 225   pending: 12   compacted: 209   compressed only: 4   low-yield: 0
 ```
 
 ## Table of contents
@@ -64,12 +64,18 @@ libraries: 1   games: 225   pending: 12   compressed: 213   low-yield: 0
 
 - **Finds** Steam libraries on Btrfs, from `libraryfolders.vdf` and Flatpak layouts,
   plus any roots you register.
-- **Defragments** games with `btrfs filesystem defragment -r -czstd -L`, mirroring
-  the zstd level your filesystem is already mounted with so a library stays uniform.
-- **Remembers** what it did per install path, so a game is only re-examined when
-  something actually changed, and never compressed twice for nothing.
+- **Compresses** games through the Btrfs ZSTD defragmentation ioctl, mirroring
+  the mounted ZSTD level by default; settings can choose another level.
+- **Deduplicates matching data** in each game immediately after compression,
+  using the native backend. Manual library scans also find duplicates between games.
+- Runs one configurable ZSTD pass, then deduplicates. `auto` follows the
+  filesystem's configured level; settings can select levels 1 through 15.
+- Tracks `COMPRESSED` and `COMPACTED` separately. `COMPACTED` means compression
+  is current and a successful dedupe pass has run since; the batch action dedupes
+  compressed-only games without recompressing them.
 - **Never touches a running game**, **stops on failure**, and is **safe to interrupt**
   at any time.
+- Shows one concise progress line by default. Pass `--verbose` to list each file.
 - **Tells you when it is not worth it** — a game that only saves a fraction of a
   percent is reported as `LOW YIELD` instead of costing you an hour.
 
@@ -78,6 +84,50 @@ One install for every distribution, and it keeps itself up to date:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/pgm1207/btrfs-game-compressor/main/install.sh | sh
 ```
+
+Release archives include `bgc-native` for the selected CPU architecture. No
+`btrfs-progs`, `compsize`, `duperemove`, Rust compiler, or external filesystem
+script is required on the user's machine. Image codecs are statically linked
+into `bgc-native`; no image tool is launched at runtime. Standard Linux shell utilities remain
+necessary for the Bash interface.
+
+### What automatic deduplication does
+
+After compression, the native backend scans only the selected game. A manual
+`--dedupe` scan covers each library and can share blocks across games. It hashes
+filesystem-sector-aligned data (normally 4 KiB), sorts hashes using bounded RAM
+and temporary files, then submits matching ranges to `FIDEDUPERANGE`. The kernel
+compares the actual bytes before sharing storage. Hash collisions cannot corrupt
+file contents. Duplicate blocks inside the same file are included.
+
+Files, paths, hardlinks and logical contents are preserved. Symlinks, special
+files, nested mounts, holes and unwritten extents are not scanned. Inline data,
+trailing fragments smaller than a sector, and duplicates at incompatible byte
+alignments are not deduplicated. No asset bundles are unpacked or rewritten.
+
+Each pass rehashes the selected scope; there is no persistent hash database to
+become stale or accidentally include another game. Sorted records require about
+32 bytes per scanned sector in temporary storage (about 0.8% of scanned data
+on 4 KiB Btrfs, with extra space during merges). Temporary files are removed on
+normal completion, errors and Ctrl+C. A forced kill or power loss can leave a
+`dedupe/native-*` temporary directory for manual cleanup. Per-library locks
+serialize compression-followup and manual dedupe passes. Progress streams to the
+terminal and a per-scope log in the state directory.
+
+Deduplication runs after compression because defragmentation can break existing
+sharing. Compression remains recorded if the subsequent dedupe pass fails.
+Rejected requests are reported as errors; a failed pass is not recorded as a
+success. Ctrl+C stops the operation and preserves completed work.
+
+The final report measures unique Btrfs data extents before and after deduplication.
+It shows the decrease in the physical game-data footprint by compression, by deduplication, and
+overall, using the on-disk size before this run as the baseline. Negative savings mean growth; unavailable measurements are shown as unknown. Old logical-sharing records remain in `dedupe_history.db` and are excluded from the new physical-savings history. These measurements require root permission and exclude filesystem
+metadata and RAID replication. Snapshot references and concurrent filesystem
+writes can affect how much storage Btrfs can release.
+
+The Helldivers 2 size reduction is motivation, not a promised result. Savings
+depend on each game's actual duplicate data; filesystem deduplication cannot
+restructure game assets as a developer can.
 
 ## Quick start
 
@@ -94,6 +144,364 @@ btrfs-game-compressor --dry-run
 # 4. Do it, from the interactive UI
 btrfs-game-compressor          # then press b for "batch"
 ```
+
+Compression runs once, then optional **[BETA] asset optimization**, then one
+final deduplication pass so it includes changed files. Settings let you use the
+filesystem's ZSTD level (`auto`, the default) or choose a level from 1 to 15.
+The beta profiles apply across supported loose media: raster images can be
+resized, simple legacy BC1/BC2/BC3 DDS textures can be resized and re-encoded,
+and simple mono/stereo integer PCM or 32-bit-float WAV can be reduced to the
+profile's sample rate/bit depth (non-native profiles output integer PCM).
+For resized 8-bit RGB/RGBA non-JPEG, non-DDS images, profiles quantize RGB
+precision progressively (5/6/7/8 bits per channel); alpha is preserved exactly.
+Ultra Performance additionally converts PCM to 8-bit with deterministic TPDF
+dither; higher quality tiers target up to 16-bit PCM. Channels and original
+sample rate are never increased, and unsupported WAV chunks/codecs are skipped.
+Hades v7 LZ4 `.pkg` bundles can also be recompressed losslessly with the bundled
+LZ4 HC encoder. Only blocks that become smaller are replaced; each replacement
+is decoded and byte-compared before use. Chunk boundaries, decoded XNB textures,
+resource entries and separate `.pkg_manifest` files are preserved.
+Bundled LZ4 notices are in [THIRD_PARTY.md](THIRD_PARTY.md) and available from
+`bgc-native --licenses`.
+Audio is not converted to Opus. A game that expects WAV cannot generally read
+an Opus bitstream in its place: Opus has its own codec and Ogg container
+specification ([RFC 6716](https://www.rfc-editor.org/rfc/rfc6716.html),
+[RFC 7845](https://www.rfc-editor.org/rfc/rfc7845.html)). Changing only the
+extension does not make formats compatible. Profiles are Ultra Performance
+(360p), Performance (720p), Balanced (1080p), Quality (1440p), Ultra Quality
+(4K), Lossless (Hades packages only), and Native. Native is the default. The
+Lossless profile never resizes images or changes WAV samples; it only enables
+the lossless Hades package pass. Native makes no beta asset changes. Visual
+and audio targets reduce detail/quality; Ultra Performance is the most
+aggressive supported loose-media profile. They do not add an upscaler to the
+game's renderer. Press `o` to preview a highlighted game and optionally apply the
+profile, or use:
+
+| Profile | Longest image edge | RGB precision* | JPEG quality | WAV ceiling |
+| --- | ---: | ---: | ---: | --- |
+| Ultra Performance | 640 px | 4 bits/channel | 60 | 11.025 kHz, 8-bit PCM |
+| Performance | 1,280 px | 6 bits/channel | 80 | 32 kHz, up to 16-bit |
+| Balanced | 1,920 px | 7 bits/channel | 86 | 44.1 kHz, up to 16-bit |
+| Quality | 2,560 px | 8 bits/channel | 91 | 48 kHz, up to 16-bit |
+| Ultra Quality | 3,840 px | 8 bits/channel | 95 | 48 kHz, up to 16-bit |
+| Native | unchanged | unchanged | unchanged | unchanged |
+
+\* RGB precision applies only to resized 8-bit RGB/RGBA images using
+non-JPEG, non-DDS encoders; alpha is retained. WAV ceilings never upsample or
+increase bit depth; lower-depth sources remain at their original depth. Lossless
+is a separate package-only profile, not a quality-reduction tier.
+
+```sh
+btrfs-game-compressor --assets Hades
+btrfs-game-compressor --apply-assets Hades
+btrfs-game-compressor --restore-assets Hades
+# After launching and checking the game, optionally discard the restore copy:
+btrfs-game-compressor --finalize-assets Hades
+```
+
+Choose a profile in TUI settings before applying. Files change only after
+confirmation, and the game must be closed. Every changed source is retained in
+`.bgc-assets-backup` until restored or finalized. That copy remains allocated,
+so applying may shrink logical file sizes without increasing free disk space.
+Finalizing discards the restore copy; snapshots may still retain blocks. Steam
+verification can replace changed assets. Anti-cheat is not detected
+automatically. Avoid modified assets in online games with anti-cheat. Packed
+Unity/Unreal archives, mipmapped/array/cubemap DDS, multichannel or metadata-rich
+WAV, and encoded audio are inventoried but left unchanged. Each changed file is
+then compressed once at the configured ZSTD level. The asset optimizer is beta:
+test the game before finalizing its restore copies. Hollow Knight's engine
+packages are not rewritten. Hades package recompression preserves decoded
+content but does not shrink texture dimensions or optimize its Bink/FMOD data.
+Preview and apply process one asset at a time rather than buffering all converted
+files in memory. Restore/finalize refuse changed assets and symlinked game
+subdirectories; cleanup preserves unrecognized files in the restore directory.
+Previews report packed/video and audio inventory sizes separately from eligible
+reductions. A zero-candidate result means no asset optimization savings, even if
+large PKG/XNB bundles, Bink videos or FMOD banks are identified. Live game-data
+disk measurements exclude restore copies and are not net free-space savings.
+
+**Container conversion status:** Hades v7 LZ4 PKG recompression is implemented;
+arbitrary `.pkg` formats and standalone XNB conversion are not. Bink 1/2 videos
+and FMOD FSB/banks are not re-encoded by the automatic asset stage. Bink needs a compatible
+encoder (Hades uses Bink 2); FMOD banks need codec-aware rebuilding that preserves
+sample indices, GUIDs, loop/timing metadata and event references. Decoding or
+renaming these files to MP4/Opus does not make a game load them. These are not
+claimed as automatic compression support until encoding and game compatibility are tested.
+
+The shell's **Lossless** apply workflow requires a fresh backup set and exact
+privileged Btrfs measurements. If the live footprint is not strictly smaller,
+or the post-apply measurement fails, it restores the originals instead of
+accepting a logical-only reduction. Existing backups must first be restored or
+explicitly finalized. The native `assets apply` command is a lower-level
+diagnostic and does not perform this whole-game physical acceptance check.
+Before that final acceptance check, it selectively restores packages whose
+individual physical footprint did not improve when the privileged selection
+report is available. This avoids letting a few poor candidates outweigh a
+useful subset. Counts and logical savings exclude restored candidates.
+
+### Experimental native FMOD exports
+
+`--export-fmod QUALITY FILE OUTPUT` performs real lossy Vorbis re-encoding and
+rebuilds supported FSB5 v1 files or single-FSB RIFF/FEV `.bank` containers. All
+codecs and FMOD Vorbis setup tables are compiled into the backend; there are no
+runtime tools or SDK requirements. Quality is `0.0` through `0.4` (higher values
+retain more detail, but do not guarantee a smaller file).
+
+Prefer `conservative` (quality 0.3) or `balanced` (quality 0.2) instead of a
+numeric quality when testing quality-sensitive assets. These profiles retain
+original streams unless a candidate saves at least 5% including seek metadata,
+and a sparse, aligned decoded-waveform comparison passes a 20 dB or 18 dB SNR
+guard respectively. Numeric quality settings use a 15 dB rejection guard.
+These checks catch severe damage and timing shifts; they do **not** certify
+perceptual transparency. Listen to representative dialogue, music and effects.
+All these checks run offline, adding no new processing stage during gameplay.
+
+`bgc-native fmod-audit FILE` runs a bounded offline decoder microbenchmark on
+up to eight evenly spaced streams (five seconds per stream, five repetitions).
+It reports sampled frames, decoded audio seconds and best decoder wall time
+summed across the streams. Compare an original with its export using the same
+binary on an otherwise idle machine. This tests the bundled lewton decoder,
+not the game's FMOD decoder; it does not certify seeking or gameplay CPU costs.
+
+```sh
+btrfs-game-compressor --export-fmod 0.0 /path/to/input.bank /path/to/test-output.bank
+btrfs-game-compressor --export-fmod conservative /path/to/input.bank /path/to/conservative.bank
+```
+
+The source is never replaced and existing output files are never overwritten.
+Output is written only if the total file is smaller. Mono/stereo Vorbis streams
+use verified FMOD codebooks; the encoder keeps playback sample rates, declared
+frame counts, sample ordering, names, identity bytes, loops, markers and bank
+event metadata, and rebuilds encoded packet offsets and seek tables. Decoder
+padding is not counted as additional audio. Unsupported codecs, versions and
+container layouts are rejected; streams with unknown codebooks are retained,
+and banks with unknown potentially offset-bearing metadata are left unchanged. Input is
+limited to 1 GiB, and individual streams to 30 minutes at 48 kHz equivalent.
+
+**This is export-only and experimental:** unit tests check decoded timing and
+metadata, but Hades in-game playback and seeking have not been validated. Do not
+replace installed banks without testing on a disposable game copy. Exports do
+not change compression history or represent net disk savings. Bink 2 encoding
+remains unimplemented; an MP4 renamed to `.bik` is not a compatible replacement.
+
+### Finding redundant asset variants (any game)
+
+```sh
+btrfs-game-compressor --variants GAME   # read-only report
+btrfs-game-compressor --slim GAME       # one-shot, reversible removal
+```
+
+`--slim` performs a single offline pass that keeps the **highest resolution
+tier** and the **host-platform build**, removing the other resolution fallbacks
+and non-host platform folders (plus the debug symbols `--prune-assets` already
+handles). When a language list is set, it furthermore removes every **language
+pack** whose language you did not select — localized audio, subtitles and
+`locale/` data — so the game only carries the languages you actually use. This
+covers both language **folders** (`locale/fr/`) and language-named **files**
+(`voiceover_fr.bundle`, `Dialogue_De.bank`, `CueSheet_VO_Battle_ja.awb`), which
+is how many Wwise/FMOD/CriWare titles ship voice data.
+
+```sh
+btrfs-game-compressor --keep-languages en,de    # codes or names ("English,German")
+btrfs-game-compressor --slim GAME
+```
+
+The list is stored in `keep_languages` under the config directory and can also be
+edited from the **Settings** menu (`[6] Languages to keep for --slim`). An empty
+list disables language pruning entirely. Only groups where **every** member is a
+recognized language are touched, and a group is left intact unless at least one
+of your languages is present in it, so a language set is never emptied. Keep the
+language the game boots with (usually the first/English one): removing it can
+prevent startup, which is why the confirmation says so and every removal stays
+restorable.
+ No runtime service, no per-game configuration and no plugins are
+involved: it reads directory shape and names, changes files once, and the game
+simply plays afterwards. Everything is written to the same restorable backup
+tree, so `--restore-assets` undoes it and `--finalize-assets` frees the space
+after you test. Ambiguous groups are never touched.
+
+
+Read-only, format-agnostic report of sibling suites that share an identical
+file-name layout but differ in data: architecture builds (`x86`/`x64`), renderer
+or shader suites, resolution tiers (`720p`/`1080p`/`4K`), platform folders
+(`Windows`/`PS4`/`Mac`) and language packs (`en`/`fr`/`de`). It compares only
+directory shape, so it works on games the tool knows nothing about; groups whose
+members do not look like variants (sequential level, region or skin folders,
+which often reuse file names) are suppressed. Each group shows the bytes
+reclaimable by keeping one member. It changes nothing and needs no privilege;
+confirm which member the engine actually loads before removing a suite, then use
+`--prune-fallbacks`/`--restore-assets` for a reversible change.
+
+### What is this game made with?
+
+```sh
+btrfs-game-compressor --engines GAME
+```
+
+Read-only report of the engine (**Unity**, **Unreal**, **Godot**, RE Engine,
+GameMaker, …) and where the bytes live — the largest containers, classified
+(`unity-stream`, `unity-bundle`, `amplify-vtc2`, `pak`, `unreal-iostore`,
+`godot-pck`, `fmod-audio`, `wwise-audio`, `cri-audio`, `bink-video`, …).
+Includes extensionless UnityFS bundles. Godot/Wwise `.pck` identification uses
+the pack signature, not just the extension. Engine/layout evidence is not a
+dependency analysis or a guarantee that resources are optional.
+
+### Experimental packed-container optimization
+
+```sh
+btrfs-game-compressor --audit-container /path/to/file
+btrfs-game-compressor --export-unityfs original.bundle candidate.bundle
+btrfs-game-compressor --export-godot original.pck candidate.pck
+btrfs-game-compressor --audit-godot-textures ultra-performance original.pck
+btrfs-game-compressor --export-godot-textures balanced original.pck candidate.pck
+btrfs-game-compressor --audit-godot3-audio balanced Brotato.pck
+btrfs-game-compressor --export-godot3-audio balanced Brotato.pck candidate.pck
+```
+
+All code and codecs are compiled into the native helper: no plugin, external
+encoder, runtime service or modified engine is required. These paths are **not
+enabled for automatic installed-file replacement**:
+
+- **UnityFS v6–8:** stronger lossless LZ4/HC recompression, retaining each block's
+  decoded bytes, boundaries, codec flags, resource directory and decoded-data
+  hash. Stored blocks remain stored. Only stored/LZ4/LZ4HC metadata is supported;
+  LZMA, unknown flags/layouts and files above the current 512 MiB in-memory limit
+  are rejected. This does not resize textures or transform standalone `.assets`
+  / `.resS` streams. Addressables catalogs may record encoded sizes/hashes or
+  CRCs; decode verification alone does not establish catalog/game compatibility.
+- **Godot standalone PCK v1–4 (plain packs):** share byte-identical resource payloads using
+  directory offsets. Stored MD5 values are grouping hints only; candidates are
+  compared byte-for-byte and every exported resource is verified against the
+  source. Paths, sizes, flags and hashes remain unchanged. Streams with bounded
+  buffers; encrypted/sparse packs, removal records, partial overlaps and newer
+  layouts are rejected. No new decoder or per-entry Zstd flag is introduced.
+- **Unreal Pak:** read-only footer versions 1–11, index bounds, encryption and
+  declared codec names. This does not decrypt/rewrite indexes, verify hashes or
+  signatures, identify actual per-entry codec usage, or support IoStore/RE Engine
+  repacking. A declared codec is not permission to switch entries to another one.
+- **Godot PCK textures (lossy, export-only):** `--export-godot-textures PROFILE`
+   supports Godot 3 `.stex` (GDST, PCK v1) and Godot 4 `.ctex` (GST2, PCK v3/v4).
+   It downscales supported textures to the profile's longest edge
+  (640/1,280/1,920/2,560/3,840 px) and re-encodes them in their original format:
+   WebP/PNG stay WebP/PNG (lossless encoding of intentionally degraded pixels),
+   and BC1/BC2/BC3/BC7 retain their block format. Lower tiers also quantize RGB
+   precision; alpha channels are retained. Logical dimensions are preserved,
+   including atlas size overrides; resized mip chains are rebuilt completely.
+   Unsupported encodings (Basis Universal, ETC, ASTC, half-float) stay unchanged.
+   A texture is only rewritten when the new payload is strictly smaller.
+   The pack is rebuilt (32-byte payload alignment for v3/v4), with relocated offsets and
+  recomputed per-entry MD5; the export is re-parsed and every untouched entry is
+  byte-compared. `--audit-godot-textures PROFILE` is the read-only estimate.
+   This is gated to explicit lossy profiles (Native/Lossless never run it).
+   Brotato's Godot 3 result has passed manual playtesting. Godot 4 candidates
+   still need per-game loading/visual checks; see `test/engine-results/` for
+   current trials and physical measurements. For the explicit Slay the Spire 2
+   export/Zstd/dedupe workflow, see [the manual Godot trial guide](test/GODOT_MANUAL_TRIAL.md).
+- **Godot 3 PCK audio (lossy, export-only):** `--export-godot3-audio PROFILE`
+  reads standalone Godot 3 PCK v1 packs, parses the `RSRC` binary resources,
+  decodes `AudioStreamMP3` (`.mp3str`) and re-encodes it as Ogg Vorbis under the
+  same entry name, retyping that entry's `type=` in the matching `.import` stub
+  (Godot 3 identifies a resource by its stored type, not its extension). Every
+   supported `AudioStreamSample` PCM is also reduced in rate/bit depth, retaining
+   the original resource class and container metadata, with scaled loop points.
+   IMA-ADPCM is disabled following a real-game crash. Other entries stay unchanged.
+   Profiles map music to Vorbis quality 0.10/0.22/0.35/0.50/
+  0.65. `--audit-godot3-audio PROFILE` is the read-only estimate. On Brotato
+   (Godot 3.7) the retained music-only result rewrote 34 of 35 tracks: 147.9 MB
+   to 88.6 MB. With Ultra Performance PCM8 at 11.025 kHz and GDST textures,
+   the manually playtested pack is 64.6 MB logically (55.1 MB of referenced
+   physical data); the whole install is 144.8 MB logically / 90.6 MB physically.
+   Godot 4 audio resources, QOA and FMOD banks are not covered by this command.
+
+`--audit-container` reads signatures, not extensions. Unity auditing performs
+compression/verification in RAM without an output file; Godot auditing reports
+resource-type sizes and GST2 texture headers (encoding, numeric GPU format,
+dimensions, mipmapped counts). Unreal auditing reads only the footer.
+
+Exports refuse existing destinations, including the source itself. Before any
+export writes, **logical bytes saved / complete output bytes** must meet
+`min_gain_pct` (default 5%). The cost is the touched container, not the whole
+game. `0` disables this efficiency gate, not verification. Retaining the source
+means an export consumes extra storage; logical reduction is not physical/net
+savings. Game loading and real Btrfs footprint still need separate validation.
+
+Additional native research commands:
+
+```sh
+bgc-native unityfs-audit FILE
+bgc-native godot-dedup-audit FILE    # verified duplicate candidates; no output
+bgc-native godot-audit FILE
+bgc-native godot-texture-audit PROFILE FILE
+bgc-native godot-texture-export PROFILE MIN_PCT INPUT OUTPUT
+bgc-native godot3-audit PROFILE FILE
+bgc-native godot3-optimize PROFILE MIN_PCT INPUT OUTPUT
+bgc-native unreal-audit FILE
+```
+
+Recorded experiments and limitations: [engine studies](test/ENGINE_EXPERIMENTS.md).
+
+### Removing unused content
+
+Some installs ship bytes the released game never loads. Two opt-in commands move
+them into the same restorable backup tree as every other asset change:
+
+```sh
+btrfs-game-compressor --prune-assets Hades       # *.pdb / *.ilk debug symbols
+btrfs-game-compressor --prune-fallbacks Hades    # also the unused 720p/BC3 suites
+```
+
+`--prune-assets` removes developer debug symbols (`*.pdb`, `*.ilk`) that are
+compiled-out data no released build loads. `--prune-fallbacks` additionally
+removes low-resolution and BC3 texture/video fallback suites that an engine only
+selects when it decides to use low-resolution assets (typically a weak GPU or an
+explicit setting). **Only use `--prune-fallbacks` if this machine really renders
+the full-resolution assets**; otherwise the game may fail to find them. The
+backup makes either change recoverable with `--restore-assets`, and free space
+returns only after you test the game and run `--finalize-assets`.
+
+Selection is conservative: only regular files are touched, symlinks and paths
+that escape the game directory are rejected, and empty directories are left in
+place so restoration never has to recreate them. As with asset transforms, the
+backup relies on reflinks where available and falls back to a real copy on other
+filesystems.
+
+### Measuring filesystem level tradeoffs
+
+For developer experiments, `python3 test/storage-benchmark.py --scratch NEW_DIR
+FILE...` compares ZSTD levels 3, 6 and 9 on independent copies in a new Btrfs
+directory. It authenticates through sudo, reports exact physical extents and
+encoding time, verifies content hashes and measures repeated warm read+hash
+times. Inputs stay unchanged; copies and a JSON report remain for inspection.
+Choose representative Bink, package, audio, text and binary inputs. These are
+sample-only measurements, not whole-game projections or in-game CPU benchmarks;
+the script never drops system caches. Python is only needed for this diagnostic.
+
+`bgc-native package-audit FILE` similarly measures warm LZ4 decoder wall time
+for Hades v7 packages (five runs, at most 512 MiB of decoded work per run),
+excluding input reads. Compare original and recompressed copies to investigate
+decoder cost without modifying the game. It is not a game-loading benchmark.
+
+`python3 test/package-storage.py SOURCE_PACKAGES --scratch NEW_DIR` runs the
+full lossless Hades package pass on independent copies, measures physical data
+before/after, and reports retained-backup overhead separately. It never applies
+to the source directory or discards backups. Both diagnostic scripts accept
+`--sudo-stdin` for a credential supplied through standard input; credentials
+stay in process memory and are never written to their reports or files.
+Add `--select-physical` to the package diagnostic to restore individual copies
+whose measured physical footprint fails to improve, then remeasure the selected
+set. Native `measure-file FILE` and `assets-restore-file ROOT RELATIVE_PATH` are
+lower-level diagnostic interfaces for exact measurement and checksum-validated
+selective restoration. Existing retained backups remain recoverable.
+
+There is no universal asset conversion that is both smaller and compatible with
+every game. Steam depot manifests record file hashes, and game loaders expect
+their own asset formats. Changing asset bytes may trigger a Steam repair or make
+the game fail to load. Filesystem compression and deduplication preserve those
+bytes. They may reduce disk reads, but this tool does not claim higher FPS or
+smoother play without measurements on the specific game and device.
+See [Steam's manifest format](https://partner.steamgames.com/doc/store/application/builds),
+[Btrfs compression](https://btrfs.readthedocs.io/en/latest/Compression.html), and
+[Btrfs defragmentation](https://btrfs.readthedocs.io/en/latest/Defragmentation.html).
 
 Nothing is written to a game until you ask for it. `--status` and `--dry-run` are safe
 in scripts and CI.
@@ -198,32 +606,32 @@ library has to be predictable:
 
 - **It does not shrink every game to 10% of its size.** Btrfs compresses with ZSTD, a
   general-purpose lossless codec, and modern games ship most assets already compressed
-  (textures, video, audio). Real-world savings are **15–40%** across a library, with
-  outliers up to **90%** (`MechHavoc`) and duds near **0%** (`Arco`). Anything claiming
+  (textures, video, audio). The project's measured games include outliers up to
+  **90%** (`MechHavoc`) and duds near **0%** (`Arco`). Anything claiming
   a large saving on *every* game is not describing this tool.
-- **It does not touch your saves, mods or Proton prefixes.** It only defragments files
-  under `steamapps/common`. Steam's verification is unaffected, because the files are
-  byte-for-byte identical.
-- **It does not lose quality or data.** Compression is lossless: the game data is
-  exactly the same, only stored more efficiently.
-- **It does not speed games up.** There is no FPS gain to promise. The benefit is disk
-  space, and often faster load times because the disk reads fewer bytes.
+- **Compression and deduplication do not touch saves, mods or Proton prefixes.**
+  They preserve bytes under `steamapps/common`, so those operations do not alter
+  Steam verification results.
+- **The optional [BETA] asset stage can reduce quality or affect compatibility.**
+  It can resize supported loose images/DDS and reduce simple WAV audio; Native is
+  the default. Backups remain until you test the game and choose to finalize.
+- **It does not promise faster games.** The measured benefit is disk space. Load
+  times and frame rates depend on the game, storage device, and CPU.
 - **It does not run unattended.** No background daemon rewrites a library. The optional
   systemd timer only *notifies*.
 
 ### A word on performance
 
-ZSTD decompresses very quickly, so on an SSD or NVMe the usual result is **no
-perceptible FPS change**, and often slightly faster loads because fewer bytes are read.
-The one place it can show is a sustained CPU-bound game on a low-power handheld, where
-decompression competes for a 15 W budget. If you notice anything, it is that — and if
-you do, `btrfs-game-compressor` never touches a game while it is running, so there is
-nothing to undo mid-session.
+Filesystem compression can reduce bytes read from storage and add CPU work to
+decompress them. Either can dominate a particular game's load path. This project
+has not measured a general change in load times or FPS, so judge runtime effects
+on your own device. Higher configured ZSTD levels spend more CPU time during
+the single rewrite and do not themselves promise faster play.
 
 ## What makes it safe
 
 The reason a tool like this is worth trusting is not the compression — that is one
-`btrfs` call — it is the guard rails around it:
+kernel interface — it is the guard rails around it:
 
 - **A running game is never defragmented.** The tool checks `/proc` for a process that
   has a file from the game's directory mapped, and re-checks immediately before every
@@ -232,7 +640,7 @@ The reason a tool like this is worth trusting is not the compression — that is
   writes. The optional systemd timer only *notifies*.
 - **It tells you when a game is not worth the time.** A game that only saves 0.3% of
   its size is reported as `LOW YIELD` instead of costing you an hour.
-- **It stops on failure.** If the `btrfs` call fails, the game's saved state is left
+- **It stops on failure.** If native compression fails, the game's saved state is left
   exactly as it was, so the next run retries it cleanly.
 - **`--dry-run` truly changes nothing**, and `--status` is safe in scripts and CI.
 - **Its own updates are checksum-verified.** See [Install, update,
@@ -242,46 +650,16 @@ The reason a tool like this is worth trusting is not the compression — that is
 
 | | |
 |---|---|
-| **Required** | `bash` 4+, `btrfs-progs`, `awk`, coreutils/findutils/util-linux |
-| **Optional** | `compsize` for savings figures; `notify-send` from libnotify for `--notify` |
-| **Filesystem** | the library must be on **Btrfs**, mounted with a `compress=` or `compress-force=` option |
+| **Required** | Bash 4+, the bundled `bgc-native`, awk, coreutils/findutils/util-linux (including `flock`), and the existing terminal utilities |
+| **Optional** | `sudo` for privileged measurement/balance; `notify-send` for desktop notifications; curl/tar for installation and updates |
+| **Filesystem** | Btrfs on x86_64 or aarch64 Linux; explicit ZSTD compression levels require Linux 6.15+ |
+| **Build only** | Rust/Cargo 1.89+ and a C linker; Cargo fetches the pinned image codec crates into the static backend |
 
-```sh
-# Debian / Ubuntu  (compsize is packaged as btrfs-compsize)
-sudo apt install btrfs-progs btrfs-compsize
-
-# Arch / CachyOS
-sudo pacman -S btrfs-progs compsize
-
-# Fedora / Bazzite
-sudo dnf install btrfs-progs compsize
-
-# openSUSE
-sudo zypper install btrfs-progs compsize
-```
-
-Without `compsize` a compressed game is still remembered as compressed, so it is not
-re-done on every run, but no savings figure is shown and it is left out of `--stats`,
-`--history` and `--benchmark`.
-
-The script deliberately uses **only POSIX `awk`**, so it runs on a stock Debian/Ubuntu
-where `/usr/bin/awk` is **mawk** rather than gawk. It is exercised in CI under both
-`mawk` and `busybox awk`, so a gawk-only construct cannot creep back in unnoticed.
-Beyond `awk` it relies on the standard GNU userland (`find -printf`, `stat -c`, `sed`,
-`findmnt`) that every desktop Linux distribution ships by default.
-
-Your filesystem must be mounted with compression enabled, otherwise new extents inherit
-no compression and defragmenting is a no-op:
-
-```sh
-# persistent, in /etc/fstab
-UUID=xxxx  /mnt/games  btrfs  compress=zstd,noatime  0  0
-
-# or live
-sudo mount -o remount,compress=zstd /mnt/games
-```
-
-`btrfs-game-compressor` checks this on startup and tells you if it is missing.
+No filesystem-tool packages need to be installed. The kernel performs compression
+and deduplication. Root permission is needed for exact compressed extent metadata;
+without it, compression can still succeed on files you own and savings remain
+`n/a`. Mount compression options govern future writes; this tool explicitly
+requests compression of existing files regardless of the mount default.
 
 ## Supported platforms
 
@@ -295,8 +673,8 @@ The tool works on any Linux with Btrfs. It detects your distribution and reports
 | **Bazzite** | Fedora-based, same mount options as Fedora |
 | **Fedora** | `compress=zstd` mount, standard Btrfs setup |
 | **Arch Linux** | `compress=zstd` mount, same install path as any other distro |
-| **Ubuntu / Debian** | `compress=zstd` mount, apt-based dependencies |
-| **openSUSE** | `compress=zstd` mount, zypper-based dependencies |
+| **Ubuntu / Debian** | `compress=zstd` mount; kernel version requirement applies |
+| **openSUSE** | `compress=zstd` mount; kernel version requirement applies |
 
 Derivatives (Pop!_OS, EndeavourOS, Nobara, etc.) are detected via `ID_LIKE` and inherit
 their parent distro's behavior. Anything else says `platform: other` and still works.
@@ -307,15 +685,10 @@ changes to the read-only `/usr` do not.
 
 ### Architecture
 
-There is **no architecture-specific code**. The script is shell plus standard tools, so
-it runs unchanged on `x86_64` (every Steam Deck and SteamOS device to date) and on
-`aarch64` — the day SteamOS or the Steam client ships an ARM build that games on, this
-tool is already valid there. Nothing needs porting, because there is nothing
-architecture-dependent to port. The dependency is the *userland* (GNU awk, coreutils,
-`btrfs-progs`), all of which are packaged for aarch64 on every major distribution.
-
-This is stated as a fact about the code, not a tested configuration: no ARM handheld
-running SteamOS exists to test on yet, so it is unverified rather than claimed.
+The Bash interface is shared by x86_64 and aarch64 Linux. Releases contain a
+native static executable built separately on each architecture. The installer
+selects the matching archive. x86_64 Btrfs is exercised locally; aarch64 release
+builds run in CI, but real aarch64 filesystem behavior still needs validation.
 
 ## Install, update, uninstall
 
@@ -324,16 +697,19 @@ distribution and updates itself. Cloning the repo is only for contributing.
 
 ### Install
 
+For the 0.1.x → 0.2.0 transition, rerun the installer once: old self-updaters
+only replace the Bash file and cannot install the new bundled backend.
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/pgm1207/btrfs-game-compressor/main/install.sh | sh
 ```
 
 It downloads the latest release archive, verifies it against the release's
-`SHA256SUMS`, and installs the script to `~/.local/bin`, the manpage to
+`SHA256SUMS`, and installs the script and `bgc-native` to `~/.local/bin`, the manpage to
 `~/.local/share/man/man1`, and the community ratio table to
 `~/.local/share/btrfs-game-compressor/`. It **refuses to install** if the checksum does
-not match. Because it is a single shell script with no build step, this works on every
-distribution — including SteamOS, where `~/.local` is on the persistent `/home`
+not match. The native executable is prebuilt and statically linked, so no build is needed
+on the destination machine — including SteamOS, where `~/.local` is on the persistent `/home`
 partition.
 
 If you prefer to read a script before running it (a good habit), download it first:
@@ -417,17 +793,21 @@ btrfs-game-compressor
 | `←` `→` / `h` `l` | previous / next page |
 | `Space` | toggle checkbox |
 | `a` | toggle all on the current page |
-| `Enter` or `c` | compress the highlighted game, or every checked game |
-| `b` | batch-compress everything still pending |
+| `Enter` or `c` | compress and deduplicate the highlighted or checked games; compressed-only games get deduplication |
+| `b` | process every pending game |
+| `o` | preview and optionally apply the configured [BETA] asset profile |
 | `f` | search / filter |
 | `v` | show only pending games |
 | `t` | savings statistics |
-| `s` | settings (speed mode, library management) |
+| `s` | settings (ZSTD level, [BETA] asset profile, speed and libraries) |
 | `q` | quit |
 
 ### Non-interactive
 
-Every mode below is safe to pipe, script or run from CI — none of them start the TUI.
+Every mode below is non-interactive. `--dedupe` and `--balance` change filesystem
+data; `--recheck` refreshes saved measurements without rewriting game files. A game
+is `COMPACTED` when its compression is current and a successful dedupe pass has
+completed since that compression. `COMPRESSED` games are queued for dedupe only.
 
 ```sh
 # one-shot report
@@ -439,6 +819,12 @@ btrfs-game-compressor --status --pending
 # what a batch run would do, changing nothing
 btrfs-game-compressor --dry-run
 
+# deduplicate all discovered Btrfs Steam libraries and measure the result
+btrfs-game-compressor --dedupe
+
+# refresh measured savings without recompressing any files
+btrfs-game-compressor --recheck
+
 # register a library outside Steam's libraryfolders.vdf
 btrfs-game-compressor --library /mnt/games
 
@@ -448,7 +834,7 @@ btrfs-game-compressor --status --no-color | column -t
 # JSON for scripts
 btrfs-game-compressor --status --json
 
-# how much space has been reclaimed so far
+# ZSTD compression savings recorded so far
 btrfs-game-compressor --stats
 
 # every recorded compression, newest first
@@ -470,12 +856,18 @@ btrfs-game-compressor --notify
 | `-V, --version` | version |
 | `-s, --status` | non-interactive report, then exit |
 | `-n, --dry-run` | list pending work, change nothing |
+| `--dedupe` | deduplicate Btrfs Steam libraries and report measured usage before and after |
+| `--recheck` | refresh current game size and savings measurements without recompressing |
+| `--assets GAME` | preview supported asset changes |
+| `--apply-assets GAME` | apply beta optimization to supported images, simple DDS, and WAV audio; keeps a local restore copy; needs a terminal |
+| `--restore-assets GAME` | restore original assets |
+| `--finalize-assets GAME` | discard restore copy after testing; needs a terminal |
 | `-l, --library DIR` | add a library, then exit |
 | `--pending` | restrict `--status` / `--dry-run` to pending games |
 | `--no-color` | disable ANSI color (also honours `$NO_COLOR`) |
 | `--json` | with `--status`, `--benchmark` or `--ratios`, emit machine-readable output |
-| `--history` | print the recorded compression history and exit |
-| `--stats` | print the total space reclaimed and exit |
+| `--history` | print separate compression and deduplication measurements |
+| `--stats` | print ZSTD savings and latest per-library dedupe estimates |
 | `--benchmark` | measure real per-game savings from recorded data |
 | `--ratios [GAME]` | look up expected savings in the community table |
 | `--export-ratios` | emit your measured ratios as JSON to contribute |
@@ -491,13 +883,14 @@ btrfs-game-compressor --notify
 
 ## How it decides what to compress
 
-Each game gets one of five states:
+Each game gets one of six states:
 
-- **COMPRESSED** — defragmented, and nothing in its directory has been modified since.
+- **COMPACTED** — compressed and successfully deduplicated, with no later file changes.
+- **COMPRESSED** — compression is current, but deduplication is pending. Batch mode runs dedupe only.
 - **UPDATED** — previously compressed, but files changed afterwards (a patch, a save, a
   Proton update). Worth re-compressing.
 - **UNCOMPRESSED** — never compressed by this tool.
-- **LOW YIELD** — updated, but not expected to be worth the time. See below.
+- **LOW YIELD** — updated, but not expected to be worth the time. Pending dedupe still runs in batch mode.
 - **RUNNING** — a live process has a file open inside the game's install directory, so
   it is in use. Held back, and counted separately in `--status`.
 
@@ -560,20 +953,25 @@ MonsterHunterRise      LOW YIELD   34.4G  ~340M expected
 Dispatch               LOW YIELD   14.2G  ~120M expected
 ```
 
-Both thresholds are plain config files, and setting either to `0` turns off that half of
-the test:
+There is exactly one gate, and it is a **percentage**, because the cost scales with
+the game: compressing rewrites every byte through zstd, so both the time and the SSD
+wear grow with size. A fixed MiB number would be huge for a 1 GB game and trivial for a
+40 GB one, so it is deliberately not used here.
 
 ```sh
-# a game must have saved at least this much of its size last time
+# a game must have saved at least this percentage of its size last time
 echo 5 > ~/.config/btrfs-game-compressor/min_gain_pct
-# ...and at least this many MiB in absolute terms
-echo 32 > ~/.config/btrfs-game-compressor/min_gain_mib
 ```
 
-Raise them to be more selective, lower them to compress more eagerly. A game with no
+Lower it to compress more eagerly; `0` disables the gate entirely. A game with no
 history is never held back — it has to be compressed once before anything can be
 predicted about it, and that first pass is where the measurement comes from. You can
 always compress a `LOW YIELD` game on demand: highlight it in the TUI and press `c`.
+
+**Deleting is judged differently.** Removing unused data (`--slim`, `--prune-assets`)
+writes almost nothing, so it is worth doing even for a low percentage of a huge game.
+It is gated by a small absolute floor instead, `min_prune_mib` (default 1): a 1 GB
+saving on a 100 GB game is a prune, not a rewrite, and it is taken.
 
 ### Empty installs are ignored
 
@@ -624,12 +1022,11 @@ echo 6 > ~/.config/btrfs-game-compressor/compress_level   # 1-15, or 'auto'
 sample compresses to 49.1% at level 1 versus 46.2% at level 3 — so mirroring a `zstd:1`
 mount costs about **6% more disk**. The gain from a higher level is very uneven:
 data-heavy games like Factorio gain ~11%, while asset-heavy ones like Hades gain almost
-nothing at any level, because their content is already compressed. If you chose level 1
-to keep decompression cheap on battery, mirroring it is the right call; if you are
-chasing space, pin a higher level.
+nothing at any level, because their content is already compressed. Mirroring level 1
+keeps write and recompression costs lower; if you are chasing space, try a higher level.
 
-Removable media (a Deck's btrfs SD card) is detected and reported, since that is where
-both the space and the load-time benefit matter most.
+Removable media (a Deck's Btrfs SD card) is detected and reported, since its
+storage and CPU trade-offs may differ from an internal drive.
 
 ## The game list and ratio table
 
@@ -930,13 +1327,18 @@ you can read. See [`ratios/README.md`](ratios/README.md) for the format and rule
 | `~/.config/btrfs-game-compressor/custom_libraries.txt` | extra library roots, one per line |
 | `~/.config/btrfs-game-compressor/throttle.conf` | `0` = full speed, `1` = `nice`/`ionice` eco mode |
 | `~/.config/btrfs-game-compressor/min_size_mib` | skip installs under this many MiB; `0` disables |
-| `~/.config/btrfs-game-compressor/min_gain_pct` | hold back games that saved under this `%` last time; `0` disables |
-| `~/.config/btrfs-game-compressor/min_gain_mib` | hold back games saving under this many MiB; `0` disables |
+| `~/.config/btrfs-game-compressor/min_gain_pct` | hold back **rewrites** (compression) under this `%` last time; `0` disables |
+| `~/.config/btrfs-game-compressor/min_prune_mib` | minimum saving for a **delete-only** prune; `0` disables |
+| `~/.config/btrfs-game-compressor/keep_languages` | languages `--slim` keeps (codes or names) |
 | `~/.config/btrfs-game-compressor/compress_level` | zstd level `1`-`15`, or `auto` to mirror the mount |
+| `~/.config/btrfs-game-compressor/visual_target` | beta asset profile: native, 360p, 720p, 1080p, 1440p or 4K |
 | `~/.config/btrfs-game-compressor/ratios_hint.json` | imported community table, used as a fallback hint only |
 | `~/.config/btrfs-game-compressor/auto_update` | `1` (default) checks for a newer release once a day; `0` disables |
 | `~/.local/state/btrfs-game-compressor/compressed_games.db` | what was compressed, when, and how much it saved |
 | `~/.local/state/btrfs-game-compressor/compressed_games.db.bak` | the previous state file, kept before each rewrite |
+| `~/.local/state/btrfs-game-compressor/dedupe_physical_history.db` | append-only before/after dedupe measurements, separate from ZSTD savings |
+| `~/.local/state/btrfs-game-compressor/dedupe_completed.db` | successful dedupe timestamps used to decide whether a game is compacted |
+| `~/.local/state/btrfs-game-compressor/dedupe/*.db.lock` | per-library locks serializing deduplication |
 | `~/.local/state/btrfs-game-compressor/last_update_check` | timestamp of the last automatic update check |
 
 Installed with the one-line installer, the tool, manpage and ratio table live under
@@ -957,7 +1359,7 @@ so a bad write can never lose your history. If something ever does go wrong,
 `cp compressed_games.db.bak compressed_games.db` restores it.
 
 `--notify` requires the optional `notify-send` command from libnotify. It reports only
-`UPDATED` and `UNCOMPRESSED` games and never starts compression.
+`COMPRESSED`, `UPDATED` and `UNCOMPRESSED` games that need work; it never starts compression.
 
 ## Eco mode
 
@@ -972,15 +1374,17 @@ compression, so new extents would inherit none. Add `compress=zstd` to the mount
 `/etc/fstab` and remount, or `sudo mount -o remount,compress=zstd /mnt/games`. The tool
 still defragments, but the result would not stay compressed without it.
 
-**Savings say `n/a`.** `compsize` is not installed. Install it with the package command
-for your distro in [Requirements](#requirements); until then, games are still remembered
-as compressed, they just have no figure attached.
+**Savings say `n/a`.** The native backend could not read privileged extent metadata.
+Authenticate through the interactive prompt, or inspect `sudo bgc-native measure
+/path/to/game`. Compression history is retained even when measurement is unavailable.
 
 **`--status` lists games I do not have.** Those are empty download stubs; they are
 filtered out by `min_size_mib` (default 1 MiB). If you want to see them, lower it.
 
-**A game is `LOW YIELD` but I want it compressed.** Raise or zero `min_gain_pct` /
-`min_gain_mib` in [Files](#files), or highlight the game in the TUI and press `c`.
+**A game is `LOW YIELD` but I want it compressed.** Lower or zero `min_gain_pct` in
+[Files](#files), or highlight the game in the TUI and press `c`. Note this rewrites
+the whole game, which costs SSD endurance, so it is gated on the ratio rather than an
+absolute size.
 
 **It did nothing on my filesystem.** Check the two `findmnt` commands in [Is this for
 me?](#is-this-for-me). On `ext4`, `xfs` or `ntfs`, Btrfs compression does not apply.
@@ -1005,7 +1409,7 @@ succeeds.
 - **Expect a full disk read+write per game.** On a mechanical drive this is slow; on
   NVMe it is minutes for a whole library. Interrupting with `Ctrl+C` is safe — the game
   stays marked pending and is retried next time.
-- **Snapshots share extents.** Savings measured by `compsize` are disk usage, which is
+- **Snapshots share extents.** Native compressed-size measurements report referenced extent storage, which is
   what you actually get, but a snapshot taken before compressing will keep the old,
   uncompressed extents alive.
 - **The self-update checksum is fetched from the same release.** It protects against a

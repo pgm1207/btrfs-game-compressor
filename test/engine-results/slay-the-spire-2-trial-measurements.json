@@ -1,0 +1,16 @@
+{
+  "game": "/mnt/storage/Games/SteamLibrary/steamapps/common/Slay the Spire 2",
+  "original_pack_logical": 1901047880,
+  "original_install_logical": 2096907965,
+  "before_install_extents": [1401338272, 2099852022, 2097296118],
+  "before_pack_extents": [1266212864, 1903607808, 1901051904],
+  "candidate_sha256": "7eee8da10631e60b42f24db28a4b4ec9afd6f8e75cf791def34283e7138f1fc1",
+  "candidate_logical": 874440584,
+  "candidate_auto_compressed_extents": [785092608, 874442752, 874442752],
+  "before_final_dedupe_extents": [849865092, 1070949110, 1070686966],
+  "current_install_logical": 1070300669,
+  "final_install_extents": [845035908, 1062429430, 1070686966],
+  "final_pack_extents": [760881152, 872214528, 874442752],
+  "dedupe_referenced_disk_delta": 4829184,
+  "installed_sha256": "7eee8da10631e60b42f24db28a4b4ec9afd6f8e75cf791def34283e7138f1fc1"
+}

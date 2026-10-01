@@ -1,0 +1,42 @@
+[
+  {
+    "file": "VO.fsb",
+    "profile": "balanced",
+    "seconds": 744.6868132239997,
+    "returncode": 0,
+    "result": "FMOD|687106752|680858192|2695|16902|EXPORTED",
+    "diagnostics": "Experimental lossy FMOD export; source stays unchanged. In-game playback/loop testing is required before replacement.",
+    "audits": [
+      {
+        "path": "/home/pgm1207/.local/share/Steam/steamapps/common/Hades/Content/Audio/FMOD/Build/Desktop/VO.fsb",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|892032|23.426712|0.025857|5"
+      },
+      {
+        "path": "/home/pgm1207/Documents/Scripts/btrfs-game-compressor/native/target/hades-fmod-large-1790844155357175040/balanced-VO.fsb",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|891904|23.422712|0.025509|5"
+      }
+    ]
+  },
+  {
+    "file": "Music.bank",
+    "profile": "conservative",
+    "seconds": 303.80142829800025,
+    "returncode": 0,
+    "result": "FMOD|266552576|265826592|11|92|EXPORTED",
+    "diagnostics": "Experimental lossy FMOD export; source stays unchanged. In-game playback/loop testing is required before replacement.",
+    "audits": [
+      {
+        "path": "/home/pgm1207/.local/share/Steam/steamapps/common/Hades/Content/Audio/FMOD/Build/Desktop/Music.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|1767808|40.086349|0.085382|5"
+      },
+      {
+        "path": "/home/pgm1207/Documents/Scripts/btrfs-game-compressor/native/target/hades-fmod-large-1790844155357175040/conservative-Music.bank",
+        "returncode": 0,
+        "result": "FMOD_AUDIT|8|1767808|40.086349|0.085596|5"
+      }
+    ]
+  }
+]

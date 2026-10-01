@@ -1,0 +1,121 @@
+[
+  {
+    "game": "Brotato",
+    "file": "Brotato.pck",
+    "result": "GODOT_DEDUP|147912168|147343610|7416|466|0.3859|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Source unchanged. Equal resource bytes verified; logical savings only. Exported PCK still needs physical measurement and game loading validation."
+  },
+  {
+    "game": "Cassette Beasts",
+    "file": "CassetteBeasts.pck",
+    "result": "GODOT_DEDUP|1028929120|1021672744|27628|235|0.7102|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Source unchanged. Equal resource bytes verified; logical savings only. Exported PCK still needs physical measurement and game loading validation."
+  },
+  {
+    "game": "Cassette Beasts",
+    "file": "WorkshopUtility.pck",
+    "result": "GODOT_DEDUP|974272|974272|14|0|0.0000|NO_GAIN",
+    "returncode": 0,
+    "diagnostic": "Source unchanged. Equal resource bytes verified; logical savings only. Exported PCK still needs physical measurement and game loading validation."
+  },
+  {
+    "game": "Click the Button",
+    "file": "Click the Button.pck",
+    "result": "",
+    "returncode": 1,
+    "diagnostic": "bgc-native: unsupported Godot PCK version"
+  },
+  {
+    "game": "Confidential Killings",
+    "file": "Confidential Killings.pck",
+    "result": "GODOT_DEDUP|371494880|367685561|5889|81|1.0360|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Source unchanged. Equal resource bytes verified; logical savings only. Exported PCK still needs physical measurement and game loading validation."
+  },
+  {
+    "game": "Dome Keeper",
+    "file": "domekeeper.pck",
+    "result": "GODOT_DEDUP|1249758944|1249551262|12617|71|0.0166|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Source unchanged. Equal resource bytes verified; logical savings only. Exported PCK still needs physical measurement and game loading validation."
+  },
+  {
+    "game": "Dungeons & Degenerate Gamblers",
+    "file": "DnDG_linux.pck",
+    "result": "GODOT_DEDUP|621545696|621122710|9301|327|0.0681|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Source unchanged. Equal resource bytes verified; logical savings only. Exported PCK still needs physical measurement and game loading validation."
+  },
+  {
+    "game": "FEED THE QUEEN",
+    "file": "feedthequeen.pck",
+    "result": "GODOT_DEDUP|101220764|101220764|1145|0|0.0000|NO_GAIN",
+    "returncode": 0,
+    "diagnostic": "Source unchanged. Equal resource bytes verified; logical savings only. Exported PCK still needs physical measurement and game loading validation."
+  },
+  {
+    "game": "Gamblers Table",
+    "file": "gamblers-table.pck",
+    "result": "",
+    "returncode": 1,
+    "diagnostic": "bgc-native: encrypted/sparse/unknown Godot PCK layout unsupported"
+  },
+  {
+    "game": "IdolsOfAsh",
+    "file": "idols_of_ash.pck",
+    "result": "GODOT_DEDUP|82096444|81740396|3037|37|0.4356|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Source unchanged. Equal resource bytes verified; logical savings only. Exported PCK still needs physical measurement and game loading validation."
+  },
+  {
+    "game": "Lost Wiki Kozlovka",
+    "file": "Lost Wiki Kozlovka.pck",
+    "result": "GODOT_DEDUP|46412992|46290878|633|2|0.2638|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Source unchanged. Equal resource bytes verified; logical savings only. Exported PCK still needs physical measurement and game loading validation."
+  },
+  {
+    "game": "MOLDRISE",
+    "file": "MOLDRISE.pck",
+    "result": "",
+    "returncode": 1,
+    "diagnostic": "bgc-native: not a standalone Godot PCK"
+  },
+  {
+    "game": "Pathogenic",
+    "file": "pathogenic.pck",
+    "result": "",
+    "returncode": 1,
+    "diagnostic": "bgc-native: unsupported Godot PCK version"
+  },
+  {
+    "game": "Project P.I.T.T",
+    "file": "projectpitt.pck",
+    "result": "",
+    "returncode": 1,
+    "diagnostic": "bgc-native: unsupported Godot PCK version"
+  },
+  {
+    "game": "Skeleseller",
+    "file": "skeleseller.pck",
+    "result": "GODOT_DEDUP|114618620|114603170|2817|1051|0.0135|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Source unchanged. Equal resource bytes verified; logical savings only. Exported PCK still needs physical measurement and game loading validation."
+  },
+  {
+    "game": "Slay the Spire 2",
+    "file": "SlayTheSpire2.pck",
+    "result": "GODOT_DEDUP|1901047880|1899623062|12327|127|0.0750|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Source unchanged. Equal resource bytes verified; logical savings only. Exported PCK still needs physical measurement and game loading validation."
+  },
+  {
+    "game": "Until Then",
+    "file": "UntilThen.pck",
+    "result": "",
+    "returncode": 1,
+    "diagnostic": "bgc-native: Godot PCK file-count limit exceeded"
+  }
+]

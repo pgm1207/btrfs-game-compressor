@@ -8,25 +8,47 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Verify tag and build reproducible archive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify tag and build static release
         run: |
           version=$(sed -n 's/^VERSION="\(.*\)"/\1/p' btrfs-game-compressor)
           test "$GITHUB_REF_NAME" = "v$version"
+          cargo test --offline --locked --manifest-path native/Cargo.toml
           make package
-          cd dist
-          sha256sum "btrfs-game-compressor-$version.tar.gz" > SHA256SUMS
-
+          file bgc-native
+          if readelf -l bgc-native | grep -q INTERP; then
+            echo 'backend unexpectedly requires a dynamic loader'
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: dist/*.tar.gz
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=${GITHUB_REF_NAME#v}
-          gh release create "$GITHUB_REF_NAME" \
-            "dist/btrfs-game-compressor-$version.tar.gz" \
-            dist/SHA256SUMS \
-            --verify-tag --generate-notes
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" *.tar.gz SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

@@ -1,0 +1,163 @@
+[
+  {
+    "game": "Dome Keeper",
+    "path": "domekeeper.pck",
+    "returncode": 0,
+    "stdout": "GODOT_PCK|2|4.3.1|1249758944|12617|1248313426|0\nPCK_TYPE|bin|1|312176\nPCK_TYPE|binary|1|74750\nPCK_TYPE|cfg|2|39560\nPCK_TYPE|csv|1|159814\nPCK_TYPE|ctex|2511|35694526\nPCK_TYPE|fontdata|28|44698880\nPCK_TYPE|gdc|871|3212212\nPCK_TYPE|gdextension|2|2693\nPCK_TYPE|gdshader|73|109915\nPCK_TYPE|image|2|7417\nPCK_TYPE|import|4152|775111\nPCK_TYPE|json|4|3140\nPCK_TYPE|mesh|23|1526028\nPCK_TYPE|mp3str|16|3292796\nPCK_TYPE|oggvorbisstr|151|372021926\nPCK_TYPE|ogv|18|27994232\nPCK_TYPE|png|2|2378565\nPCK_TYPE|remap|2095|187436\nPCK_TYPE|res|428|3708681\nPCK_TYPE|sample|1384|742674164\nPCK_TYPE|scn|797|4177685\nPCK_TYPE|translation|37|5105665\nPCK_TYPE|tres|3|1039\nPCK_TYPE|tscn|7|2581\nPCK_TYPE|txt|4|12820\nPCK_TYPE|yaml|4|139614\nPCK_TEXTURE|raw-image|17|2|535944|1024|1024|0\nPCK_TEXTURE|webp|0|43|4934640|1024|1024|1\nPCK_TEXTURE|webp|1|3|560|256|256|0\nPCK_TEXTURE|webp|4|76|20871004|5000|5616|1\nPCK_TEXTURE|webp|5|2387|9352378|10038|5016|0\n",
+    "stderr": "Read-only Godot inventory: resource headers only; no checksum verification, pruning decisions, or guaranteed savings. PCK entries cannot be arbitrarily switched to Zstd.\n"
+  },
+  {
+    "game": "Slay the Spire 2",
+    "path": "SlayTheSpire2.pck",
+    "returncode": 0,
+    "stdout": "GODOT_PCK|3|4.5.1|1901047880|12327|1899716018|0\nPCK_TYPE|bank|12|316192166\nPCK_TYPE|bin|1|708785\nPCK_TYPE|binary|1|22434\nPCK_TYPE|cfg|2|13078\nPCK_TYPE|ctex|3485|1222719762\nPCK_TYPE|dat|1|4784480\nPCK_TYPE|dpitex|1|634\nPCK_TYPE|fontdata|17|308762339\nPCK_TYPE|gdc|51|98295\nPCK_TYPE|gdextension|3|7435\nPCK_TYPE|gdshader|90|98489\nPCK_TYPE|gdshaderinc|7|1920\nPCK_TYPE|ico|1|101669\nPCK_TYPE|image|7|35841\nPCK_TYPE|import|3895|849915\nPCK_TYPE|json|648|9418101\nPCK_TYPE|md|124|810947\nPCK_TYPE|mp3|50|2214206\nPCK_TYPE|mp3str|50|2231050\nPCK_TYPE|png|1|6888\nPCK_TYPE|remap|51|3437\nPCK_TYPE|sample|2|320798\nPCK_TYPE|scn|1|413\nPCK_TYPE|spatlas|169|317564\nPCK_TYPE|spskel|163|20621744\nPCK_TYPE|tpsheet|14|758923\nPCK_TYPE|tres|2500|1149082\nPCK_TYPE|tscn|978|6987569\nPCK_TYPE|wav|2|478054\nPCK_TEXTURE|raw-image|15|1|2097204|512|512|0\nPCK_TEXTURE|raw-image|17|23|8974404|3440|1616|0\nPCK_TEXTURE|raw-image|19|516|210976528|5768|4884|0\nPCK_TEXTURE|raw-image|22|683|701695116|5844|4072|0\nPCK_TEXTURE|webp|0|21|77558|512|256|0\nPCK_TEXTURE|webp|1|2|2972|256|128|0\nPCK_TEXTURE|webp|4|707|177759900|1024|1024|0\nPCK_TEXTURE|webp|5|1532|121136080|5964|3105|11\n",
+    "stderr": "Read-only Godot inventory: resource headers only; no checksum verification, pruning decisions, or guaranteed savings. PCK entries cannot be arbitrarily switched to Zstd.\n"
+  },
+  {
+    "game": "MOLDRISE",
+    "path": "MOLDRISE.pck",
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "bgc-native: not a standalone Godot PCK\n"
+  },
+  {
+    "game": "Brotato",
+    "path": "Brotato.pck",
+    "returncode": 0,
+    "stdout": "GODOT_PCK|1|3.7.0|147912168|7416|147220676|0\nPCK_TYPE|binary|1|119828\nPCK_TYPE|csv|1|291990\nPCK_TYPE|gd|31|75743\nPCK_TYPE|gdc|445|1774104\nPCK_TYPE|gdshader|5|7139\nPCK_TYPE|icns|1|374868\nPCK_TYPE|ico|1|120865\nPCK_TYPE|import|1564|1064583\nPCK_TYPE|mp3str|35|82200673\nPCK_TYPE|oggstr|2|47046\nPCK_TYPE|otf|4|23629812\nPCK_TYPE|png|2|101119\nPCK_TYPE|remap|445|26809\nPCK_TYPE|res|97|40550\nPCK_TYPE|sample|168|18171860\nPCK_TYPE|stex|1261|14077548\nPCK_TYPE|translation|13|962536\nPCK_TYPE|tres|2985|2024386\nPCK_TYPE|tscn|354|1996913\nPCK_TYPE|ttf|1|112304\n",
+    "stderr": "Read-only Godot inventory: resource headers only; no checksum verification, pruning decisions, or guaranteed savings. PCK entries cannot be arbitrarily switched to Zstd.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk0-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|483442759|482450794|232800|1|Oodle,Zlib\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk1-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|12098166|12096585|352|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk10-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|21758471|21404522|72768|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk11-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|1658995004|1658964015|9184|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk12-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|101687783|101368906|67776|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk13-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|1433681383|1433650314|10496|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk14-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|24125319|23872346|52016|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk15-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|1354407607|1354382474|8224|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk16-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|156504855|155902826|125744|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk17-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|4554398167|4554345610|23328|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk18-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|216959|210194|1776|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk2-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|17739943|17496922|49888|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk3-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|1172996167|1172974730|6896|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk4-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|167663783|167267162|83808|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk5-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|916370567|916354186|6096|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk6-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|30697799|30372698|66064|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk7-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|911834359|911811722|6992|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk8-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|132494935|132131770|75168|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  },
+  {
+    "game": "Dispatch",
+    "path": "Dispatch/Content/Paks/pakchunk9-WindowsNoEditor.pak",
+    "returncode": 0,
+    "stdout": "UNREAL_PAK|11|724389792|724375331|4960|1|Oodle\n",
+    "stderr": "Read-only Unreal footer: codec names are declarations, not measured per-entry usage. Index hashes/signatures/encryption and runtime codecs must be validated before any rewrite. IoStore/RE Engine archives are not supported here.\n"
+  }
+]

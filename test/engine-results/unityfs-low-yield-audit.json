@@ -1,0 +1,86 @@
+[
+  {
+    "game": "Phoenix Wright Ace Attorney Trilogy",
+    "path": "PWAAT_Data/StreamingAssets/GS1/moviescriptable/film01_confront.unity3d",
+    "result": "UNITYFS|62713362|62526603|943854632|7202|7062|2|0.2987|41.551466|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+  },
+  {
+    "game": "Phoenix Wright Ace Attorney Trilogy",
+    "path": "PWAAT_Data/StreamingAssets/GS1/moviescriptable/film02_confront.unity3d",
+    "result": "UNITYFS|55094872|55094666|55493752|424|33|2|0.0004|0.203950|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+  },
+  {
+    "game": "Valheim",
+    "path": "valheim_Data/StreamingAssets/SoftRef/Bundles/d59cfac",
+    "result": "UNITYFS|106423480|106423480|123679207|944|0|3|0.0000|3.510344|NO_GAIN",
+    "returncode": 0,
+    "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+  },
+  {
+    "game": "Valheim",
+    "path": "valheim_Data/StreamingAssets/SoftRef/Bundles/8d5dbad8",
+    "result": "UNITYFS|58701756|58701756|72544052|554|0|3|0.0000|2.123135|NO_GAIN",
+    "returncode": 0,
+    "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+  },
+  {
+    "game": "Valheim",
+    "path": "valheim_Data/StreamingAssets/SoftRef/Bundles/b8689a71",
+    "result": "UNITYFS|29474321|29474321|49171108|376|0|3|0.0000|1.164204|NO_GAIN",
+    "returncode": 0,
+    "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+  },
+  {
+    "game": "Valheim",
+    "path": "valheim_Data/StreamingAssets/SoftRef/Bundles/3e896e5d",
+    "result": "UNITYFS|21744454|21744454|24163320|185|0|3|0.0000|0.253289|NO_GAIN",
+    "returncode": 0,
+    "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+  },
+  {
+    "game": "Valheim",
+    "path": "valheim_Data/StreamingAssets/SoftRef/Bundles/4a821ddc",
+    "result": "UNITYFS|14736830|14736830|14738644|113|0|2|0.0000|0.019526|NO_GAIN",
+    "returncode": 0,
+    "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+  },
+  {
+    "game": "Sable",
+    "path": "Sable_Data/data.unity3d",
+    "result": "UNITYFS|232267078|232267071|1257236148|9592|2|11|0.0000|74.804103|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+  },
+  {
+    "game": "Sable",
+    "path": "Sable_Data/StreamingAssets/aa/StandaloneWindows64/duplicateassetisolation_assets_all_da2156d6cc5a2a7e21fdde37c3bc1448.bundle",
+    "result": "UNITYFS|101265172|101265171|857232799|6541|1|2|0.0000|53.534118|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+  },
+  {
+    "game": "Sable",
+    "path": "Sable_Data/StreamingAssets/aa/StandaloneWindows64/defaultlocalgroup_assets_all_7b59c2aec030c9885e0f9b2ec720c790.bundle",
+    "result": "UNITYFS|45881674|45881674|271173624|2069|0|2|0.0000|13.735369|NO_GAIN",
+    "returncode": 0,
+    "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+  },
+  {
+    "game": "Sable",
+    "path": "Sable_Data/StreamingAssets/aa/StandaloneWindows64/locationscenes_scenes_santitownlevelscene_d3f51bd6210a14bdda58b5c2b8fdeaae.bundle",
+    "result": "UNITYFS|38313951|38313950|245683396|1875|1|4|0.0000|16.076253|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+  },
+  {
+    "game": "Sable",
+    "path": "Sable_Data/StreamingAssets/aa/StandaloneWindows64/defaultlocalgroup_scenes_all_10630c40b7288caa52b6952b7892952f.bundle",
+    "result": "UNITYFS|17479966|17479960|159045448|1214|2|5|0.0000|6.030986|LOW_EFFICIENCY",
+    "returncode": 0,
+    "diagnostic": "Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation."
+  }
+]

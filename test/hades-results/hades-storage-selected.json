@@ -1,0 +1,851 @@
+{
+  "rows": [
+    {
+      "file": "720p/AphroditeUpgrade.pkg",
+      "original_physical": 3375104,
+      "candidate_physical": 3342336,
+      "rejected": false
+    },
+    {
+      "file": "720p/AresUpgrade.pkg",
+      "original_physical": 3985408,
+      "candidate_physical": 3895296,
+      "rejected": false
+    },
+    {
+      "file": "720p/ArtemisUpgrade.pkg",
+      "original_physical": 2760704,
+      "candidate_physical": 2715648,
+      "rejected": false
+    },
+    {
+      "file": "720p/Asphodel.pkg",
+      "original_physical": 47575040,
+      "candidate_physical": 81457152,
+      "rejected": true
+    },
+    {
+      "file": "720p/AthenaUpgrade.pkg",
+      "original_physical": 4005888,
+      "candidate_physical": 3973120,
+      "rejected": false
+    },
+    {
+      "file": "720p/BowSplitShot.pkg",
+      "original_physical": 2494464,
+      "candidate_physical": 2441216,
+      "rejected": false
+    },
+    {
+      "file": "720p/BowWeapon.pkg",
+      "original_physical": 2490368,
+      "candidate_physical": 2441216,
+      "rejected": false
+    },
+    {
+      "file": "720p/BowWeaponDash.pkg",
+      "original_physical": 2494464,
+      "candidate_physical": 2441216,
+      "rejected": false
+    },
+    {
+      "file": "720p/Chaos.pkg",
+      "original_physical": 1097728,
+      "candidate_physical": 1064960,
+      "rejected": false
+    },
+    {
+      "file": "720p/Charon.pkg",
+      "original_physical": 8986624,
+      "candidate_physical": 8867840,
+      "rejected": false
+    },
+    {
+      "file": "720p/DeathArea.pkg",
+      "original_physical": 31346688,
+      "candidate_physical": 31031296,
+      "rejected": false
+    },
+    {
+      "file": "720p/DemeterUpgrade.pkg",
+      "original_physical": 7450624,
+      "candidate_physical": 7340032,
+      "rejected": false
+    },
+    {
+      "file": "720p/Dev.pkg",
+      "original_physical": 15638528,
+      "candidate_physical": 15507456,
+      "rejected": false
+    },
+    {
+      "file": "720p/DionysusUpgrade.pkg",
+      "original_physical": 6053888,
+      "candidate_physical": 6041600,
+      "rejected": false
+    },
+    {
+      "file": "720p/DusaSummon.pkg",
+      "original_physical": 217088,
+      "candidate_physical": 212992,
+      "rejected": false
+    },
+    {
+      "file": "720p/Elysium.pkg",
+      "original_physical": 43044864,
+      "candidate_physical": 42565632,
+      "rejected": false
+    },
+    {
+      "file": "720p/Erebus.pkg",
+      "original_physical": 2232320,
+      "candidate_physical": 2183168,
+      "rejected": false
+    },
+    {
+      "file": "720p/Fx.pkg",
+      "original_physical": 121167872,
+      "candidate_physical": 119488512,
+      "rejected": false
+    },
+    {
+      "file": "720p/GUI.pkg",
+      "original_physical": 81043456,
+      "candidate_physical": 80379904,
+      "rejected": false
+    },
+    {
+      "file": "720p/GUI_Mouse.pkg",
+      "original_physical": 208896,
+      "candidate_physical": 208896,
+      "rejected": true
+    },
+    {
+      "file": "720p/HadesUpgrade.pkg",
+      "original_physical": 1396736,
+      "candidate_physical": 1380352,
+      "rejected": false
+    },
+    {
+      "file": "720p/Launch.pkg",
+      "original_physical": 1277952,
+      "candidate_physical": 1257472,
+      "rejected": false
+    },
+    {
+      "file": "720p/NPC_Achilles_01_Assist.pkg",
+      "original_physical": 32768,
+      "candidate_physical": 32768,
+      "rejected": true
+    },
+    {
+      "file": "720p/NPC_Patroclus_01_Assist.pkg",
+      "original_physical": 32768,
+      "candidate_physical": 32768,
+      "rejected": true
+    },
+    {
+      "file": "720p/NPC_Sisyphus_01_Assist.pkg",
+      "original_physical": 208896,
+      "candidate_physical": 204800,
+      "rejected": false
+    },
+    {
+      "file": "720p/PoseidonUpgrade.pkg",
+      "original_physical": 4833280,
+      "candidate_physical": 4775936,
+      "rejected": false
+    },
+    {
+      "file": "720p/RoomManager.pkg",
+      "original_physical": 26177536,
+      "candidate_physical": 26001408,
+      "rejected": false
+    },
+    {
+      "file": "720p/ShieldThrow.pkg",
+      "original_physical": 2498560,
+      "candidate_physical": 2441216,
+      "rejected": false
+    },
+    {
+      "file": "720p/ShieldWeapon.pkg",
+      "original_physical": 2494464,
+      "candidate_physical": 2441216,
+      "rejected": false
+    },
+    {
+      "file": "720p/ShieldWeaponDash.pkg",
+      "original_physical": 2494464,
+      "candidate_physical": 2441216,
+      "rejected": false
+    },
+    {
+      "file": "720p/ShieldWeaponRush.pkg",
+      "original_physical": 2494464,
+      "candidate_physical": 2441216,
+      "rejected": false
+    },
+    {
+      "file": "720p/SpearWeapon.pkg",
+      "original_physical": 2498560,
+      "candidate_physical": 2441216,
+      "rejected": false
+    },
+    {
+      "file": "720p/SpearWeaponDash.pkg",
+      "original_physical": 2494464,
+      "candidate_physical": 2441216,
+      "rejected": false
+    },
+    {
+      "file": "720p/SpearWeaponSpin.pkg",
+      "original_physical": 2494464,
+      "candidate_physical": 2441216,
+      "rejected": false
+    },
+    {
+      "file": "720p/SpearWeaponThrow.pkg",
+      "original_physical": 2494464,
+      "candidate_physical": 2441216,
+      "rejected": false
+    },
+    {
+      "file": "720p/Styx.pkg",
+      "original_physical": 37539840,
+      "candidate_physical": 37179392,
+      "rejected": false
+    },
+    {
+      "file": "720p/Surface.pkg",
+      "original_physical": 36466688,
+      "candidate_physical": 36028416,
+      "rejected": false
+    },
+    {
+      "file": "720p/SwordParry.pkg",
+      "original_physical": 3465216,
+      "candidate_physical": 3403776,
+      "rejected": false
+    },
+    {
+      "file": "720p/SwordWeapon.pkg",
+      "original_physical": 3055616,
+      "candidate_physical": 3002368,
+      "rejected": false
+    },
+    {
+      "file": "720p/Tartarus.pkg",
+      "original_physical": 36966400,
+      "candidate_physical": 36421632,
+      "rejected": false
+    },
+    {
+      "file": "720p/UIScripts.pkg",
+      "original_physical": 94208,
+      "candidate_physical": 90112,
+      "rejected": false
+    },
+    {
+      "file": "720p/ZeusUpgrade.pkg",
+      "original_physical": 1290240,
+      "candidate_physical": 1265664,
+      "rejected": false
+    },
+    {
+      "file": "720p/_AsphodelTemplateRoom.pkg",
+      "original_physical": 192512,
+      "candidate_physical": 192512,
+      "rejected": true
+    },
+    {
+      "file": "720p/_ElysiumTemplateRoom.pkg",
+      "original_physical": 2715648,
+      "candidate_physical": 2711552,
+      "rejected": false
+    },
+    {
+      "file": "720p/_StyxTemplateRoom.pkg",
+      "original_physical": 4993024,
+      "candidate_physical": 4980736,
+      "rejected": false
+    },
+    {
+      "file": "720p/_TartarusTemplateRoom.pkg",
+      "original_physical": 233472,
+      "candidate_physical": 229376,
+      "rejected": false
+    },
+    {
+      "file": "AphroditeUpgrade.pkg",
+      "original_physical": 6447104,
+      "candidate_physical": 6393856,
+      "rejected": false
+    },
+    {
+      "file": "AresUpgrade.pkg",
+      "original_physical": 8290304,
+      "candidate_physical": 8130560,
+      "rejected": false
+    },
+    {
+      "file": "ArtemisUpgrade.pkg",
+      "original_physical": 5775360,
+      "candidate_physical": 5640192,
+      "rejected": false
+    },
+    {
+      "file": "Asphodel.pkg",
+      "original_physical": 81989632,
+      "candidate_physical": 80990208,
+      "rejected": false
+    },
+    {
+      "file": "AthenaUpgrade.pkg",
+      "original_physical": 7823360,
+      "candidate_physical": 7749632,
+      "rejected": false
+    },
+    {
+      "file": "BC3/AphroditeUpgrade.pkg",
+      "original_physical": 2699264,
+      "candidate_physical": 2658304,
+      "rejected": false
+    },
+    {
+      "file": "BC3/AresUpgrade.pkg",
+      "original_physical": 3448832,
+      "candidate_physical": 3354624,
+      "rejected": false
+    },
+    {
+      "file": "BC3/ArtemisUpgrade.pkg",
+      "original_physical": 2465792,
+      "candidate_physical": 2387968,
+      "rejected": false
+    },
+    {
+      "file": "BC3/Asphodel.pkg",
+      "original_physical": 32059392,
+      "candidate_physical": 31076352,
+      "rejected": false
+    },
+    {
+      "file": "BC3/AthenaUpgrade.pkg",
+      "original_physical": 3256320,
+      "candidate_physical": 3194880,
+      "rejected": false
+    },
+    {
+      "file": "BC3/BowSplitShot.pkg",
+      "original_physical": 2056192,
+      "candidate_physical": 1982464,
+      "rejected": false
+    },
+    {
+      "file": "BC3/BowWeapon.pkg",
+      "original_physical": 2056192,
+      "candidate_physical": 1982464,
+      "rejected": false
+    },
+    {
+      "file": "BC3/BowWeaponDash.pkg",
+      "original_physical": 2052096,
+      "candidate_physical": 1982464,
+      "rejected": false
+    },
+    {
+      "file": "BC3/Chaos.pkg",
+      "original_physical": 794624,
+      "candidate_physical": 757760,
+      "rejected": false
+    },
+    {
+      "file": "BC3/Charon.pkg",
+      "original_physical": 7262208,
+      "candidate_physical": 7131136,
+      "rejected": false
+    },
+    {
+      "file": "BC3/DeathArea.pkg",
+      "original_physical": 19243008,
+      "candidate_physical": 18694144,
+      "rejected": false
+    },
+    {
+      "file": "BC3/DemeterUpgrade.pkg",
+      "original_physical": 6230016,
+      "candidate_physical": 6086656,
+      "rejected": false
+    },
+    {
+      "file": "BC3/Dev.pkg",
+      "original_physical": 9183232,
+      "candidate_physical": 8912896,
+      "rejected": false
+    },
+    {
+      "file": "BC3/DionysusUpgrade.pkg",
+      "original_physical": 4435968,
+      "candidate_physical": 4345856,
+      "rejected": false
+    },
+    {
+      "file": "BC3/DusaSummon.pkg",
+      "original_physical": 167936,
+      "candidate_physical": 159744,
+      "rejected": false
+    },
+    {
+      "file": "BC3/Elysium.pkg",
+      "original_physical": 28340224,
+      "candidate_physical": 27566080,
+      "rejected": false
+    },
+    {
+      "file": "BC3/Erebus.pkg",
+      "original_physical": 1576960,
+      "candidate_physical": 1552384,
+      "rejected": false
+    },
+    {
+      "file": "BC3/Fx.pkg",
+      "original_physical": 98627584,
+      "candidate_physical": 95891456,
+      "rejected": false
+    },
+    {
+      "file": "BC3/GUI.pkg",
+      "original_physical": 49127424,
+      "candidate_physical": 47902720,
+      "rejected": false
+    },
+    {
+      "file": "BC3/GUI_Mouse.pkg",
+      "original_physical": 114688,
+      "candidate_physical": 110592,
+      "rejected": false
+    },
+    {
+      "file": "BC3/HadesUpgrade.pkg",
+      "original_physical": 1159168,
+      "candidate_physical": 1130496,
+      "rejected": false
+    },
+    {
+      "file": "BC3/Launch.pkg",
+      "original_physical": 618496,
+      "candidate_physical": 593920,
+      "rejected": false
+    },
+    {
+      "file": "BC3/NPC_Achilles_01_Assist.pkg",
+      "original_physical": 20480,
+      "candidate_physical": 20480,
+      "rejected": true
+    },
+    {
+      "file": "BC3/NPC_Patroclus_01_Assist.pkg",
+      "original_physical": 20480,
+      "candidate_physical": 20480,
+      "rejected": true
+    },
+    {
+      "file": "BC3/NPC_Sisyphus_01_Assist.pkg",
+      "original_physical": 102400,
+      "candidate_physical": 98304,
+      "rejected": false
+    },
+    {
+      "file": "BC3/PoseidonUpgrade.pkg",
+      "original_physical": 4202496,
+      "candidate_physical": 4132864,
+      "rejected": false
+    },
+    {
+      "file": "BC3/RoomManager.pkg",
+      "original_physical": 20291584,
+      "candidate_physical": 19890176,
+      "rejected": false
+    },
+    {
+      "file": "BC3/ShieldThrow.pkg",
+      "original_physical": 2056192,
+      "candidate_physical": 1982464,
+      "rejected": false
+    },
+    {
+      "file": "BC3/ShieldWeapon.pkg",
+      "original_physical": 2056192,
+      "candidate_physical": 1982464,
+      "rejected": false
+    },
+    {
+      "file": "BC3/ShieldWeaponDash.pkg",
+      "original_physical": 2052096,
+      "candidate_physical": 1982464,
+      "rejected": false
+    },
+    {
+      "file": "BC3/ShieldWeaponRush.pkg",
+      "original_physical": 2052096,
+      "candidate_physical": 1982464,
+      "rejected": false
+    },
+    {
+      "file": "BC3/SpearWeapon.pkg",
+      "original_physical": 2056192,
+      "candidate_physical": 1982464,
+      "rejected": false
+    },
+    {
+      "file": "BC3/SpearWeaponDash.pkg",
+      "original_physical": 2052096,
+      "candidate_physical": 1982464,
+      "rejected": false
+    },
+    {
+      "file": "BC3/SpearWeaponSpin.pkg",
+      "original_physical": 2052096,
+      "candidate_physical": 1982464,
+      "rejected": false
+    },
+    {
+      "file": "BC3/SpearWeaponThrow.pkg",
+      "original_physical": 2052096,
+      "candidate_physical": 1982464,
+      "rejected": false
+    },
+    {
+      "file": "BC3/Styx.pkg",
+      "original_physical": 27443200,
+      "candidate_physical": 26718208,
+      "rejected": false
+    },
+    {
+      "file": "BC3/Surface.pkg",
+      "original_physical": 24064000,
+      "candidate_physical": 23310336,
+      "rejected": false
+    },
+    {
+      "file": "BC3/SwordParry.pkg",
+      "original_physical": 2867200,
+      "candidate_physical": 2781184,
+      "rejected": false
+    },
+    {
+      "file": "BC3/SwordWeapon.pkg",
+      "original_physical": 2539520,
+      "candidate_physical": 2453504,
+      "rejected": false
+    },
+    {
+      "file": "BC3/Tartarus.pkg",
+      "original_physical": 24989696,
+      "candidate_physical": 24186880,
+      "rejected": false
+    },
+    {
+      "file": "BC3/UIScripts.pkg",
+      "original_physical": 86016,
+      "candidate_physical": 81920,
+      "rejected": false
+    },
+    {
+      "file": "BC3/ZeusUpgrade.pkg",
+      "original_physical": 1089536,
+      "candidate_physical": 1081344,
+      "rejected": false
+    },
+    {
+      "file": "BC3/_AsphodelTemplateRoom.pkg",
+      "original_physical": 126976,
+      "candidate_physical": 122880,
+      "rejected": false
+    },
+    {
+      "file": "BC3/_ElysiumTemplateRoom.pkg",
+      "original_physical": 1605632,
+      "candidate_physical": 1564672,
+      "rejected": false
+    },
+    {
+      "file": "BC3/_StyxTemplateRoom.pkg",
+      "original_physical": 3620864,
+      "candidate_physical": 3526656,
+      "rejected": false
+    },
+    {
+      "file": "BC3/_TartarusTemplateRoom.pkg",
+      "original_physical": 135168,
+      "candidate_physical": 135168,
+      "rejected": true
+    },
+    {
+      "file": "BowSplitShot.pkg",
+      "original_physical": 4829184,
+      "candidate_physical": 4702208,
+      "rejected": false
+    },
+    {
+      "file": "BowWeapon.pkg",
+      "original_physical": 4829184,
+      "candidate_physical": 4702208,
+      "rejected": false
+    },
+    {
+      "file": "BowWeaponDash.pkg",
+      "original_physical": 4829184,
+      "candidate_physical": 4702208,
+      "rejected": false
+    },
+    {
+      "file": "Chaos.pkg",
+      "original_physical": 1798144,
+      "candidate_physical": 1753088,
+      "rejected": false
+    },
+    {
+      "file": "Charon.pkg",
+      "original_physical": 17408000,
+      "candidate_physical": 17137664,
+      "rejected": false
+    },
+    {
+      "file": "DeathArea.pkg",
+      "original_physical": 57950208,
+      "candidate_physical": 57462784,
+      "rejected": false
+    },
+    {
+      "file": "DemeterUpgrade.pkg",
+      "original_physical": 14340096,
+      "candidate_physical": 14094336,
+      "rejected": false
+    },
+    {
+      "file": "Dev.pkg",
+      "original_physical": 28127232,
+      "candidate_physical": 27725824,
+      "rejected": false
+    },
+    {
+      "file": "DionysusUpgrade.pkg",
+      "original_physical": 12357632,
+      "candidate_physical": 12226560,
+      "rejected": false
+    },
+    {
+      "file": "DusaSummon.pkg",
+      "original_physical": 393216,
+      "candidate_physical": 389120,
+      "rejected": false
+    },
+    {
+      "file": "Elysium.pkg",
+      "original_physical": 78204928,
+      "candidate_physical": 77053952,
+      "rejected": false
+    },
+    {
+      "file": "Erebus.pkg",
+      "original_physical": 4358144,
+      "candidate_physical": 4272128,
+      "rejected": false
+    },
+    {
+      "file": "Fx.pkg",
+      "original_physical": 227573760,
+      "candidate_physical": 229990400,
+      "rejected": true
+    },
+    {
+      "file": "GUI.pkg",
+      "original_physical": 158502912,
+      "candidate_physical": 156827648,
+      "rejected": false
+    },
+    {
+      "file": "GUI_Mouse.pkg",
+      "original_physical": 376832,
+      "candidate_physical": 376832,
+      "rejected": true
+    },
+    {
+      "file": "HadesUpgrade.pkg",
+      "original_physical": 2609152,
+      "candidate_physical": 2584576,
+      "rejected": false
+    },
+    {
+      "file": "Launch.pkg",
+      "original_physical": 2326528,
+      "candidate_physical": 2273280,
+      "rejected": false
+    },
+    {
+      "file": "NPC_Achilles_01_Assist.pkg",
+      "original_physical": 49152,
+      "candidate_physical": 49152,
+      "rejected": true
+    },
+    {
+      "file": "NPC_Patroclus_01_Assist.pkg",
+      "original_physical": 49152,
+      "candidate_physical": 49152,
+      "rejected": true
+    },
+    {
+      "file": "NPC_Sisyphus_01_Assist.pkg",
+      "original_physical": 311296,
+      "candidate_physical": 311296,
+      "rejected": true
+    },
+    {
+      "file": "PoseidonUpgrade.pkg",
+      "original_physical": 8843264,
+      "candidate_physical": 8732672,
+      "rejected": false
+    },
+    {
+      "file": "RoomManager.pkg",
+      "original_physical": 51023872,
+      "candidate_physical": 50548736,
+      "rejected": false
+    },
+    {
+      "file": "ShieldThrow.pkg",
+      "original_physical": 4829184,
+      "candidate_physical": 4702208,
+      "rejected": false
+    },
+    {
+      "file": "ShieldWeapon.pkg",
+      "original_physical": 4829184,
+      "candidate_physical": 4702208,
+      "rejected": false
+    },
+    {
+      "file": "ShieldWeaponDash.pkg",
+      "original_physical": 4829184,
+      "candidate_physical": 4702208,
+      "rejected": false
+    },
+    {
+      "file": "ShieldWeaponRush.pkg",
+      "original_physical": 4829184,
+      "candidate_physical": 4702208,
+      "rejected": false
+    },
+    {
+      "file": "SpearWeapon.pkg",
+      "original_physical": 4829184,
+      "candidate_physical": 4702208,
+      "rejected": false
+    },
+    {
+      "file": "SpearWeaponDash.pkg",
+      "original_physical": 4829184,
+      "candidate_physical": 4702208,
+      "rejected": false
+    },
+    {
+      "file": "SpearWeaponSpin.pkg",
+      "original_physical": 4829184,
+      "candidate_physical": 4702208,
+      "rejected": false
+    },
+    {
+      "file": "SpearWeaponThrow.pkg",
+      "original_physical": 4829184,
+      "candidate_physical": 4702208,
+      "rejected": false
+    },
+    {
+      "file": "Styx.pkg",
+      "original_physical": 69492736,
+      "candidate_physical": 68648960,
+      "rejected": false
+    },
+    {
+      "file": "Surface.pkg",
+      "original_physical": 63442944,
+      "candidate_physical": 62488576,
+      "rejected": false
+    },
+    {
+      "file": "SwordParry.pkg",
+      "original_physical": 6664192,
+      "candidate_physical": 6520832,
+      "rejected": false
+    },
+    {
+      "file": "SwordWeapon.pkg",
+      "original_physical": 5861376,
+      "candidate_physical": 5722112,
+      "rejected": false
+    },
+    {
+      "file": "Tartarus.pkg",
+      "original_physical": 64978944,
+      "candidate_physical": 64110592,
+      "rejected": false
+    },
+    {
+      "file": "UIScripts.pkg",
+      "original_physical": 167936,
+      "candidate_physical": 159744,
+      "rejected": false
+    },
+    {
+      "file": "ZeusUpgrade.pkg",
+      "original_physical": 2473984,
+      "candidate_physical": 2420736,
+      "rejected": false
+    },
+    {
+      "file": "_AsphodelTemplateRoom.pkg",
+      "original_physical": 339968,
+      "candidate_physical": 335872,
+      "rejected": false
+    },
+    {
+      "file": "_ElysiumTemplateRoom.pkg",
+      "original_physical": 5476352,
+      "candidate_physical": 5439488,
+      "rejected": false
+    },
+    {
+      "file": "_StyxTemplateRoom.pkg",
+      "original_physical": 8998912,
+      "candidate_physical": 8949760,
+      "rejected": false
+    },
+    {
+      "file": "_TartarusTemplateRoom.pkg",
+      "original_physical": 434176,
+      "candidate_physical": 430080,
+      "rejected": false
+    }
+  ],
+  "baseline": [
+    2033598464,
+    2170945536,
+    2170945536
+  ],
+  "selected_after": [
+    2005176320,
+    2127503360,
+    2127503360
+  ],
+  "backup": [
+    1757022285,
+    1876064333,
+    1876064333
+  ],
+  "accepted": 125,
+  "rejected": 13,
+  "live_physical_reduction": 28422144,
+  "net_with_backup": -1728600141
+}

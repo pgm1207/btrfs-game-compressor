@@ -1,0 +1,69 @@
+{
+  "inputs": [
+    {
+      "path": "/home/pgm1207/.local/share/Steam/steamapps/common/Hades/Content/Movies/HadesBattleCastBeam_Bink.bik",
+      "bytes": 90343116,
+      "sha256": "2b296f11a066d23b6cc75fa82a080ae632670ed5e4d6479bee2aeab828404f82"
+    },
+    {
+      "path": "/home/pgm1207/.local/share/Steam/steamapps/common/Hades/Content/Win/Packages/Launch.pkg",
+      "bytes": 2568725,
+      "sha256": "0767bd696ede853ec484663269f7b49f8eee3b9b136d40554b3c36ecb4532f8a"
+    },
+    {
+      "path": "/home/pgm1207/.local/share/Steam/steamapps/common/Hades/Content/Audio/FMOD/Build/Desktop/Tartarus.bank",
+      "bytes": 3672192,
+      "sha256": "2a74f68d2ae8f50da9d1418abaebfd18f192651acd48741ebdb0ad9b655057d2"
+    },
+    {
+      "path": "/home/pgm1207/.local/share/Steam/steamapps/common/Hades/Content/Game/Text/ru/_NPCData.ru.sjson",
+      "bytes": 3930842,
+      "sha256": "b61ac07e3e4585cf9cb977258b677fe71985db8de9d4d17bb9242d1463192e38"
+    }
+  ],
+  "levels": [
+    {
+      "level": 3,
+      "physical_bytes": 96878592,
+      "raw_extent_bytes": 100524032,
+      "referenced_bytes": 100524032,
+      "encoding_seconds": 0.27995221499986656,
+      "warm_read_hash_seconds": [
+        0.06976404400029423,
+        0.06994317899989255,
+        0.0705585859996063,
+        0.07094539999980043,
+        0.07077160399967397
+      ]
+    },
+    {
+      "level": 6,
+      "physical_bytes": 96854016,
+      "raw_extent_bytes": 100524032,
+      "referenced_bytes": 100524032,
+      "encoding_seconds": 0.2272781829997257,
+      "warm_read_hash_seconds": [
+        0.07294782999997551,
+        0.070717063000302,
+        0.07009497700073553,
+        0.06971571199937898,
+        0.072021078999569
+      ]
+    },
+    {
+      "level": 9,
+      "physical_bytes": 96837632,
+      "raw_extent_bytes": 100524032,
+      "referenced_bytes": 100524032,
+      "encoding_seconds": 0.21255120299974806,
+      "warm_read_hash_seconds": [
+        0.06694126099955611,
+        0.06837065899981098,
+        0.06787163300032262,
+        0.0674068950002038,
+        0.06732023699987622
+      ]
+    }
+  ],
+  "caveat": "Warm read+SHA256 timings, not isolated decoder CPU time or in-game performance. No cache flushing. Sample-only savings."
+}

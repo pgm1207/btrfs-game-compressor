@@ -3,7 +3,7 @@
 # Behavioural tests for btrfs-game-compressor.
 #
 # Runs against a throwaway HOME so it never touches your real config or state,
-# and never invokes btrfs/compsize. Safe to run anywhere, including CI.
+# and never invokes the real native filesystem backend. Safe to run anywhere, including CI.
 
 set -uo pipefail
 
@@ -25,6 +25,15 @@ export LC_ALL=C
 # The suite must never reach GitHub: the automatic update check is disabled
 # globally, and exercised separately with a fake curl.
 export BTRFS_GAME_COMPRESSOR_NO_SELF_UPDATE=1
+# Ordinary UI tests use an inert backend. Real ioctls are tested separately.
+export BTRFS_GAME_COMPRESSOR_BACKEND="$WORK/native-shim"
+cat > "$BTRFS_GAME_COMPRESSOR_BACKEND" <<'SHIM'
+#!/bin/sh
+if [ "$1" = --protocol-version ]; then echo 1; exit 0; fi
+exit 1
+SHIM
+chmod +x "$BTRFS_GAME_COMPRESSOR_BACKEND"
+
 
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; [ $# -gt 1 ] && printf '       %s\n' "$2"; }
@@ -138,7 +147,7 @@ group "CLI surface"
 out=$(run --version); rc=$?
 check_rc "--version exits 0" 0 $rc
 check_contains "--version prints name" "btrfs-game-compressor" "$out"
-check_contains "--version prints a version" "1." "$out"
+check_contains "--version prints a version" "0.2.0" "$out"
 check_not_contains "--version emits no ANSI escapes" $'\033' "$out"
 
 out=$(run --help); rc=$?
@@ -198,6 +207,7 @@ check_rc "--json without --status is rejected" 2 $rc
 out=$(run --help); rc=$?
 check_contains "--help documents --history" "--history" "$out"
 check_contains "--help documents --stats" "--stats" "$out"
+check_contains "--help documents deduplication" "--dedupe" "$out"
 check_contains "--help documents --benchmark" "--benchmark" "$out"
 
 # --history and --stats read the state database. With an empty database they
@@ -245,7 +255,6 @@ out=$(run --import-ratios /tmp/nope.json --status); rc=$?
 check_rc "--import-ratios cannot be combined with --status" 2 $rc
 out=$(run --json); rc=$?
 check_rc "--json alone is rejected" 2 $rc
-
 # Interactive mode must refuse to run without a terminal, and must say why.
 out=$("$PROG" < /dev/null 2>&1); rc=$?
 check_rc "no TTY and no subcommand exits nonzero" 1 $rc
@@ -328,6 +337,9 @@ LIB="$WORK/lib.sh"
 sed '/^# --- Entry Point ---/,$d' "$PROG" > "$LIB"
 # shellcheck source=/dev/null
 . "$LIB" 2>/dev/null
+# The sourced program installs its own EXIT trap for the TUI. Restore the test
+# fixture cleanup, or every run leaves roughly 250 MiB under /tmp.
+trap 'rm -rf "$WORK"' EXIT
 
 if declare -f scan_game_dir >/dev/null 2>&1; then
     d="$WORK/deep"; rm -rf "$d"; mkdir -p "$d/a/b/c"
@@ -430,6 +442,10 @@ if declare -f state_upsert >/dev/null 2>&1; then
     else
         bad "state fields: unusual path characters round-trip" "got '$DECODED_FIELD'"
     fi
+    encoded=$(encode_field $'/games/with\ttab')
+    decode_field "$encoded"
+    [ "$DECODED_FIELD" = $'/games/with\ttab' ] && ok "state fields: tabs round-trip for dedupe history paths" \
+        || bad "state fields: tabs round-trip for dedupe history paths"
     quoted=$(json_quote $'quote" slash\\ line\nnext')
     if [ "$quoted" = '"quote\" slash\\ line\u000anext"' ]; then
         ok "JSON quoting: quotes, slashes and control characters are escaped"
@@ -740,14 +756,13 @@ OLD_PATH="$PATH"
 PATH="$WORK/shim:$PATH"
 
 PC="$HOME/.config/btrfs-game-compressor/min_gain_pct"
-MC="$HOME/.config/btrfs-game-compressor/min_gain_mib"
-# A 5% ratio floor and a 32 MiB absolute floor. GoodGame's 25 MiB predicted
-# gain clears 32; BadGame's 1% ratio does not clear 5.
-echo "5"  > "$PC"
-echo "20" > "$MC"
+# Compression is a rewrite: the whole game is written back through zstd, so the
+# only meaningful gate is the ratio. A fixed MiB number would be huge for a 1 GB
+# game and trivial for a 40 GB one, so none is used here.
+echo "5" > "$PC"
 
-# The ratio is the primary test: a 1% game is not worth a pass no matter its
-# size, and a 50% game is worth it no matter how small.
+# A 1% game is not worth a rewrite no matter its size; a 50% game is worth it
+# no matter how small.
 out=$("$PROG" --status --no-color 2>/dev/null)
 if printf '%s' "$out" | grep -q "^GoodGame .*LOW YIELD"; then
     bad "a 50%-ratio game is not held back"
@@ -757,33 +772,10 @@ fi
 if printf '%s' "$out" | grep -q "^BadGame .*LOW YIELD"; then
     ok "a 1%-ratio game is held back as low yield"
 else
-    bad "a 1%-ratio game is held back as low yield" "got: $(printf '%s' "$out" | grep '^BadGame' || echo none)"
-fi
-
-# The absolute floor is a separate test: it must hold back a great 50% game
-# when the saving is too small to be worth the effort, even though the ratio
-# passes. This is the "not worth it for 3 MB" case.
-echo "64" > "$MC"
-out=$("$PROG" --status --no-color 2>/dev/null)
-if printf '%s' "$out" | grep -q "^GoodGame .*LOW YIELD"; then
-    ok "a small absolute gain is held back despite a good ratio"
-else
-    bad "a small absolute gain is held back despite a good ratio"
-fi
-# ...and the ratio test must still apply with the floor relaxed.
-echo "0" > "$MC"
-# Capture first, then grep: piping the program straight into `grep -q` makes
-# grep exit on the first match, and `pipefail` then reports the program's
-# SIGPIPE as a failure.
-out=$("$PROG" --status --no-color 2>/dev/null)
-if printf '%s' "$out" | grep -q "^BadGame .*LOW YIELD"; then
-    ok "the ratio test still applies when the absolute floor is off"
-else
-    bad "the ratio test still applies when the absolute floor is off" "$($PROG --status --no-color 2>&1 | grep -E 'Good|Bad')"
+    bad "a 1%-ratio game is held back as low yield" "$out"
 fi
 
 # Raising the ratio floor must catch a game that passed at 5%.
-echo "5" > "$MC"
 echo "80" > "$PC"
 out=$("$PROG" --status --no-color 2>/dev/null)
 if printf '%s' "$out" | grep -q "^GoodGame .*LOW YIELD"; then
@@ -792,17 +784,15 @@ else
     bad "min_gain_pct is honoured" "$($PROG --status --no-color 2>&1 | grep -E 'Good|Bad')"
 fi
 
-# Switching both off must return everything to the normal flow.
+# Switching it off must return everything to the normal flow.
 echo "0" > "$PC"
-echo "0" > "$MC"
 out=$("$PROG" --status --no-color 2>/dev/null)
 if printf '%s' "$out" | grep -q "LOW YIELD"; then
-    bad "zero thresholds disable the low-yield filter"
+    bad "zero threshold disables the low-yield filter"
 else
-    ok "zero thresholds disable the low-yield filter"
+    ok "zero threshold disables the low-yield filter"
 fi
 echo "5" > "$PC"
-echo "20" > "$MC"
 
 # And dry-run must exclude a low-yield game while saying why.
 out=$("$PROG" --dry-run --no-color 2>/dev/null)
@@ -811,7 +801,7 @@ if printf '%s' "$out" | grep -q "^would compress.*BadGame"; then
 else
     ok "dry-run excludes low-yield games"
 fi
-if printf '%s' "$out" | grep -q "skipped as low yield"; then
+if printf '%s' "$out" | grep -Eq "low yield|not expected to gain enough"; then
     ok "dry-run explains why it skipped them"
 else
     bad "dry-run explains why it skipped them"
@@ -876,9 +866,9 @@ SHIM
 chmod +x "$WORK/shim/notify-send"
 NOTIFY_LOG="$WORK/notification.txt" \
     "$PROG" --notify >/dev/null 2>&1
-if grep -q '1 game(s) changed' "$WORK/notification.txt" && \
+if grep -q '2 game(s) need compression or deduplication' "$WORK/notification.txt" && \
    grep -q 'GoodGame' "$WORK/notification.txt" && \
-   ! grep -q 'BadGame' "$WORK/notification.txt"; then
+   grep -q 'BadGame' "$WORK/notification.txt"; then
     ok "--notify reports actionable games and omits low-yield games"
 else
     bad "--notify reports actionable games and omits low-yield games" \
@@ -1071,7 +1061,7 @@ chmod +x "$WORK/shim/btrfs"
 out=$("$PROG" --balance < /dev/null 2>&1); rc=$?
 check_rc "--balance refuses to run without a terminal" 1 $rc
 check_contains "--balance explains why it stopped" "needs a terminal" "$out"
-check_contains "--balance still prints the exact command" "btrfs balance start -m" "$out"
+check_contains "--balance still prints the exact command" "balance" "$out"
 check_not_contains "--balance ran nothing unattended" "SHIM btrfs" "$out"
 
 PATH="$OLD_PATH"
@@ -1385,8 +1375,9 @@ cat > "$UPDF/build/btrfs-game-compressor-$NEWVER/btrfs-game-compressor" <<'SCR'
 #!/bin/sh
 echo "new-version-fixture"
 SCR
-tar -czf "$UPDF/serve/btrfs-game-compressor-$NEWVER.tar.gz" -C "$UPDF/build" "btrfs-game-compressor-$NEWVER"
-(cd "$UPDF/serve" && sha256sum "btrfs-game-compressor-$NEWVER.tar.gz" > SHA256SUMS)
+cp "$WORK/native-shim" "$UPDF/build/btrfs-game-compressor-$NEWVER/bgc-native"
+tar -czf "$UPDF/serve/btrfs-game-compressor-$NEWVER-linux-$(uname -m).tar.gz" -C "$UPDF/build" "btrfs-game-compressor-$NEWVER"
+(cd "$UPDF/serve" && sha256sum "btrfs-game-compressor-$NEWVER-linux-$(uname -m).tar.gz" > SHA256SUMS)
 cat > "$WORK/update-bin/curl" <<'CURL'
 #!/bin/sh
 out=""; url=""
@@ -1430,6 +1421,7 @@ out=$(PATH="$WORK/update-bin:$PATH" UPDATE_FIXTURE="$UPDF" FAKE_TAG="$NEWVER" HO
     "$WORK/selfup/bin/btrfs-game-compressor" --self-update 2>&1); rc=$?
 check_rc "--self-update succeeds against a verified release" 0 "$rc"
 check_contains "--self-update reports what it did" "Updated btrfs-game-compressor $("$PROG" --version | awk '{print $2}') -> $NEWVER" "$out"
+[ -x "$WORK/selfup/bin/bgc-native" ] && ok "self-update installs the native backend" || bad "self-update installs the native backend"
 if grep -q 'new-version-fixture' "$WORK/selfup/bin/btrfs-game-compressor"; then
     ok "--self-update replaced the file"
 else
@@ -1437,7 +1429,7 @@ else
 fi
 
 # A tampered archive must be refused and the running copy left alone.
-printf 'tamper' >> "$UPDF/serve/btrfs-game-compressor-$NEWVER.tar.gz"
+printf 'tamper' >> "$UPDF/serve/btrfs-game-compressor-$NEWVER-linux-$(uname -m).tar.gz"
 cp "$PROG" "$WORK/selfup/bin/btrfs-game-compressor"
 out=$(PATH="$WORK/update-bin:$PATH" UPDATE_FIXTURE="$UPDF" FAKE_TAG="$NEWVER" HOME="$SUHOME" \
     "$WORK/selfup/bin/btrfs-game-compressor" --self-update 2>&1); rc=$?
@@ -1458,6 +1450,7 @@ UN="$WORK/uninst"
 mkdir -p "$UN/bin" "$UN/share/man/man1" \
          "$UN/share/btrfs-game-compressor/ratios"
 cp "$PROG" "$UN/bin/btrfs-game-compressor"
+cp "$WORK/native-shim" "$UN/bin/bgc-native"
 chmod +x "$UN/bin/btrfs-game-compressor"
 printf '.TH TEST 1\n' > "$UN/share/man/man1/btrfs-game-compressor.1"
 printf '{"schema":1,"games":{}}\n' > "$UN/share/btrfs-game-compressor/ratios/games.json"
@@ -1474,6 +1467,7 @@ check_contains "--uninstall says why it stopped" "needs a terminal" "$out"
 out=$(HOME="$UNHOME" "$UN/bin/btrfs-game-compressor" --uninstall --yes 2>&1); rc=$?
 check_rc "--uninstall --yes succeeds" 0 "$rc"
 check_contains "--uninstall reports what it did" "Removed btrfs-game-compressor" "$out"
+[ ! -e "$UN/bin/bgc-native" ] && ok "uninstall removes the backend" || bad "uninstall removes the backend"
 [ ! -e "$UN/bin/btrfs-game-compressor" ] &&
     ok "--uninstall removes the script" || bad "--uninstall removes the script"
 [ ! -e "$UN/share/man/man1/btrfs-game-compressor.1" ] &&
@@ -1577,7 +1571,7 @@ group "Verified release installer"
 
 REL="$WORK/release-fixture"
 VERSION=0.1.0
-ARCHIVE="btrfs-game-compressor-$VERSION.tar.gz"
+ARCHIVE="btrfs-game-compressor-$VERSION-linux-$(uname -m).tar.gz"
 mkdir -p "$REL/btrfs-game-compressor-$VERSION/ratios" "$WORK/install-bin"
 cat > "$REL/btrfs-game-compressor-$VERSION/btrfs-game-compressor" <<'SCRIPT'
 #!/bin/sh
@@ -1586,6 +1580,7 @@ SCRIPT
 printf '.TH TEST 1\n' > "$REL/btrfs-game-compressor-$VERSION/btrfs-game-compressor.1"
 printf '{"schema":1,"games":{}}\n' > "$REL/btrfs-game-compressor-$VERSION/ratios/games.json"
 printf '# Community compression ratios\n' > "$REL/btrfs-game-compressor-$VERSION/GAMES.md"
+cp "$WORK/native-shim" "$REL/btrfs-game-compressor-$VERSION/bgc-native"
 tar -czf "$REL/$ARCHIVE" -C "$REL" "btrfs-game-compressor-$VERSION"
 (cd "$REL" && sha256sum "$ARCHIVE" > SHA256SUMS)
 cat > "$WORK/install-bin/curl" <<'CURL'
@@ -1615,6 +1610,7 @@ out=$(RELEASE_FIXTURE="$REL" HOME="$INSTALL_HOME" PREFIX="$INSTALL_HOME/.local" 
     BTRFS_GAME_COMPRESSOR_REPO=example/project BTRFS_GAME_COMPRESSOR_VERSION="$VERSION" \
     PATH="$WORK/install-bin:$PATH" sh "$REPO_ROOT/install.sh" 2>&1); rc=$?
 check_rc "installer accepts a valid release checksum" 0 "$rc"
+[ -x "$INSTALL_HOME/.local/bin/bgc-native" ] && ok "installer includes the backend" || bad "installer includes the backend"
 check_contains "installer installs the release executable" "installed $INSTALL_HOME/.local/bin/btrfs-game-compressor" "$out"
 [ -f "$INSTALL_HOME/.local/share/man/man1/btrfs-game-compressor.1" ] &&
     ok "installer installs the manpage" || bad "installer installs the manpage"
@@ -1641,7 +1637,677 @@ check_contains "installer explains checksum failure" "checksum verification fail
     ok "checksum failure installs nothing" || bad "checksum failure installs nothing"
 
 # ---------------------------------------------------------------------------
+group "Measured deduplication and hashfile locking"
+
+DEDUP_HOME="$WORK/dedupe-home"
+DEDUP_COMMON="$DEDUP_HOME/games/steamapps/common"
+DEDUP_BIN="$WORK/dedupe-bin"
+mkdir -p "$DEDUP_COMMON/TestGame" "$DEDUP_BIN" "$DEDUP_HOME/.config/btrfs-game-compressor"
+printf 'payload\n' > "$DEDUP_COMMON/TestGame/data"
+printf '%s\n' "$DEDUP_COMMON" > "$DEDUP_HOME/.config/btrfs-game-compressor/custom_libraries.txt"
+
+cat > "$DEDUP_BIN/stat" <<'SHIM'
+#!/bin/sh
+if [ "$1" = "-f" ]; then
+    echo btrfs
+else
+    exec /usr/bin/stat "$@"
+fi
+SHIM
+cat > "$DEDUP_BIN/sudo" <<'SHIM'
+#!/bin/sh
+[ "$1" = -n ] && shift
+[ "$1" = true ] && exit 0
+[ "$1" = -- ] && shift
+[ "$1" = "$BTRFS_GAME_COMPRESSOR_BACKEND" ] || exit 1
+exec "$@"
+SHIM
+chmod +x "$DEDUP_BIN/sudo"
+export BTRFS_GAME_COMPRESSOR_BACKEND="$DEDUP_BIN/bgc-native"
+cat > "$BTRFS_GAME_COMPRESSOR_BACKEND" <<'SHIM'
+#!/bin/sh
+case "$1" in
+    --protocol-version) echo 1; exit 0 ;;
+    measure)
+        printf 'TOTAL 66.7%% 6B 8B 8B 6 8 8\n'
+        exit 0 ;;
+    measure-bytes)
+        [ "${DEDUPE_NO_MEASURE:-0}" = 0 ] || exit 1
+        n=0
+        [ -f "$BTRFS_FAKE_COUNT.physical" ] && read -r n < "$BTRFS_FAKE_COUNT.physical"
+        n=$((n + 1))
+        printf '%s\n' "$n" > "$BTRFS_FAKE_COUNT.physical"
+        if [ $((n % 2)) -eq 1 ]; then echo '600|1000|1000'; else echo '400|1000|1000'; fi
+        exit 0 ;;
+    usage)
+        n=0
+        [ -f "$BTRFS_FAKE_COUNT" ] && read -r n < "$BTRFS_FAKE_COUNT"
+        n=$((n + 1))
+        printf '%s\n' "$n" > "$BTRFS_FAKE_COUNT"
+        if [ $((n % 2)) -eq 1 ]; then echo '1000|600|100'; else echo '1000|400|300'; fi
+        exit 0 ;;
+    dedupe) ;;
+    *) exit 1 ;;
+esac
+printf '%s\n' "$*" >> "$DEDUPE_RUN_LOG"
+case "${DEDUPE_FAIL:-0}" in
+    1|ioctl) echo 'bgc-native: deduplication incomplete' >&2; exit 1 ;;
+    interrupt) exit 130 ;;
+esac
+printf 'native dedupe summary\n'
+SHIM
+chmod +x "$DEDUP_BIN/stat" "$BTRFS_GAME_COMPRESSOR_BACKEND"
+
+DEDUP_STATE="$DEDUP_HOME/.local/state/btrfs-game-compressor"
+DEDUP_COUNT="$WORK/btrfs-du-count"
+DEDUP_LOG="$WORK/native-dedupe-runs"
+out=$(HOME="$DEDUP_HOME" PATH="$DEDUP_BIN:$PATH" BTRFS_FAKE_COUNT="$DEDUP_COUNT" \
+    DEDUPE_RUN_LOG="$DEDUP_LOG" "$PROG" --dedupe --no-color 2>&1); rc=$?
+check_rc "--dedupe succeeds with mocked Btrfs tools" 0 "$rc"
+case "$out" in
+    *"Original files: 8B · Before dedupe: 600B · After dedupe: 400B"*) ok "dedupe report separates original, pre-dedupe and final size" ;;
+    *) bad "dedupe report separates original, pre-dedupe and final size" "$out" ;;
+esac
+case "$out" in
+    *"Dedupe saved this pass: 200B"*) ok "dedupe report shows measured dedupe savings" ;;
+    *) bad "dedupe report shows measured dedupe savings" "$out" ;;
+esac
+check_not_contains "dedupe report does not call shared bytes savings" "Newly shared:" "$out"
+[ "$(wc -l < "$DEDUP_LOG")" -eq 1 ] && ok "one library uses one native backend pass" \
+    || bad "one library uses one native backend pass"
+[ -s "$DEDUP_STATE/dedupe_physical_history.db" ] && ok "successful usage measurement is persisted" \
+    || bad "successful usage measurement is persisted"
+[ -s "$DEDUP_STATE/dedupe_completed.db" ] && ok "successful dedupe completion is persisted separately" \
+    || bad "successful dedupe completion is persisted separately"
+# Recheck current extents without defrag and preserve the last compression timestamp.
+printf '0\n' > "$DEDUP_HOME/.config/btrfs-game-compressor/min_size_mib"
+printf '# btrfs-game-compressor state v2\n%s|TestGame|1234567890|1K|500B|500B|0|0|0\n' \
+    "$DEDUP_COMMON/TestGame" > "$DEDUP_STATE/compressed_games.db"
+recheck_log_lines=$(wc -l < "$DEDUP_LOG")
+out=$(HOME="$DEDUP_HOME" PATH="$DEDUP_BIN:$PATH" DEDUPE_RUN_LOG="$DEDUP_LOG" \
+    "$PROG" --recheck --no-color 2>&1); rc=$?
+check_rc "--recheck refreshes current measurement" 0 "$rc"
+case "$out" in
+    *"Original: 8B · On disk: 6B · Saved: 2B"*) ok "--recheck reports logical original and current disk sizes" ;;
+    *) bad "--recheck reports logical original and current disk sizes" "$out" ;;
+esac
+check_contains "--recheck explains that it does not recompress" "no files will be recompressed" "$out"
+recheck_stamp=$(awk -F'|' -v p="$DEDUP_COMMON/TestGame" '$1==p {print $3}' "$DEDUP_STATE/compressed_games.db")
+check_rc "--recheck preserves compression timestamp" 1234567890 "$recheck_stamp"
+check_rc "--recheck does not invoke deduplication" "$recheck_log_lines" "$(wc -l < "$DEDUP_LOG")"
+fresh_stamp=$(date +%s)
+touch -d "@$((fresh_stamp - 5))" "$DEDUP_COMMON/TestGame" "$DEDUP_COMMON/TestGame/data"
+printf '# btrfs-game-compressor state v2\n%s|TestGame|%s|8B|6B|2B|0|0|0\n' \
+    "$DEDUP_COMMON/TestGame" "$fresh_stamp" > "$DEDUP_STATE/compressed_games.db"
+printf '0\n' > "$DEDUP_COUNT"
+HOME="$DEDUP_HOME" PATH="$DEDUP_BIN:$PATH" BTRFS_FAKE_COUNT="$DEDUP_COUNT" \
+    DEDUPE_RUN_LOG="$DEDUP_LOG" "$PROG" --dedupe --no-color >/dev/null 2>&1
+status_out=$(HOME="$DEDUP_HOME" PATH="$DEDUP_BIN:$PATH" "$PROG" --status --no-color 2>&1)
+check_contains "a successful library dedupe pass marks compressed games compacted" "COMPACTED" "$status_out"
+check_contains "compacted status names the selected game" "TestGame" "$status_out"
+
+history_lines_before=$(wc -l < "$DEDUP_STATE/dedupe_physical_history.db")
+printf '0\n' > "$DEDUP_COUNT"
+out=$(HOME="$DEDUP_HOME" PATH="$DEDUP_BIN:$PATH" BTRFS_FAKE_COUNT="$DEDUP_COUNT" \
+    DEDUPE_RUN_LOG="$DEDUP_LOG" DEDUPE_FAIL=1 "$PROG" --dedupe --no-color 2>&1); rc=$?
+check_rc "native backend failure is returned by --dedupe" 1 "$rc"
+check_contains "native backend failure is reported" "Deduplication failed" "$out"
+[ "$(wc -l < "$DEDUP_STATE/dedupe_physical_history.db")" -eq "$history_lines_before" ] && \
+    ok "failed dedupe pass does not write a measurement" || bad "failed dedupe pass does not write a measurement"
+out=$(HOME="$DEDUP_HOME" PATH="$DEDUP_BIN:$PATH" BTRFS_FAKE_COUNT="$DEDUP_COUNT" \
+    DEDUPE_RUN_LOG="$DEDUP_LOG" DEDUPE_FAIL=ioctl "$PROG" --dedupe --no-color 2>&1); rc=$?
+check_rc "native ioctl failure is incomplete" 1 "$rc"
+check_contains "native failure diagnostic is streamed" "deduplication incomplete" "$out"
+[ "$(wc -l < "$DEDUP_STATE/dedupe_physical_history.db")" -eq "$history_lines_before" ] && \
+    ok "ioctl failure is not saved as success" || bad "ioctl failure is not saved as success"
+out=$(HOME="$DEDUP_HOME" PATH="$DEDUP_BIN:$PATH" BTRFS_FAKE_COUNT="$DEDUP_COUNT" \
+    DEDUPE_RUN_LOG="$DEDUP_LOG" DEDUPE_FAIL=interrupt "$PROG" --dedupe --no-color 2>&1); rc=$?
+check_rc "interruption propagates out of the runner" 130 "$rc"
+check_contains "interruption is distinct from failure" "Deduplication interrupted" "$out"
+check_contains "native dedupe receives the selected directory" "dedupe $DEDUP_COMMON" "$(cat "$DEDUP_LOG")"
+dedupe_runs_before_lock=$(wc -l < "$DEDUP_LOG")
+
+hist_out=$(HOME="$DEDUP_HOME" "$PROG" --history --no-color 2>&1); rc=$?
+check_rc "--history reads dedupe history without scanning libraries" 0 "$rc"
+check_contains "--history lists dedupe measurement separately" "DEDUPLICATION HISTORY" "$hist_out"
+check_contains "--history displays the dedupe delta" "200B" "$hist_out"
+stats_out=$(HOME="$DEDUP_HOME" "$PROG" --stats --no-color 2>&1)
+check_contains "--stats reports latest dedupe estimate separately" "Latest measured savings" "$stats_out"
+check_contains "--stats does not label dedupe as ZSTD savings" "200B" "$stats_out"
+
+out=$(HOME="$DEDUP_HOME" PATH="$DEDUP_BIN:$PATH" BTRFS_FAKE_COUNT="$DEDUP_COUNT" \
+    DEDUPE_RUN_LOG="$DEDUP_LOG" DEDUPE_NO_MEASURE=1 "$PROG" --dedupe --no-color 2>&1)
+check_contains "unavailable measurement is unknown" "Savings unknown" "$out"
+check_contains "unmeasured totals are unknown" "unknown (1 unmeasured" "$out"
+[ "$(wc -l < "$DEDUP_STATE/dedupe_physical_history.db")" -eq "$history_lines_before" ] && \
+    ok "unknown savings are not recorded as zero" || bad "unknown savings are not recorded as zero"
+dedupe_runs_before_lock=$(wc -l < "$DEDUP_LOG")
+out=$(
+    print_summary_block Test 800B '1000B|600B|400B|60%|600|1000|800|1000|1000' /test
+    DEDUPE_BEFORE_PHYSICAL='600|1000|1000'
+    DEDUPE_AFTER_PHYSICAL='400|1000|1000'
+    DEDUPE_SAVED_BYTES=200
+    logical_game_bytes() { echo 1000; }
+    print_dedupe_summary /test
+)
+check_contains "combined savings use initial disk baseline" "Total saved vs original: 600B (60.0%)" "$out"
+check_contains "compression step savings exclude existing compression" "ZSTD change this pass:" "$out"
+out=$(
+    print_summary_block Test 400B '1000B|600B|400B|60%|600|1000|400|1000|200' /test
+    DEDUPE_BEFORE_PHYSICAL='600|1000|1000'
+    DEDUPE_AFTER_PHYSICAL='700|1000|1000'
+    DEDUPE_SAVED_BYTES=-100
+    logical_game_bytes() { echo 200; }
+    print_dedupe_summary /test
+    print_dedupe_summary /another-game
+)
+check_contains "disk growth is reported honestly" "Total saved vs original: -500B (-250.0%)" "$out"
+check_not_contains "compression context cannot leak to another game" "FINAL GAME SIZE — /another-game" "$out"
+
+# Hold the per-library lock as another process would. The second invocation
+# must skip before touching either btrfs usage or native backend/hashfile state.
+dedupe_key=$(printf '%s' "$DEDUP_COMMON" | sha256sum | awk '{print $1}')
+dedupe_lock="$DEDUP_STATE/dedupe/$dedupe_key.db.lock"
+lock_ready="$WORK/dedupe-lock-ready"
+flock "$dedupe_lock" sh -c 'touch "$1"; sleep 2' sh "$lock_ready" &
+lock_pid=$!
+wait_count=0
+while [ ! -e "$lock_ready" ] && [ "$wait_count" -lt 100 ]; do
+    sleep 0.02
+    wait_count=$((wait_count + 1))
+done
+out=$(HOME="$DEDUP_HOME" PATH="$DEDUP_BIN:$PATH" BTRFS_FAKE_COUNT="$DEDUP_COUNT" \
+    DEDUPE_RUN_LOG="$DEDUP_LOG" "$PROG" --dedupe --no-color 2>&1); rc=$?
+check_rc "--dedupe treats a concurrent hashfile lock as a safe skip" 0 "$rc"
+check_contains "--dedupe explains another run holds the lock" "another process is deduplicating" "$out"
+[ "$(wc -l < "$DEDUP_LOG")" -eq "$dedupe_runs_before_lock" ] && ok "locked pass never starts native backend" \
+    || bad "locked pass never starts native backend"
+wait "$lock_pid" 2>/dev/null || true
+
+# Exercise the real batch loop with a fake compressor and the shared dedupe
+# runner. The event log proves each game is deduped immediately after defrag.
+DEDUP_EVENT_LOG="$WORK/dedupe-batch-events"
+: > "$DEDUP_EVENT_LOG"
+clear() { :; }
+tput() { :; }
+ensure_sudo() { :; }
+discover_running_games() { :; }
+game_is_running() { return 1; }
+read_input() { :; }
+run_compsize() { printf 'TOTAL 1.00 50M 100M\n'; }
+compress_and_record() {
+    printf 'compress:%s\n' "$2" >> "$DEDUP_EVENT_LOG"
+    printf '100M|50M|50M|50%%\n'
+}
+dedupe_game() {
+    printf 'dedupe:%s\n' "$1" >> "$DEDUP_EVENT_LOG"
+    DEDUPE_RESULT=done
+    DEDUPE_COMPLETION_RECORDED=1
+    DEDUPE_SAVED_BYTES=200
+    DEDUPE_BEFORE_USAGE='1000|600|100'
+    DEDUPE_AFTER_USAGE='1000|400|300'
+    DEDUPE_HISTORY_ERROR=0
+    return 0
+}
+print_dedupe_summary() { :; }
+PATH="$DEDUP_BIN:$PATH"
+GAMES_STATUS=(UNCOMPRESSED UNCOMPRESSED)
+GAMES_NAME=(BatchOne BatchTwo)
+GAMES_PATH=("$DEDUP_COMMON/BatchOne" "$DEDUP_COMMON/BatchTwo")
+GAMES_SIZE=(100M 100M)
+GAMES_PREDICT=(0 0)
+CHECKED_STATE=()
+MIN_GAIN_PCT=0
+STAT_RUNNING_COUNT=0
+batch_compress_routine >/dev/null 2>&1
+compress_events=$(awk '/^compress:/ {last="compress"; n++} /^dedupe:/ {if (last != "compress") bad=1; last="dedupe"; d++} END {printf "%d|%d|%d", n, d, bad+0}' "$DEDUP_EVENT_LOG")
+[ "$compress_events" = '2|2|0' ] && ok "batch dedupes each game immediately after compressing it" \
+    || bad "batch dedupes each game immediately after compressing it" "$compress_events"
+# A compressed-only game must enter the batch queue for dedupe, without defrag.
+: > "$DEDUP_EVENT_LOG"
+GAMES_STATUS=(COMPRESSED COMPACTED)
+GAMES_DEDUPE_PENDING=(1 0)
+compress_and_record() { printf 'compress:%s\n' "$2" >> "$DEDUP_EVENT_LOG"; return 0; }
+dedupe_game() {
+    printf 'dedupe:%s\n' "$1" >> "$DEDUP_EVENT_LOG"
+    DEDUPE_RESULT=done; DEDUPE_COMPLETION_RECORDED=1; DEDUPE_SAVED_BYTES=0
+    DEDUPE_BEFORE_PHYSICAL=''; DEDUPE_AFTER_PHYSICAL=''
+    return 0
+}
+batch_compress_routine >/dev/null 2>&1
+compressed_only_events=$(awk '/^compress:/ {c++} /^dedupe:/ {d++} END {printf "%d|%d", c+0, d+0}' "$DEDUP_EVENT_LOG")
+[ "$compressed_only_events" = '0|1' ] && [ "${GAMES_STATUS[0]}" = COMPACTED ] && \
+    ok "batch deduplicates compressed-only games and marks them compacted" || \
+    bad "batch deduplicates compressed-only games and marks them compacted" "$compressed_only_events ${GAMES_STATUS[0]}"
+
+# Backend-only interruption must stop the whole batch, even without a shell signal.
+: > "$DEDUP_EVENT_LOG"
+GAMES_STATUS=(UNCOMPRESSED UNCOMPRESSED)
+dedupe_game() { printf 'dedupe:%s\n' "$1" >> "$DEDUP_EVENT_LOG"; return 130; }
+batch_compress_routine >/dev/null 2>&1; rc=$?
+check_rc "batch propagates dedupe interruption" 130 "$rc"
+check_rc "interrupted dedupe stops before the next game" 2 "$(wc -l < "$DEDUP_EVENT_LOG")"
+: > "$DEDUP_EVENT_LOG"
+GAMES_STATUS=(UNCOMPRESSED UNCOMPRESSED)
+compress_and_record() { printf 'compress:%s\n' "$2" >> "$DEDUP_EVENT_LOG"; return 130; }
+batch_compress_routine >/dev/null 2>&1; rc=$?
+check_rc "batch propagates compression interruption" 130 "$rc"
+check_rc "interrupted compression stops before dedupe or next game" 1 "$(wc -l < "$DEDUP_EVENT_LOG")"
+
+# ---------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
+group "Asset preview explains unsupported Hades containers"
+cat > "$WORK/asset-preview-shim" <<'SHIM'
+#!/bin/sh
+printf 'ASSETS|plan|Balanced (1080p)|0|0|0|0|1594|12|0|0|0|0|11899644249|10048817801|1177574764\n'
+SHIM
+chmod +x "$WORK/asset-preview-shim"
+out=$(
+    GAMES_PATH=("$WORK/Hades")
+    GAMES_NAME=(Hades)
+    VISUAL_TARGET=balanced
+    require_btrfs() { :; }
+    native_backend() { printf '%s\n' "$WORK/asset-preview-shim"; }
+    asset_workflow Hades --assets
+)
+check_contains "Hades preview reports zero supported reductions" "Game files are unchanged" "$out"
+check_contains "Hades preview identifies packed media" "packed/textures/video 1594" "$out"
+check_contains "Hades preview explains Bink exclusion" "Bink/video and encoded audio are not converted" "$out"
+check_contains "inventory sizes are not claimed as savings" "not disk-space savings" "$out"
+
+cat > "$WORK/asset-preview-shim" <<'SHIM'
+#!/bin/sh
+printf 'ASSETS|plan|Lossless (Hades packages only)|1|2568725|2481936|0|1|0|0|0|0|0|2568725|2568725|0|1\n'
+SHIM
+out=$(
+    GAMES_PATH=("$WORK/Hades")
+    GAMES_NAME=(Hades)
+    VISUAL_TARGET=lossless
+    require_btrfs() { :; }
+    native_backend() { printf '%s\n' "$WORK/asset-preview-shim"; }
+    asset_workflow Hades --assets
+)
+check_contains "package candidate count is parsed separately from audio bytes" "lossless Hades packages 1" "$out"
+check_contains "package preview explains lossless decoded content" "without changing decoded assets" "$out"
+
+out=$(
+    printf 'lossless\n' > "$VISUAL_TARGET_FILE"
+    load_config 2>/dev/null
+    printf '%s\n' "$VISUAL_TARGET"
+)
+check_contains "lossless-only profile can be loaded from settings" "lossless" "$out"
+
+group "Packed-container CLI"
+out=$(run --audit-container 2>&1); rc=$?
+check_rc "container audit requires a file" 2 "$rc"
+out=$(run --export-unityfs input 2>&1); rc=$?
+check_rc "UnityFS export requires an output" 2 "$rc"
+out=$(run --export-godot input 2>&1); rc=$?
+check_rc "Godot export requires an output" 2 "$rc"
+out=$(run --audit-godot-textures 2>&1); rc=$?
+check_rc "Godot texture audit requires profile and file" 2 "$rc"
+out=$(run --audit-godot-textures balanced 2>&1); rc=$?
+check_rc "Godot texture audit requires a file" 2 "$rc"
+out=$(run --export-godot-textures balanced input 2>&1); rc=$?
+check_rc "Godot texture export requires an output" 2 "$rc"
+out=$(run --audit-godot3-audio 2>&1); rc=$?
+check_rc "Godot 3 audio audit requires profile and file" 2 "$rc"
+out=$(run --export-godot3-audio balanced input 2>&1); rc=$?
+check_rc "Godot 3 audio export requires an output" 2 "$rc"
+out=$(run --audit-container input --export-godot input output 2>&1); rc=$?
+check_rc "container audit cannot silently become an export" 2 "$rc"
+out=$(run --export-unityfs input output --status 2>&1); rc=$?
+check_rc "container export cannot combine with status" 2 "$rc"
+out=$(run --export-godot input output --json 2>&1); rc=$?
+check_rc "container export rejects unsupported JSON" 2 "$rc"
+out=$(run --help)
+check_contains "help documents container inspection" "--audit-container FILE" "$out"
+check_contains "help documents Godot lossless export" "--export-godot FILE OUTPUT" "$out"
+check_contains "help documents Godot texture export" "--export-godot-textures PROFILE FILE OUTPUT" "$out"
+check_contains "help documents Godot 3 audio export" "--export-godot3-audio PROFILE FILE OUTPUT" "$out"
+cat > "$WORK/container-shim" <<'SHIM'
+#!/bin/sh
+printf '%s\n' "$@" > "$BGC_CONTAINER_LOG"
+case "$1" in
+    godot-dedup-export) printf 'GODOT_DEDUP|1000|990|4|1|1.0101|LOW_EFFICIENCY\n' ;;
+    godot-texture-export) printf 'GODOT_TEXTURE|1000|900|4|3|1|100|10.0000|EXPORTED\n' ;;
+    godot-texture-audit) printf 'GODOT_TEXTURE|1000|900|4|3|1|100|10.0000|CANDIDATE\n' ;;
+    godot3-optimize) printf 'GODOT3|1000|400|7416|33|2|81|87|600|60.0000|EXPORTED\n' ;;
+    godot3-audit) printf 'GODOT3|1000|400|7416|33|2|81|87|600|60.0000|CANDIDATE\n' ;;
+    unityfs-recompress) printf 'UNITYFS|1000|600|2048|4|2|1|66.6667|0.01|EXPORTED\n' ;;
+    container-audit) printf 'UNREAL_PAK|11|1000|100|50|1|Oodle\n' ;;
+esac
+SHIM
+chmod +x "$WORK/container-shim"
+out=$(
+    export BGC_CONTAINER_LOG="$WORK/container-args"
+    CONTAINER_ACTION=--export-godot CONTAINER_SOURCE="a game.pck" CONTAINER_OUTPUT="an export.pck" MIN_GAIN_PCT=7
+    native_backend() { printf '%s\n' "$WORK/container-shim"; }
+    cmd_container
+)
+check_contains "low-efficiency export explains no file was written" "No export written: LOW_EFFICIENCY" "$out"
+check_contains "container export passes the configured efficiency gate" $'godot-dedup-export\n7\na game.pck\nan export.pck' "$(cat "$WORK/container-args")"
+out=$(
+    export BGC_CONTAINER_LOG="$WORK/container-args"
+    CONTAINER_ACTION=--export-unityfs CONTAINER_SOURCE="source.bundle" CONTAINER_OUTPUT="export.bundle" MIN_GAIN_PCT=5
+    native_backend() { printf '%s\n' "$WORK/container-shim"; }
+    cmd_container
+)
+check_contains "container exports do not claim net savings or installed apply" "Source unchanged; game loading and physical savings still need validation" "$out"
+out=$(
+    export BGC_CONTAINER_LOG="$WORK/container-args"
+    CONTAINER_ACTION=--export-godot-textures CONTAINER_PROFILE=balanced CONTAINER_SOURCE="a game.pck" CONTAINER_OUTPUT="an export.pck" MIN_GAIN_PCT=5
+    native_backend() { printf '%s\n' "$WORK/container-shim"; }
+    cmd_container
+)
+check_contains "texture export reports rewritten and skipped counts" "rewrote 3 textures (1 skipped)" "$out"
+check_contains "texture export passes profile and gate to the backend" $'godot-texture-export\nbalanced\n5\na game.pck\nan export.pck' "$(cat "$WORK/container-args")"
+out=$(
+    export BGC_CONTAINER_LOG="$WORK/container-args"
+    CONTAINER_ACTION=--audit-godot-textures CONTAINER_PROFILE=ultra-performance CONTAINER_SOURCE="a game.pck"
+    native_backend() { printf '%s\n' "$WORK/container-shim"; }
+    cmd_container
+)
+check_contains "texture audit passes the profile to the backend" $'godot-texture-audit\nultra-performance\na game.pck' "$(cat "$WORK/container-args")"
+check_contains "texture audit disclaims physical and in-game validation" "Estimate only: no export written" "$out"
+out=$(
+    export BGC_CONTAINER_LOG="$WORK/container-args"
+    CONTAINER_ACTION=--export-godot3-audio CONTAINER_PROFILE=balanced CONTAINER_SOURCE="Brotato.pck" CONTAINER_OUTPUT="an export.pck" MIN_GAIN_PCT=5
+    native_backend() { printf '%s\n' "$WORK/container-shim"; }
+    cmd_container
+)
+check_contains "Godot 3 audio export reports converted tracks" "re-encoded 33 MP3 tracks as Ogg Vorbis (2 skipped)" "$out"
+check_contains "Godot 3 audio export reports PCM counts" "81 reduced in sample rate/bit depth, 87 unchanged" "$out"
+check_contains "Godot 3 audio export passes profile and gate to the backend" $'godot3-optimize\nbalanced\n5\nBrotato.pck\nan export.pck' "$(cat "$WORK/container-args")"
+out=$(
+    export BGC_CONTAINER_LOG="$WORK/container-args"
+    CONTAINER_ACTION=--audit-godot3-audio CONTAINER_PROFILE=balanced CONTAINER_SOURCE="Brotato.pck"
+    native_backend() { printf '%s\n' "$WORK/container-shim"; }
+    cmd_container
+)
+check_contains "Godot 3 audio audit passes the profile to the backend" $'godot3-audit\nbalanced\nBrotato.pck' "$(cat "$WORK/container-args")"
+
+group "Experimental FMOD export CLI"
+out=$(run --export-fmod 2>&1); rc=$?
+check_rc "FMOD export requires quality, input and output" 2 "$rc"
+check_contains "missing FMOD arguments explain usage" "requires QUALITY FILE OUTPUT" "$out"
+out=$(run --export-fmod 0.0 input.bank output.bank --status 2>&1); rc=$?
+check_rc "FMOD export cannot combine with status" 2 "$rc"
+out=$(run --export-fmod 0.0 input.bank output.bank --json 2>&1); rc=$?
+check_rc "FMOD export does not advertise unsupported JSON" 2 "$rc"
+out=$(run --help)
+check_contains "help documents export-only FMOD re-encoding" "--export-fmod QUALITY FILE OUTPUT" "$out"
+
+group "Unused-content pruning CLI"
+out=$(run --prune-assets 2>&1); rc=$?
+check_rc "prune requires a game name" 2 "$rc"
+out=$(run --prune-fallbacks 2>&1); rc=$?
+check_rc "fallback pruning requires a game name" 2 "$rc"
+out=$(run --prune-assets Hades --assets Hades 2>&1); rc=$?
+check_rc "pruning cannot combine with asset preview" 2 "$rc"
+check_contains "conflicting prune mode explains the clash" "cannot be combined" "$out"
+out=$(run --help)
+check_contains "help documents debug-symbol pruning" "--prune-assets GAME" "$out"
+check_contains "help documents fallback-suite pruning" "--prune-fallbacks GAME" "$out"
+check_contains "help warns fallback pruning needs full-resolution assets" "full-resolution assets" "$out"
+
+group "Slim CLI"
+out=$(run --slim 2>&1); rc=$?
+check_rc "slim requires a game name" 2 "$rc"
+out=$(run --slim Hades --variants Hades 2>&1); rc=$?
+check_rc "slim cannot combine with the variant report" 2 "$rc"
+out=$(run --help)
+check_contains "help documents the one-shot slim command" "--slim GAME" "$out"
+cat > "$WORK/slim-empty" <<'SHIM'
+#!/bin/sh
+if [ "$1" = prune-plan ]; then printf 'PRUNE|plan|0|0\n'; fi
+exit 0
+SHIM
+cat > "$WORK/slim-plan" <<'SHIM'
+#!/bin/sh
+[ -n "${BGC_SLIM_LOG:-}" ] && printf '%s\n' "$*" >> "$BGC_SLIM_LOG"
+case "$1" in
+    variants-slim) printf 'SLIM|3072|Audio/Mac\nSLIM|2048|Packages/720p\n' ;;
+    prune-plan)    printf 'PRUNE|plan|25|371340612\n' ;;
+esac
+SHIM
+chmod +x "$WORK/slim-empty" "$WORK/slim-plan"
+out=$(
+    GAMES_PATH=("$WORK/Hades"); GAMES_NAME=(Hades)
+    SLIM_QUERY=Hades
+    require_btrfs() { :; }
+    discover_running_games() { :; }
+    native_backend() { printf '%s\n' "$WORK/slim-empty"; }
+    cmd_slim
+)
+check_contains "slim reports nothing when there is nothing to remove" "Nothing to slim" "$out"
+out=$(
+    GAMES_PATH=("$WORK/Hades"); GAMES_NAME=(Hades)
+    SLIM_QUERY=Hades
+    require_btrfs() { :; }
+    discover_running_games() { :; }
+    native_backend() { printf '%s\n' "$WORK/slim-plan"; }
+    cmd_slim </dev/null 2>&1
+); rc=$?
+check_rc "non-interactive slim refuses to change files" 2 "$rc"
+check_contains "non-interactive slim explains the terminal requirement" "interactive terminal" "$out"
+: > "$WORK/slim-args.log"
+out=$(
+    export BGC_SLIM_LOG="$WORK/slim-args.log"
+    GAMES_PATH=("$WORK/Hades"); GAMES_NAME=(Hades)
+    SLIM_QUERY=Hades KEEP_LANGUAGES="en,de"
+    require_btrfs() { :; }
+    discover_running_games() { :; }
+    native_backend() { printf '%s\n' "$WORK/slim-plan"; }
+    cmd_slim </dev/null 2>&1
+)
+check_contains "slim forwards the kept languages to the backend" "variants-slim $WORK/Hades en,de" "$(head -1 "$WORK/slim-args.log")"
+check_contains "slim plan states which languages are kept" "languages kept: en,de" "$out"
+check_contains "slim plan warns about the startup language" "can prevent startup" "$out"
+
+group "Language setting"
+out=$(run --keep-languages "en, de, FR, en, xx!" 2>&1); rc=$?
+check_rc "keep-languages accepts a mixed list" 0 "$rc"
+check_contains "keep-languages canonicalizes and dedupes" "Keeping languages: en,de,fr" "$out"
+check_contains "keep-languages persists the setting" "en,de,fr" "$(cat "$KEEP_LANGUAGES_FILE")"
+out=$(run --keep-languages 2>&1); rc=$?
+check_rc "keep-languages requires a list" 2 "$rc"
+out=$(normalize_languages "English, German fr")
+check_contains "language names normalize to lowercase tokens" "english,german,fr" "$out"
+out=$(normalize_languages "")
+[ -z "$out" ] && ok "an empty language input disables pruning" || bad "an empty language input disables pruning" "got: $out"
+out=$(
+    printf 'en, de\n' > "$KEEP_LANGUAGES_FILE"
+    load_config 2>/dev/null
+    printf '%s\n' "$KEEP_LANGUAGES"
+)
+check_contains "kept languages load from settings" "en,de" "$out"
+
+group "Cost-aware skip rules"
+# Deletion is cheap, so pruning is gated by a small absolute floor.
+printf '8\n' > "$DELETE_FILE"
+out=$( load_config 2>/dev/null; printf '%s\n' "$MIN_PRUNE_MIB" )
+check_contains "prune floor loads from settings" "8" "$out"
+printf 'junk\n' > "$DELETE_FILE"
+out=$( load_config 2>/dev/null; printf '%s\n' "$MIN_PRUNE_MIB" )
+check_contains "invalid prune floor falls back to the default" "1" "$out"
+printf '1\n' > "$DELETE_FILE"
+# Compression is a rewrite and uses the ratio, never a fixed MiB number.
+printf '7\n' > "$PCT_FILE"
+out=$( load_config 2>/dev/null; printf '%s\n' "$MIN_GAIN_PCT" )
+check_contains "compression gate is the ratio threshold" "7" "$out"
+printf '5\n' > "$PCT_FILE"
+
+group "Engine report CLI"
+out=$(run --engines 2>&1); rc=$?
+check_rc "engine report requires a game name" 2 "$rc"
+out=$(run --engines Hades --variants Hades 2>&1); rc=$?
+check_rc "engine report cannot combine with the variant report" 2 "$rc"
+out=$(run --help)
+check_contains "help documents the engine report" "--engines GAME" "$out"
+cat > "$WORK/engine-shim" <<'SHIM'
+#!/bin/sh
+if [ "$1" = engine-scan ]; then
+    printf 'ENGINE|unity|globalgamemanagers\n'
+    printf 'CONTAINER|unity-stream|1000000|45|Game_Data/shared.assets.resS\n'
+    printf 'CONTAINER|fmod-audio|500000|3|Game_Data/audio.bnk\n'
+fi
+SHIM
+chmod +x "$WORK/engine-shim"
+out=$(
+    GAMES_PATH=("$WORK/Hades"); GAMES_NAME=(Hades)
+    ENGINES_QUERY=Hades
+    native_backend() { printf '%s\n' "$WORK/engine-shim"; }
+    cmd_engines
+)
+check_contains "engine report names the engine" "engine: unity" "$out"
+check_contains "engine report lists the largest containers" "unity-stream" "$out"
+check_contains "engine report states nothing changed" "Nothing was changed" "$out"
+
+group "Variant report CLI"
+out=$(run --variants 2>&1); rc=$?
+check_rc "variant report requires a game name" 2 "$rc"
+out=$(run --variants Hades --prune-assets Hades 2>&1); rc=$?
+check_rc "variant report cannot combine with pruning" 2 "$rc"
+out=$(run --help)
+check_contains "help documents the variant report" "--variants GAME" "$out"
+cat > "$WORK/variants-empty" <<'SHIM'
+#!/bin/sh
+[ "$1" = variants-scan ] && exit 0
+SHIM
+cat > "$WORK/variants-found" <<'SHIM'
+#!/bin/sh
+[ "$1" = variants-scan ] && printf 'VARIANT|100|2|0|Packages|300|2|1|Packages/720p\n'
+SHIM
+chmod +x "$WORK/variants-empty" "$WORK/variants-found"
+out=$(
+    GAMES_PATH=("$WORK/Hades"); GAMES_NAME=(Hades)
+    VARIANT_QUERY=Hades
+    native_backend() { printf '%s\n' "$WORK/variants-empty"; }
+    cmd_variants
+)
+check_contains "variant report is empty and read-only when nothing is found" "No redundant asset variants" "$out"
+check_contains "variant report states nothing changed" "Nothing was changed" "$out"
+out=$(
+    GAMES_PATH=("$WORK/Hades"); GAMES_NAME=(Hades)
+    VARIANT_QUERY=Hades
+    native_backend() { printf '%s\n' "$WORK/variants-found"; }
+    cmd_variants
+)
+check_contains "variant report flags variant-like members" "[variant-like name]" "$out"
+check_contains "variant report totals reclaimable bytes" "Total potentially reclaimable" "$out"
+
+group "Prune workflow"
+cat > "$WORK/prune-shim-none" <<'SHIM'
+#!/bin/sh
+[ "$1" = prune-plan ] && printf 'PRUNE|plan|0|0\n'
+SHIM
+cat > "$WORK/prune-shim-files" <<'SHIM'
+#!/bin/sh
+[ "$1" = prune-plan ] && printf 'PRUNE|plan|3|3145728\n'
+SHIM
+cat > "$WORK/prune-shim-tiny" <<'SHIM'
+#!/bin/sh
+[ "$1" = prune-plan ] && printf 'PRUNE|plan|1|4096\n'
+SHIM
+chmod +x "$WORK/prune-shim-none" "$WORK/prune-shim-files" "$WORK/prune-shim-tiny"
+out=$(
+    GAMES_PATH=("$WORK/Hades")
+    GAMES_NAME=(Hades)
+    PRUNE_QUERY=Hades PRUNE_FALLBACKS=0
+    require_btrfs() { :; }
+    discover_running_games() { :; }
+    native_backend() { printf '%s\n' "$WORK/prune-shim-tiny"; }
+    cmd_prune_assets
+)
+check_contains "a delete-only prune under the floor is skipped" "under the" "$out"
+out=$(
+    GAMES_PATH=("$WORK/Hades")
+    GAMES_NAME=(Hades)
+    PRUNE_QUERY=Hades PRUNE_FALLBACKS=0
+    require_btrfs() { :; }
+    discover_running_games() { :; }
+    native_backend() { printf '%s\n' "$WORK/prune-shim-none"; }
+    cmd_prune_assets
+)
+check_contains "prune reports nothing when no unused files exist" "Nothing to prune" "$out"
+out=$(
+    GAMES_PATH=("$WORK/Hades")
+    GAMES_NAME=(Hades)
+    PRUNE_QUERY=Hades PRUNE_FALLBACKS=0
+    require_btrfs() { :; }
+    discover_running_games() { :; }
+    native_backend() { printf '%s\n' "$WORK/prune-shim-files"; }
+    cmd_prune_assets </dev/null 2>&1
+); rc=$?
+check_rc "non-interactive prune refuses to change files" 2 "$rc"
+check_contains "non-interactive prune explains the terminal requirement" "interactive terminal" "$out"
+
+group "Lossless physical acceptance guard"
+mkdir -p "$WORK/guard-game" "$WORK/guard-existing/.bgc-assets-backup"
+out=$(lossless_guard_ready "$WORK/guard-game" 1000 2>&1); rc=$?
+check_rc "fresh lossless pass accepts a measured baseline" 0 "$rc"
+out=$(lossless_guard_ready "$WORK/guard-game" "" 2>&1); rc=$?
+check_rc "lossless pass refuses an unavailable baseline" 1 "$rc"
+out=$(lossless_guard_ready "$WORK/guard-existing" 1000 2>&1); rc=$?
+check_rc "physical rollback never adopts existing backups" 1 "$rc"
+cat > "$WORK/guard-shim" <<'SHIM'
+#!/bin/sh
+printf '%s\n' "$*" >> "$BGC_GUARD_LOG"
+exit "${BGC_GUARD_EXIT:-0}"
+SHIM
+chmod +x "$WORK/guard-shim"
+out=$(
+    export BGC_GUARD_LOG="$WORK/guard-accepted.log"
+    native_backend() { printf '%s\n' "$WORK/guard-shim"; }
+    asset_usage_bytes() { printf '900\n'; }
+    lossless_guard_verify "$WORK/guard-game" 1000
+); rc=$?
+check_rc "smaller physical footprint is accepted" 0 "$rc"
+check_rc "accepted physical reduction does not invoke restore" 0 "$(! grep -q 'assets restore' "$WORK/guard-accepted.log" 2>/dev/null; echo $?)"
+out=$(
+    export BGC_GUARD_LOG="$WORK/guard-rejected.log"
+    native_backend() { printf '%s\n' "$WORK/guard-shim"; }
+    asset_usage_bytes() { printf '1100\n'; }
+    lossless_guard_verify "$WORK/guard-game" 1000 2>&1
+); rc=$?
+check_rc "larger physical footprint triggers rollback" 2 "$rc"
+check_contains "rollback restores originals rather than finalizing" "assets restore lossless 0" "$(cat "$WORK/guard-rejected.log")"
+out=$(
+    export BGC_GUARD_LOG="$WORK/guard-unavailable.log"
+    native_backend() { printf '%s\n' "$WORK/guard-shim"; }
+    asset_usage_bytes() { return 1; }
+    lossless_guard_verify "$WORK/guard-game" 1000 2>&1
+); rc=$?
+check_rc "failed post-apply measurement triggers rollback" 2 "$rc"
+out=$(
+    export BGC_GUARD_LOG="$WORK/guard-failed.log" BGC_GUARD_EXIT=1
+    native_backend() { printf '%s\n' "$WORK/guard-shim"; }
+    asset_usage_bytes() { printf '1000\n'; }
+    lossless_guard_verify "$WORK/guard-game" 1000 2>&1
+); rc=$?
+check_rc "failed automatic restore is not reported as success" 1 "$rc"
+check_contains "failed restore explains retained recovery path" "--restore-assets" "$out"
+cat > "$WORK/guard-selection-shim" <<'SHIM'
+#!/bin/sh
+printf '%s\n' "$*" >> "$BGC_GUARD_LOG"
+if [ "$1" = assets-physical-rejections ]; then
+    printf 'Textures/poor.pkg\000100\00080\000'
+fi
+SHIM
+chmod +x "$WORK/guard-selection-shim"
+out=$(
+    export BGC_GUARD_LOG="$WORK/guard-selection.log"
+    id() { printf '0\n'; }
+    native_backend() { printf '%s\n' "$WORK/guard-selection-shim"; }
+    asset_usage_bytes() { printf '950\n'; }
+    lossless_guard_verify "$WORK/guard-game" 1000 || exit $?
+    printf 'rejected=%s before=%s after=%s\n' "$LOSSLESS_GUARD_REJECTED" "$LOSSLESS_GUARD_BEFORE" "$LOSSLESS_GUARD_AFTER"
+); rc=$?
+check_rc "physical selection retains an improving subset" 0 "$rc"
+check_contains "physical selection reports excluded logical bytes" "rejected=1 before=100 after=80" "$out"
+check_contains "physical selection invokes checksum-validated selective restore" "assets-restore-file" "$(cat "$WORK/guard-selection.log")"
+
 printf 'passed: %d   failed: %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0

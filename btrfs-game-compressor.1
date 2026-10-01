@@ -1,4 +1,4 @@
-.TH BTRFS\-GAME\-COMPRESSOR 1 "2026" "btrfs-game-compressor 0.1.1" "User Commands"
+.TH BTRFS\-GAME\-COMPRESSOR 1 "2026" "btrfs-game-compressor 0.2.0" "User Commands"
 .SH NAME
 btrfs\-game\-compressor \- compress Steam game libraries on Btrfs with ZSTD
 .SH SYNOPSIS
@@ -9,11 +9,14 @@ btrfs\-game\-compressor \- compress Steam game libraries on Btrfs with ZSTD
 .SH DESCRIPTION
 .B btrfs\-game\-compressor
 discovers Steam game libraries that live on a Btrfs filesystem and compresses
-their contents with ZSTD by running
-.BR "btrfs filesystem defragment \-r \-czstd" .
-Most game assets are already-compressed archives, video and audio, so
-re\-compressing them typically reclaims a significant portion of a library with
-no effect on how Steam launches or verifies files.
+their contents with one ZSTD pass.
+The bundled bgc-native executable performs compression and deduplication through
+Linux kernel interfaces. No external filesystem utilities are required.
+Deduplication scans each selected game after compression; explicit library passes
+can share data between games. Logical file contents and names are preserved.
+Already-compressed archives, video, and audio may gain little from another
+compression pass. Filesystem compression keeps game file contents unchanged;
+actual savings and runtime effects vary by game and device.
 .PP
 Run with no arguments it starts an interactive terminal UI. The
 .BR \-\-status ", " \-\-dry\-run " and " \-\-library
@@ -35,6 +38,172 @@ exit. Requires no terminal.
 List the games that a batch compression would process, without modifying
 anything.
 .TP
+.B \-\-dedupe
+Run the native backend over each discovered Btrfs Steam library, including games already
+marked compressed. A library is skipped while one of its games is running. The
+report measures unique file-data extent bytes before and after, and shows how
+much the physical game-data footprint decreased. Root permission is needed for this
+measurement; without it, deduplication still runs and the saved amount is shown
+as unavailable.
+.TP
+.B \-\-recheck
+Remeasure every discovered game and refresh its current original and on-disk sizes without recompressing files. Existing compression timestamps are preserved, so changed games remain marked updated. Requires root permission for Btrfs extent measurements.
+.TP
+.BI \-\-assets " GAME"
+Preview beta asset optimization for one installed game at the configured
+profile. Supported media include loose images, simple legacy DDS textures, and
+simple mono/stereo PCM or 32-bit-float WAV. Non-native profiles emit integer
+PCM. GAME is an exact name or full install path.
+.TP
+.BI \-\-export\-fmod " QUALITY FILE OUTPUT"
+Experimental native lossy FMOD Vorbis export (quality 0.0 through 0.4).
+Named profiles conservative and balanced use quality 0.3 and 0.2, require 5%
+stream savings including seek metadata, and reject candidates below a sparse
+decoded-waveform SNR guard of 20 dB and 18 dB. Numeric quality uses 15 dB.
+These offline checks are not a perceptual-quality guarantee.
+Rebuild supported FSB5 v1 or single-FSB RIFF/FEV banks into a new, smaller file.
+The source and existing output files are never overwritten. Playback rates,
+declared durations and non-codec metadata are preserved; packet offsets and
+seek tables are rebuilt. Not enabled for automatic game-asset replacement;
+in-game audio, loop and seeking validation is required. Bink 2 re-encoding is
+not implemented.
+.TP
+.BI \-\-apply\-assets " GAME"
+Apply beta asset optimization to a stopped game, retaining originals in a
+local restore copy. Visual media may lose detail; supported WAV files may be
+resampled, and Ultra Performance may reduce PCM to 8-bit with deterministic
+dither. Resized 8-bit RGB/RGBA images may be quantized (alpha is retained).
+Higher audio tiers target up to 16-bit PCM without up-converting. Hades v7 LZ4
+packages can be recompressed losslessly, preserving decoded assets and manifests.
+The Lossless profile only enables this package
+pass. Bink, FMOD and other packed formats are not re-encoded. Requires terminal
+confirmation. Opus conversion is not attempted because game compatibility
+depends on the expected codec and container.
+The Lossless workflow requires a fresh backup set and exact privileged Btrfs
+measurements. It attempts to restore individual packages that fail physical
+storage comparisons, and restores the entire new pass if the aggregate live
+footprint is not strictly smaller or the post-apply measurement fails. Logical
+package reductions alone are not sufficient. Backups still consume storage
+until explicitly finalized; snapshots can retain their blocks afterwards.
+.TP
+.BI \-\-engines " GAME"
+Read-only report of the game engine (Unity, Unreal, Godot, RE Engine,
+GameMaker, ...) and of its largest containers classified by kind
+(\fIunity-stream\fR, \fIunity-bundle\fR, \fIpak\fR, \fIunreal-iostore\fR,
+\fIgodot-pck\fR, \fIfmod-audio\fR, \fIwwise-audio\fR, \fIbink-video\fR). It
+changes nothing and needs no privilege, and reports engines it does not
+recognize honestly.
+.TP
+.BI \-\-audit\-container " FILE"
+Read-only, signature-detected UnityFS compression analysis, Godot PCK resource
+inventory, or Unreal Pak footer inspection. Reports logical sizes, not physical
+savings. Unsupported codecs, encryption and layouts are not bypassed.
+.TP
+.BI \-\-export\-unityfs " FILE OUTPUT"
+Experimental lossless UnityFS v6-8 LZ4/HC recompression to a new file. Keeps
+decoded bytes and block boundaries; does not resize textures. Maximum input
+512 MiB. Stored blocks and codec flags remain unchanged. Catalog/hash and game
+compatibility require separate validation; no installed auto-apply.
+.TP
+.BI \-\-export\-godot " FILE OUTPUT"
+Experimental lossless standalone plain Godot PCK v1-4 resource deduplication to a new
+file. Identical payloads share offsets, after byte-for-byte comparison; all
+exported resources are verified. Rejects encrypted/sparse/unknown layouts.
+Both container export modes refuse existing destinations and require logical
+savings divided by complete output bytes to meet min_gain_pct before writing.
+The source remains unchanged, so an export is not net storage savings.
+.TP
+.BI \-\-audit\-godot\-textures " PROFILE FILE"
+Read-only estimate of how much a Godot PCK would shrink if supported
+.B .stex / .ctex
+textures were downscaled and RGB-quantized for the selected profile. Writes nothing.
+.TP
+.BI \-\-audit\-godot3\-audio " PROFILE FILE"
+Read-only estimate of how much a Godot 3 PCK v1 would shrink if its
+.B AudioStreamMP3
+resources were re-encoded as Ogg Vorbis. Writes nothing.
+.TP
+.BI \-\-export\-godot3\-audio " PROFILE FILE OUTPUT"
+Experimental, lossy, export-only Godot 3 PCK audio rewrite. Each
+.B AudioStreamMP3
+resource is decoded and re-encoded as Ogg Vorbis under the same entry name, and
+the matching
+.B .import
+stub's
+.B type=
+is switched to
+.B AudioStreamOGGVorbis
+(Godot 3 loads a resource by its stored type, not its extension). Supported PCM
+samples are also reduced in rate/bit depth with scaled loop points; IMA-ADPCM
+is disabled. Other entries are copied byte-for-byte and byte-compared. Refuses existing destinations, uses
+the same min_gain_pct output-write gate, never overwrites the installed pack, and
+is not auto-applied. Brotato passed manual playtesting; other games require
+independent playback/loop checks. Godot 4 audio is not covered.
+.TP
+.BI \-\-export\-godot\-textures " PROFILE FILE OUTPUT"
+Experimental, lossy, export-only Godot PCK texture rewrite. Supported
+.B .stex / .ctex
+(Godot 3 GDST / Godot 4 GST2) textures -- supported WebP/PNG and block formats
+BC1/BC2/BC3/BC7 -- are downscaled and RGB-quantized for the selected profile.
+Logical dimensions and codecs are preserved and resized mip chains are rebuilt.
+Unsupported encodings are copied byte-for-byte; non-shrinking changes are discarded.
+The pack is rebuilt with relocated offsets and recomputed MD5 and
+re-parsed; untouched entries are byte-compared. Refuses existing destinations,
+uses the same min_gain_pct output-write gate, never overwrites the installed
+pack, and is not auto-applied. Brotato passed manual playtesting; Godot 4
+requires per-game tests. Native/Lossless makes no changes.
+.TP
+.BI \-\-slim " GAME"
+One offline, reversible pass that keeps the highest resolution tier and the
+host-platform build, removing other resolution fallbacks and non-host platform
+folders plus debug symbols. With a language list set it also removes every
+language pack you did not select (localized audio, subtitles and locale data); a
+group is skipped unless one of your languages is present, so no language set is
+ever emptied. Format-agnostic (directory shape and names only) and
+has no runtime component. Everything is written to the restorable backup tree;
+confirm with \-\-restore\-assets or free space with \-\-finalize\-assets. Groups
+it cannot classify unambiguously are left untouched. Requires terminal
+confirmation.
+.TP
+.BI \-\-keep\-languages " LIST"
+Set the languages \-\-slim keeps, as codes or English names separated by commas
+(for example en,de or English,German). Stored in the keep_languages settings
+file. An empty list disables language pruning. Keep the language the game boots
+with; removing it can prevent startup, and every removal stays restorable.
+.TP
+.BI \-\-variants " GAME"
+Read-only, format-agnostic report of sibling suites that share an identical
+file-name layout but differ in data: architecture builds, renderer or shader
+suites, resolution tiers, platform folders and language packs. Groups whose
+members do not look like variants (sequential level, region or skin folders)
+are suppressed. Shows the bytes reclaimable by keeping one member; changes
+nothing and needs no privilege.
+.TP
+.BI \-\-prune\-assets " GAME"
+Move developer debug symbols (*.pdb, *.ilk) that a released build does not load
+into the restorable backup tree, then remove them from the game. Only regular
+files are selected; symlinks and escaping paths are rejected. Recover with
+\-\-restore\-assets; free space returns after \-\-finalize\-assets. Requires
+terminal confirmation.
+.TP
+.BI \-\-prune\-fallbacks " GAME"
+As \-\-prune\-assets, and additionally remove low-resolution (720p) and BC3
+texture/video fallback suites. The engine loads those only when it selects
+low-resolution assets (for example on a weak GPU or by explicit setting).
+Use only when this machine renders the full-resolution assets; otherwise the
+game can fail to find them. Fully restorable.
+.TP
+.BI \-\-restore\-assets " GAME"
+Restore original files from the local restore copy.
+.TP
+.BI \-\-finalize\-assets " GAME"
+Discard the local restore copy after testing the game. Requires a terminal
+confirmation. Steam verification may be needed to recover the original files.
+.TP
+.B \-\-verbose
+List each file while compressing or deduplicating. By default, only periodic
+progress and final space measurements are printed.
+.TP
 .BR \-l ", " "\-\-library " \fIDIR\fR
 Register \fIDIR\fR as an extra game library and exit. Accepts either the library
 root or its \fBsteamapps/common\fR subdirectory. A warning is printed if the path
@@ -55,19 +224,20 @@ table entries). This option requires \fB\-\-status\fR, \fB\-\-benchmark\fR or
 \fB\-\-ratios\fR.
 .TP
 .B \-\-history
-Print every recorded compression, newest first, with the size before and after
-and the space saved. This reads the state database directly and changes nothing.
+Print separate ZSTD compression and deduplication histories, newest first.
+Deduplication rows show physical data extents before and after and the measured
+shared bytes. This reads the history files and changes nothing.
 .TP
 .B \-\-stats
-Print a summary of the recorded compressions: how many games were measured, the
-total original and on-disk size, and the space reclaimed. Reads the state
-database and changes nothing.
+Print ZSTD compression savings and the latest measured dedupe estimate for each
+library. The dedupe figure sums only each library's newest measured pass, not all
+historical passes. Reads the history files and changes nothing.
 .TP
 .B \-\-benchmark
 Print the measured saving for each game, sorted from best to worst, followed by a
 summary: total size before and after, the overall ratio, the best single game,
 and how many games save more than 50%. Every figure is derived from recorded
-compsize measurements, so it describes real disks rather than an estimate. With
+Btrfs extent measurements, so it describes real disks rather than an estimate. With
 .BR \-\-json ,
 the same data is emitted as JSON.
 .TP
@@ -140,27 +310,15 @@ With \fB\-\-uninstall\fR or \fB\-\-submit\-ratios\fR, skip the confirmation prom
 It does not override the package\-manager refusal.
 .TP
 .B \-\-notify
-Send a desktop notification for games in \fBUPDATED\fR or \fBUNCOMPRESSED\fR state.
+Send a desktop notification for games in COMPRESSED, UPDATED or UNCOMPRESSED state when compression or deduplication is pending.
 This is read-only and does not start compression. Requires the optional
 \fBnotify-send\fR command from libnotify.
 .TP
 .B \-\-balance
-Offer to rebalance each Btrfs mount that holds a discovered library, by running
-.BR "btrfs balance start \-m" .
-This is a separate, slower operation from defragmentation: it evens out a
-degraded block-group allocation across the whole device, which is what actually
-returns the space of a fragmented SSD, and which should be run after a
-defragmentation pass rather than instead of one. Because of that scope, and
-because it rewrites the whole device, it is never implied by
-.BR \-\-dry\-run " or " \-\-status .
-This option only reports every mount it would touch and prints the exact
-command for it; it exits without running anything unless invoked from a terminal
-and confirmed with
-.BR y .
-Requires a terminal, and
-.B btrfs
-from
-.BR btrfs-progs .
+Offer a native metadata balance for each Btrfs mount holding a discovered library.
+This is a privileged, whole-filesystem operation and is not needed to reclaim
+space from deduplication. It is never implied by status or dry-run commands.
+The tool prints the native command and requires interactive confirmation.
 .SH INTERACTIVE KEYS
 .TP
 .BR "↑" ", " ↓ ", " k ", " j
@@ -181,6 +339,10 @@ Compress the highlighted game, or every checked game.
 .B b
 Batch\-compress everything still pending.
 .TP
+.B o
+Preview the configured [BETA] asset profile for the highlighted game and optionally
+apply it after confirmation.
+.TP
 .B f
 Search and filter the list.
 .TP
@@ -198,10 +360,10 @@ Quit.
 .SH GAME STATES
 .TP
 .B COMPRESSED
-Defragmented, with no modifications in its directory since.
+Compression is current, but no successful dedupe pass is recorded since it. Batch mode deduplicates this game without recompressing it.
 .TP
-.B UPDATED
-Previously compressed, but files changed afterwards. Worth re\-compressing.
+.B COMPACTED
+Compressed and deduplicated, with no later file changes.
 .TP
 .B UNCOMPRESSED
 Never compressed by this tool.
@@ -246,10 +408,11 @@ defragmentation pass and its benefit scale with the size of the game, the
 percentage is the meaningful test: it does not matter whether a game is 100 MB or
 100 GB, only how well it compresses. \fB0\fR disables the test. Default \fB5\fR.
 .TP
-.I ~/.config/btrfs\-game\-compressor/min_gain_mib
-A second, independent \fBLOW YIELD\fR test for games whose predicted saving is
-trivially small, even when the ratio passes. \fB0\fR disables it. Default
-\fB32\fR.
+.I ~/.config/btrfs\-game\-compressor/min_prune_mib
+The minimum saving for a delete-only prune (\-\-slim, \-\-prune\-assets) to be
+offered. Deleting writes almost nothing, so it is judged by this small absolute
+floor rather than by the ratio that governs compression. \fB0\fR disables it.
+Default \fB1\fR.
 .TP
 .I ~/.config/btrfs\-game\-compressor/auto_update
 \fB1\fR (the default) lets the tool look for a newer release at most once a day;
@@ -257,17 +420,30 @@ trivially small, even when the ratio passes. \fB0\fR disables it. Default
 \fB\-\-self\-update\fR work regardless.
 .TP
 .I ~/.local/state/btrfs\-game\-compressor/compressed_games.db
-Which games have been compressed, when, and how much space that saved. The recorded
+Compression measurements, original logical file sizes and compression timestamps. The recorded
 sizes are what the \fBLOW YIELD\fR predictions are derived from, so a game is never
 judged before it has been compressed at least once. Records are keyed by escaped
 install path; legacy name-keyed records are ignored during the one-time migration.
+.TP
+.I ~/.local/state/btrfs\-game\-compressor/dedupe_completed.db
+Successful dedupe pass timestamps used to distinguish COMPRESSED from COMPACTED.
+.TP
+.I ~/.local/state/btrfs\-game\-compressor/dedupe/
+Temporary native sort files, progress logs and per-library locks. Each pass
+rehashes its selected scope. Temporary files are cleaned up on normal exit and
+handled signals; forced termination may leave a native-* scratch directory.
+.TP
+.I ~/.local/state/btrfs\-game\-compressor/dedupe_physical_history.db
+Append-only before/after measurements for successful dedupe passes. These are kept
+separate from the ZSTD compression history and are shown by \fB\-\-history\fR and
+\fB\-\-stats\fR.
 .SH REQUIREMENTS
-.BR bash " 4+, " btrfs\-progs ", " awk " and " coreutils .
-.B btrfs\-compsize
-is optional; without it savings figures are reported as \fBn/a\fR rather than
-being guessed. A game compressed without it is still remembered as compressed,
-so it is not re\-done on every run, but it contributes no figures to
-\fB\-\-stats\fR, \fB\-\-history\fR or \fB\-\-benchmark\fR.
+Bash 4+, the bundled static bgc-native executable, awk, coreutils, findutils and
+util-linux (including flock). The backend supports x86_64 and aarch64 Linux.
+Explicit ZSTD compression levels require Linux 6.15 or later.
+No btrfs-progs, compsize or duperemove package is required. Root permission is
+needed to read compressed extent metadata and to balance a filesystem.
+Without measurement permission, savings are reported as n/a.
 .B notify\-send
 from libnotify is optional and is needed only for \fB\-\-notify\fR.
 .PP
@@ -297,6 +473,7 @@ btrfs\-game\-compressor
 btrfs\-game\-compressor \-\-status
 btrfs\-game\-compressor \-\-status \-\-pending
 btrfs\-game\-compressor \-\-dry\-run
+btrfs\-game\-compressor \-\-dedupe
 btrfs\-game\-compressor \-\-library /mnt/games
 btrfs\-game\-compressor \-\-status \-\-no\-color | column \-t
 btrfs\-game\-compressor \-\-status \-\-json
@@ -311,6 +488,7 @@ btrfs\-game\-compressor \-\-balance
 .fi
 .SH SEE ALSO
 .BR btrfs (8),
+.BR duperemove (8),
 .BR compsize (8)
 .SH BUGS
 Report issues at https://github.com/pgm1207/btrfs\-game\-compressor/issues
