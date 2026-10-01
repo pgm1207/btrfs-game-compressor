@@ -66,7 +66,10 @@ native:
 	install -m 0755 native/target/$(NATIVE_TARGET)/release/bgc-native $(NATIVE)
 
 native-test:
-	cargo test --offline --locked --manifest-path native/Cargo.toml
+	@# `make native` is deliberately offline for local reproducibility. The test
+	@# target accepts CARGO_NET_OFFLINE=1, but a clean checkout must be able to
+	@# download the pinned crates once.
+	cargo test --locked --manifest-path native/Cargo.toml
 
 test: native
 	@./test/smoke.sh
