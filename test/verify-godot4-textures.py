@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent streaming PCK v3/v4 + GST2 texture candidate verification.
 
-Usage: verify-godot4-textures.py SOURCE CANDIDATE [MAX_EDGE]
+Usage: verify-godot4-textures.py SOURCE CANDIDATE [MAX_EDGE] [--conservative]
 Pillow decodes PNG/WebP and BC1/2/3/7 via temporary in-memory DDS headers.
 Checksums/structure are checked, not perceptual fidelity or game compatibility.
 """
@@ -98,6 +98,7 @@ def decode_ctex(data):
 
 def main():
     max_edge = int(sys.argv[3]) if len(sys.argv) > 3 else 640
+    conservative = '--conservative' in sys.argv[4:]
     changed = saved = 0
     with open(sys.argv[1], 'rb') as a, open(sys.argv[2], 'rb') as b:
         va, ea, source = directory(a); vb, eb, candidate = directory(b)
@@ -118,7 +119,17 @@ def main():
             assert original[:40] == output[:40], 'logical dimensions/flags changed: ' + name
             assert before[3:] == after[3:], 'codec changed: ' + name
             w, h, mips, fmt, encoding = after
-            assert max(w, h) <= max_edge and w <= before[0] and h <= before[1]
+            allowed_edge = max_edge
+            if conservative:
+                logical_w, logical_h = struct.unpack_from('<II', original, 8)
+                assert logical_w and logical_h, 'missing original-size reference: ' + name
+                reference_w = max(logical_w, before[0])
+                reference_h = max(logical_h, before[1])
+                allowed_edge = max(max_edge, (max(reference_w, reference_h) + 1) // 2)
+                assert w * 2 + 1 >= reference_w and h * 2 + 1 >= reference_h, name
+                assert max(before[:2]) > 512 and min(before[:2]) > 64, name
+                assert min(w, h) >= 64, name
+            assert max(w, h) <= allowed_edge and w <= before[0] and h <= before[1]
             assert mips == (int(math.log2(max(w, h))) if before[2] else 0)
             image = decode_ctex(output)
             if encoding in (1, 2) and before[:2] == after[:2]:

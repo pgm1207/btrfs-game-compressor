@@ -210,7 +210,7 @@ fn visual_assets_can_be_resized_restored_and_finalized() {
                 .decode()
                 .unwrap()
                 .width(),
-            854
+            640
         );
     }
     let output = success(&["assets", "restore", "native", "0", g]);
@@ -322,4 +322,50 @@ fn hades_packages_losslessly_recompress_restore_and_finalize() {
     assert!(!root.join(".bgc-assets-backup").exists());
     assert_eq!(fs::read(&package).unwrap(), optimized);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn texture_guards_are_automatic_in_the_main_pipeline_for_every_profile() {
+    let Some(parent) = env::var_os("BGC_TEST_BTRFS_DIR") else { return; };
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let base = Path::new(&parent).join(format!("bgc-policy-test-{stamp}"));
+    fs::create_dir(&base).unwrap();
+    let large = image::RgbImage::from_fn(2048, 1024, |x, y| {
+        image::Rgb([(x * 73 + y * 29) as u8, (x * 17 + y * 97) as u8, (x * 131 + y * 7) as u8])
+    });
+    for (profile, expected_width) in [
+        ("native", 2048), ("lossless", 2048),
+        ("ultra-performance", 1024), ("performance", 1280),
+        ("balanced", 1920), ("quality", 2048), ("ultra-quality", 2048),
+    ] {
+        let root = base.join(profile);
+        fs::create_dir(&root).unwrap();
+        let large_path = root.join("large.bmp");
+        large.save(&large_path).unwrap();
+        let original_large = fs::read(&large_path).unwrap();
+        let mut protected = Vec::new();
+        for (name, w, h) in [("small.bmp", 256, 256), ("thin.bmp", 2048, 64), ("ui_atlas.bmp", 2048, 1024)] {
+            let path = root.join(name);
+            image::RgbImage::new(w, h).save(&path).unwrap();
+            protected.push((path.clone(), fs::read(&path).unwrap()));
+        }
+        let unknown = root.join("sharedassets0.assets");
+        fs::write(&unknown, b"unknown serialized Unity resource; never reinterpret as loose art").unwrap();
+        protected.push((unknown.clone(), fs::read(&unknown).unwrap()));
+        let g = root.to_str().unwrap();
+        success(&["assets", "apply", profile, "3", g]);
+        assert_eq!(image::ImageReader::open(&large_path).unwrap().decode().unwrap().width(), expected_width, "{profile}");
+        for (path, bytes) in &protected { assert_eq!(&fs::read(path).unwrap(), bytes, "{profile}: {}", path.display()); }
+        let after = fs::read(&large_path).unwrap();
+        success(&["assets", "apply", profile, "3", g]);
+        assert_eq!(fs::read(&large_path).unwrap(), after, "{profile}: repeated apply changed texture");
+        if expected_width == 2048 {
+            assert_eq!(after, original_large);
+        } else {
+            assert!(after.len() < original_large.len());
+            success(&["assets", "restore", "native", "0", g]);
+            assert_eq!(fs::read(&large_path).unwrap(), original_large);
+        }
+    }
+    fs::remove_dir_all(base).unwrap();
 }

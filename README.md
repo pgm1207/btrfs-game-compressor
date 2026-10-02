@@ -153,7 +153,7 @@ resized, simple legacy BC1/BC2/BC3 DDS textures can be resized and re-encoded,
 and simple mono/stereo integer PCM or 32-bit-float WAV can be reduced to the
 profile's sample rate/bit depth (non-native profiles output integer PCM).
 For resized 8-bit RGB/RGBA non-JPEG, non-DDS images, profiles quantize RGB
-precision progressively (5/6/7/8 bits per channel); alpha is preserved exactly.
+precision according to the shared minimum of 7 bits per channel; alpha is preserved exactly.
 Ultra Performance additionally converts PCM to 8-bit with deterministic TPDF
 dither; higher quality tiers target up to 16-bit PCM. Channels and original
 sample rate are never increased, and unsupported WAV chunks/codecs are skipped.
@@ -168,7 +168,7 @@ an Opus bitstream in its place: Opus has its own codec and Ogg container
 specification ([RFC 6716](https://www.rfc-editor.org/rfc/rfc6716.html),
 [RFC 7845](https://www.rfc-editor.org/rfc/rfc7845.html)). Changing only the
 extension does not make formats compatible. Profiles are Ultra Performance
-(360p), Performance (720p), Balanced (1080p), Quality (1440p), Ultra Quality
+(480p usage label), Performance (720p), Balanced (1080p), Quality (1440p), Ultra Quality
 (4K), Lossless (Hades packages only), and Native. Native is the default. The
 Lossless profile never resizes images or changes WAV samples; it only enables
 the lossless Hades package pass. Native makes no beta asset changes. Visual
@@ -191,6 +191,62 @@ non-JPEG, non-DDS encoders; alpha is retained. WAV ceilings never upsample or
 increase bit depth; lower-depth sources remain at their original depth. Lossless
 is a separate package-only profile, not a quality-reduction tier.
 
+Audio quality follows the **asset profile**, not the filesystem Zstd level. A
+shared policy now feeds loose WAV, Godot 3 packed PCM/Vorbis, and supported
+standalone FMOD FSB5 Vorbis banks through the normal preview/apply pipeline:
+
+| Profile | Vorbis quality | Standalone FMOD waveform rejection floor |
+| --- | ---: | ---: |
+| Ultra Performance | 0.10 | 20 dB |
+| Performance | 0.22 | 20 dB |
+| Balanced | 0.35 | 20 dB |
+| Quality | 0.50 | 22 dB |
+| Ultra Quality | 0.65 | 24 dB |
+
+Native/Lossless never transcode audio. FMOD keeps its original playback rate,
+channels, frames, loops and event metadata; it rebuilds packet/seek offsets only
+when the codec layout is supported and the sample saves at least 5%. The entire
+bank must also shrink. Automatic standalone `.fsb`/`.bank` processing is limited
+to 256 MiB per file and uses the same original backups, checksums, compression,
+repeat-apply protection and restoration as other loose assets. The waveform
+guard is not a perceptual guarantee: listen and playtest before finalizing.
+Unknown codecs/codebooks/metadata, embedded Unity `.resource` slices, packed
+Unreal audio, loose encoded audio and Godot 4 audio remain unchanged.
+
+All lossy profiles share automatic texture quality safeguards, with no per-game
+tuning or semantic guesses required:
+
+- Standalone textures at or below **512 px on the longest edge**, or **64 px
+  on the short edge**, are left untouched (including RGB quantization).
+- A resize is skipped if its resulting short edge would be below **64 px**.
+  Images are never enlarged to meet this floor.
+- The profile cap is a **soft target**: texture edges retain at least roughly
+  **half their original dimensions** (rounding/block alignment may differ by a
+  few pixels). A 4K texture therefore stays at least 2K even in Ultra Performance.
+  Known original/logical dimensions anchor this budget, so repeated applies do
+  not halve a texture again. Godot 4 layouts without a reliable size reference
+  remain untouched.
+- Explicit RGB rounding retains **at least 7 bits/channel** on supported
+  textures, overriding the more aggressive nominal requests in the table.
+- Known atlas/spritesheet names are preserved. Godot PCK transforms also inspect
+  plain `AtlasTexture` metadata and `.import` references to protect the actual
+  encoded sheet. A large sheet can contain tiny sprites: a 4K sheet must not be
+  treated like one large background image.
+
+These conservative rules run in both asset apply and Godot exports. They are
+not universal UI detection: unnamed atlases or compressed/unrecognized metadata
+may not be identified. Start from original assets when comparing profiles;
+already-discarded detail cannot be recovered by changing the profile. Manual
+visual testing remains necessary.
+
+For maximum compatibility choose **Native**: filesystem Zstd/dedupe preserves
+file bytes and works regardless of the engine. Asset rewriting remains opt-in
+and format-specific; unsupported Unity serialized textures, proprietary packs,
+encrypted/signed layouts and other unknown assets stay unchanged. A safe skip
+is preferable to a guessed rewrite. Display inches are usage guidance, not a
+reliable way to infer an asset's on-screen size, and presets never set the game's
+rendering resolution. No lossy mode can guarantee visual quality in every game.
+
 ```sh
 btrfs-game-compressor --assets Hades
 btrfs-game-compressor --apply-assets Hades
@@ -200,18 +256,20 @@ btrfs-game-compressor --finalize-assets Hades
 ```
 
 Choose a profile in TUI settings before applying. Files change only after
-confirmation, and the game must be closed. Every changed source is retained in
-`.bgc-assets-backup` until restored or finalized. That copy remains allocated,
+confirmation, and the game must be closed. Changed loose sources are retained in
+`.bgc-assets-backup` until restored or finalized. Supported standalone Godot PCK
+packs are rewritten in place without a restore copy; recover them with Steam
+"Verify integrity of game files". That loose-file copy remains allocated,
 so applying may shrink logical file sizes without increasing free disk space.
 Finalizing discards the restore copy; snapshots may still retain blocks. Steam
 verification can replace changed assets. Anti-cheat is not detected
 automatically. Avoid modified assets in online games with anti-cheat. Packed
 Unity/Unreal archives, mipmapped/array/cubemap DDS, multichannel or metadata-rich
-WAV, and encoded audio are inventoried but left unchanged. Each changed file is
+WAV, and unsupported encoded audio are inventoried but left unchanged. Each changed file is
 then compressed once at the configured ZSTD level. The asset optimizer is beta:
 test the game before finalizing its restore copies. Hollow Knight's engine
 packages are not rewritten. Hades package recompression preserves decoded
-content but does not shrink texture dimensions or optimize its Bink/FMOD data.
+content but does not shrink texture dimensions or optimize embedded Bink/FMOD data.
 Preview and apply process one asset at a time rather than buffering all converted
 files in memory. Restore/finalize refuse changed assets and symlinked game
 subdirectories; cleanup preserves unrecognized files in the restore directory.
@@ -222,11 +280,13 @@ disk measurements exclude restore copies and are not net free-space savings.
 
 **Container conversion status:** Hades v7 LZ4 PKG recompression is implemented;
 arbitrary `.pkg` formats and standalone XNB conversion are not. Bink 1/2 videos
-and FMOD FSB/banks are not re-encoded by the automatic asset stage. Bink needs a compatible
-encoder (Hades uses Bink 2); FMOD banks need codec-aware rebuilding that preserves
-sample indices, GUIDs, loop/timing metadata and event references. Decoding or
-renaming these files to MP4/Opus does not make a game load them. These are not
-claimed as automatic compression support until encoding and game compatibility are tested.
+remain unchanged. Supported standalone FMOD FSB5 Vorbis banks are now routed
+through the beta asset stage, with codec-aware rebuilding of seek data and
+preservation of sample indices, identity bytes, loop/timing metadata and event
+references. Embedded streams and unknown layouts are not rewritten. Decoding
+or renaming these files to MP4/Opus does not make a game load them. Runtime FMOD
+compatibility still requires manual playtesting; synthetic tests are not a
+gameplay certification.
 
 The shell's **Lossless** apply workflow requires a fresh backup set and exact
 privileged Btrfs measurements. If the live footprint is not strictly smaller,
@@ -239,7 +299,7 @@ individual physical footprint did not improve when the privileged selection
 report is available. This avoids letting a few poor candidates outweigh a
 useful subset. Counts and logical savings exclude restored candidates.
 
-### Experimental native FMOD exports
+### Experimental native FMOD apply and exports
 
 `--export-fmod QUALITY FILE OUTPUT` performs real lossy Vorbis re-encoding and
 rebuilds supported FSB5 v1 files or single-FSB RIFF/FEV `.bank` containers. All
@@ -268,7 +328,7 @@ btrfs-game-compressor --export-fmod 0.0 /path/to/input.bank /path/to/test-output
 btrfs-game-compressor --export-fmod conservative /path/to/input.bank /path/to/conservative.bank
 ```
 
-The source is never replaced and existing output files are never overwritten.
+For the export command, the source is never replaced and existing output files are never overwritten.
 Output is written only if the total file is smaller. Mono/stereo Vorbis streams
 use verified FMOD codebooks; the encoder keeps playback sample rates, declared
 frame counts, sample ordering, names, identity bytes, loops, markers and bank
@@ -278,8 +338,8 @@ container layouts are rejected; streams with unknown codebooks are retained,
 and banks with unknown potentially offset-bearing metadata are left unchanged. Input is
 limited to 1 GiB, and individual streams to 30 minutes at 48 kHz equivalent.
 
-**This is export-only and experimental:** unit tests check decoded timing and
-metadata, but Hades in-game playback and seeking have not been validated. Do not
+**This remains experimental:** tests check decoded timing, metadata and main-pipeline
+apply/restore, but Hades in-game playback and seeking have not been validated. Do not
 replace installed banks without testing on a disposable game copy. Exports do
 not change compression history or represent net disk savings. Bink 2 encoding
 remains unimplemented; an MP4 renamed to `.bik` is not a compatible replacement.
@@ -379,7 +439,7 @@ enabled for automatic installed-file replacement**:
   declared codec names. This does not decrypt/rewrite indexes, verify hashes or
   signatures, identify actual per-entry codec usage, or support IoStore/RE Engine
   repacking. A declared codec is not permission to switch entries to another one.
-- **Godot PCK textures (lossy, export-only):** `--export-godot-textures PROFILE`
+- **Godot PCK textures (lossy, asset apply or export):** `--export-godot-textures PROFILE`
    supports Godot 3 `.stex` (GDST, PCK v1) and Godot 4 `.ctex` (GST2, PCK v3/v4).
    It downscales supported textures to the profile's longest edge
   (640/1,280/1,920/2,560/3,840 px) and re-encodes them in their original format:
@@ -388,7 +448,10 @@ enabled for automatic installed-file replacement**:
    precision; alpha channels are retained. Logical dimensions are preserved,
    including atlas size overrides; resized mip chains are rebuilt completely.
    Unsupported encodings (Basis Universal, ETC, ASTC, half-float) stay unchanged.
-   A texture is only rewritten when the new payload is strictly smaller.
+    A texture is only rewritten when the new payload is strictly smaller.
+    Shared small/thin texture and known-atlas safeguards apply to every tier.
+    The normal `--apply-assets` pipeline uses the same transforms for standalone
+    packs, without a packed-file backup (Steam verification is the recovery path).
    The pack is rebuilt (32-byte payload alignment for v3/v4), with relocated offsets and
   recomputed per-entry MD5; the export is re-parsed and every untouched entry is
   byte-compared. `--audit-godot-textures PROFILE` is the read-only estimate.
@@ -397,7 +460,7 @@ enabled for automatic installed-file replacement**:
    still need per-game loading/visual checks; see `test/engine-results/` for
    current trials and physical measurements. For the explicit Slay the Spire 2
    export/Zstd/dedupe workflow, see [the manual Godot trial guide](test/GODOT_MANUAL_TRIAL.md).
-- **Godot 3 PCK audio (lossy, export-only):** `--export-godot3-audio PROFILE`
+- **Godot 3 PCK audio (lossy, asset apply or export):** `--export-godot3-audio PROFILE`
   reads standalone Godot 3 PCK v1 packs, parses the `RSRC` binary resources,
   decodes `AudioStreamMP3` (`.mp3str`) and re-encodes it as Ogg Vorbis under the
   same entry name, retyping that entry's `type=` in the matching `.import` stub

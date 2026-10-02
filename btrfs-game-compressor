@@ -2007,8 +2007,12 @@ manage_settings() {
             *) target_desc="${DIM}Native (no asset changes)${RESET}" ;;
         esac
         echo -e "  Asset profile: $target_desc"
-        echo "  Applies to: loose images, DDS textures, PCM WAV, Hades packages, and"
-        echo "              packed PCK assets (Godot/Unity) where supported."
+        echo "  Applies to: loose images, DDS textures, PCM WAV, standalone FMOD, Hades packages, and"
+        echo "              packed Godot PCK assets where supported."
+        echo "  Texture safeguards: small (≤512 px) and thin textures are preserved;"
+        echo "  known atlases are skipped. Resizing never leaves an edge below 64 px."
+        echo "  Profile caps are soft: retain ≥half the original texture dimensions"
+        echo "  and ≥7-bit RGB precision. Native is the byte-preserving default."
         echo "  No per-file restore copies are kept for packed assets; Steam's"
         echo "  'Verify integrity of game files' restores the originals."
         hrule
@@ -2026,7 +2030,7 @@ manage_settings() {
         echo "  [2] Add custom library path"
         echo "  [3] Remove custom library path"
         echo "  [4] Set ZSTD level (auto or 1-15)"
-        echo "  [5] Choose [BETA] asset profile (images, DDS, PCM WAV, Hades packages)"
+        echo "  [5] Choose [BETA] asset profile (images, DDS, WAV/FMOD, Hades packages)"
         echo "  [6] Languages to keep for --slim (removes other language packs)"
         if [ -n "$KEEP_LANGUAGES" ]; then
             echo "      currently keeping: $KEEP_LANGUAGES"
@@ -2094,7 +2098,7 @@ manage_settings() {
                 tput cnorm
                 echo ""
                 echo "  [BETA] Asset profiles change supported media files in place; originals are kept for restore."
-                echo "  Lower profiles resize images/DDS and resample simple PCM WAV to lower sample rates."
+                echo "  Lower profiles resize images/DDS, resample simple WAV, and lower supported FMOD Vorbis quality."
                 echo "  Lossless only recompresses Hades v7 LZ4 packages; decoded assets stay identical."
                 echo "  Anti-cheat compatibility is not detected. Native disables all asset changes."
                 echo "  [1] Ultra Performance (480p)"
@@ -2228,7 +2232,7 @@ batch_compress_routine() {
     if [ "${VISUAL_TARGET:-native}" != native ] && [ "$pending" -gt 0 ] && [ -t 0 ]; then
         echo
         echo "[BETA] Asset profile: $VISUAL_TARGET"
-        echo "Images and DDS textures may lose detail; PCM WAV audio may be resampled. Opus conversion is not attempted because games expect their original codec/container."
+        echo "Images/DDS may lose detail; WAV may be resampled and supported standalone FMOD may be re-encoded. Audio quality follows the asset profile, not Zstd level. Opus conversion is not attempted."
         echo "Anti-cheat is not detected automatically; modified online-game assets may be rejected. Originals are retained for restore."
         read -r -p "Apply beta asset optimization during this batch? [y/N] " choice || choice=n
         [[ "$choice" = y || "$choice" = Y ]] && allow_assets=1
@@ -2375,14 +2379,14 @@ batch_compress_routine() {
         echo "[BETA] Asset optimization: not run (not selected or not confirmed)."
     else
         echo "[BETA] Asset results: scanned $BATCH_ASSET_SCANNED game(s) · changed assets in $BATCH_ASSET_DONE · no eligible assets $BATCH_ASSET_NONE · failed $BATCH_ASSET_FAILED."
-        echo "  Changed files: images $BATCH_ASSET_IMAGES · textures (DDS or packed PCK) $BATCH_ASSET_TEXTURES · audio (PCM WAV or packed PCK) $BATCH_ASSET_WAV · lossless Hades packages $BATCH_ASSET_PACKAGES."
+        echo "  Changed files: images $BATCH_ASSET_IMAGES · textures (DDS or packed PCK) $BATCH_ASSET_TEXTURES · audio (WAV, standalone FMOD or packed PCK) $BATCH_ASSET_WAV · lossless Hades packages $BATCH_ASSET_PACKAGES."
         echo "  Logical sizes of changed files: $(bytes_human "$BATCH_ASSET_BYTES_BEFORE") → $(bytes_human "$BATCH_ASSET_BYTES_AFTER") · reduction: $(bytes_human "$((BATCH_ASSET_BYTES_BEFORE-BATCH_ASSET_BYTES_AFTER))") across $BATCH_ASSET_FILES file(s)."
         if [ "$BATCH_ASSET_FOOTPRINT_MEASURED" -gt 0 ]; then
             echo "  Live game data footprint after optimization: $(bytes_human "$BATCH_ASSET_FOOTPRINT_SAVED") lower in aggregate (restore data and snapshots can still occupy space)."
         else
             echo "  Physical game-data footprint change: unavailable; loose originals remain in restore copies (packed PCK keeps none), so logical reduction is not free space."
         fi
-        echo "  Files identified: packed/media containers $BATCH_ASSET_PACKED · audio files $BATCH_ASSET_AUDIO (only Hades v7 LZ4 bundles can be recompressed; Bink/FMOD are not re-encoded)."
+        echo "  Files identified: packed/media containers $BATCH_ASSET_PACKED · audio files $BATCH_ASSET_AUDIO (Hades v7 LZ4 and supported standalone FMOD are eligible; Bink and unknown formats stay unchanged)."
         echo "  WAV stays WAV. Converting to Opus needs explicit game/engine support and matching asset references; this tool does not rewrite those."
         echo "  Changed files keep their original path and container. Loose assets keep restore copies; packed PCK is rewritten in place, so recover it with Steam verify. Asset size reductions are not free-space savings until loose restore copies are finalized."
     fi
@@ -3388,11 +3392,11 @@ asset_workflow() {
         fi
         if [ "$action" = apply ]; then
             result=$("$(native_backend)" assets plan "$target" 0 "$game") || return 1
-            IFS='|' read -r tag _ reported_target count before after _ packed audio images textures wavs raster total packed_bytes audio_bytes packages <<< "$result"
+            IFS='|' read -r tag _ reported_target count before after _ packed audio images textures wavs raster total packed_bytes audio_bytes packages <<< "${result##*$'\n'}"
             [ "$tag" = ASSETS ] || return 1
             ASSET_PREVIEW_COUNT="$count"
             if [ "$count" -eq 0 ]; then
-                printf '[BETA] No supported asset files can be reduced for this profile. No files changed. Bink/FMOD and unsupported package formats are not rewritten.\n'
+                printf '[BETA] No supported asset files can be reduced for this profile. No files changed. Bink, embedded FMOD and unsupported package formats are not rewritten.\n'
                 asset_scan_summary "$packed" "$audio" "$raster" "$total" "$packed_bytes" "$audio_bytes"
                 return 0
             fi
@@ -3404,7 +3408,7 @@ asset_workflow() {
                 return 2
             fi
             if [ "$confirmed" != 1 ]; then
-                printf '[BETA] Images/DDS may lose visual detail; PCM WAV may be resampled. Anti-cheat is not detected automatically. Loose assets keep a restore copy; supported packed PCK files are rewritten in place with no restore copy (recover with Steam "Verify integrity of game files"). Apply to %s? [y/N] ' "$query"
+                printf '[BETA] Images/DDS may lose detail; WAV may be resampled and standalone FMOD re-encoded. Anti-cheat is not detected automatically. Loose assets keep a restore copy; supported packed PCK files have no restore copy (recover with Steam "Verify integrity of game files"). Apply to %s? [y/N] ' "$query"
             fi
         elif [ "$action" = finalize ]; then
             if [ ! -t 0 ]; then
@@ -3429,7 +3433,8 @@ asset_workflow() {
         printf 'Asset action stopped. Some files may have changed; use --restore-assets after checking the error.\n' >&2
         return 1
     }
-    IFS='|' read -r tag action reported_target count before after retained packed audio images textures wavs raster total packed_bytes audio_bytes packages <<< "$result"
+    # Packed transforms may emit per-pack reports; ASSETS is the final summary.
+    IFS='|' read -r tag action reported_target count before after retained packed audio images textures wavs raster total packed_bytes audio_bytes packages <<< "${result##*$'\n'}"
     [ "$tag" = ASSETS ] || { printf 'Invalid response from native asset backend.\n' >&2; return 1; }
     if [ "$action" = apply ] && [ "$target" = lossless ] && [ "$count" -gt 0 ]; then
         local guard_rc
@@ -3453,7 +3458,7 @@ asset_workflow() {
             else
                 printf 'Candidate asset bytes: %s → %s · possible logical reduction: %s\n' \
                     "$(bytes_human "$before")" "$(bytes_human "$after")" "$(bytes_human "$((before-after))")"
-                printf 'Loose images/DDS are resized; simple PCM WAV may be resampled; supported packed PCK audio/textures are rewritten in place with no restore copy. Hades v7 LZ4 packages are recompressed without changing decoded assets. Bink/FMOD and other packages remain unchanged. These are logical sizes, not net disk savings.\n'
+                printf 'Loose images/DDS are resized; WAV may be resampled and standalone FMOD re-encoded; supported packed PCK audio/textures have no restore copy. Hades v7 LZ4 packages are recompressed without changing decoded assets. Bink, embedded FMOD and unknown packages remain unchanged. These are logical sizes, not net disk savings.\n'
             fi ;;
         apply|restore|finalize)
             disk_after=$(asset_usage_bytes "$game") || disk_after=""
@@ -3500,7 +3505,7 @@ batch_asset_game() {
         printf '  Asset processing failed for %s; check the error above and use Restore Assets if needed.\n' "$name"
         BATCH_ASSET_FAILED=$((BATCH_ASSET_FAILED+1)); return 1
     fi
-    IFS='|' read -r tag _ reported count before after retained packed audio images textures wavs raster total packed_bytes audio_bytes packages <<< "$result"
+    IFS='|' read -r tag _ reported count before after retained packed audio images textures wavs raster total packed_bytes audio_bytes packages <<< "${result##*$'\n'}"
     if [ "$tag" != ASSETS ]; then
         printf '  Assets: invalid result for %s.\n' "$name"; BATCH_ASSET_FAILED=$((BATCH_ASSET_FAILED+1)); return 1
     fi

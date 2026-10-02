@@ -1,5 +1,6 @@
-//! Experimental native FSB5 Vorbis transcoding. Export only: never replaces a
-//! live game asset. Bank/event metadata and playback sample rates are retained.
+//! Experimental native FSB5 Vorbis transcoding for exports and asset apply.
+//! Bank/event metadata and playback sample rates are retained. Unity .resource
+//! slices are not standalone banks: their serialized references are not rewritten.
 use std::{fs, io::{self, Read, Write, Cursor}, num::{NonZeroU32, NonZeroU8},
     os::unix::fs::{MetadataExt, OpenOptionsExt}, path::Path};
 use lewton::{header::{read_header_ident, read_header_setup},
@@ -360,8 +361,27 @@ fn read_source(input: &Path) -> io::Result<Vec<u8>> {
     let meta = source.metadata()?;
     if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_FILE { return Err(bad("FMOD input must be a single-link regular file of at most 1 GiB")); }
     let mut b = Vec::new(); Read::by_ref(&mut source).take(MAX_FILE+1).read_to_end(&mut b)?;
-    if b.len() as u64 != meta.len() { return Err(bad("FMOD input changed during read")); }
+    let after = source.metadata()?;
+    if b.len() as u64 != meta.len() || meta.len() != after.len()
+        || meta.mtime() != after.mtime() || meta.mtime_nsec() != after.mtime_nsec()
+        || meta.ctime() != after.ctime() || meta.ctime_nsec() != after.ctime_nsec() {
+        return Err(bad("FMOD input changed during read"));
+    }
     Ok(b)
+}
+
+/// Prepare only a standalone bank, never an embedded Unity/Unreal resource.
+/// The main asset writer supplies savings-gated replacement, original backup,
+/// checksum, compression, and restore. Unknown metadata/codebooks fail closed.
+pub fn prepare(input: &Path, target: Option<crate::audio_policy::Target>) -> io::Result<Option<Vec<u8>>> {
+    let Some(target) = target else { return Ok(None); };
+    let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !ext.eq_ignore_ascii_case("fsb") && !ext.eq_ignore_ascii_case("bank") { return Ok(None); }
+    let bytes = read_source(input)?;
+    let policy = Policy { quality: target.vorbis_quality, min_snr_db: target.min_snr_db, min_gain_pct: 5 };
+    let (result, changed, _) = rebuild(&bytes, policy)?;
+    if changed == 0 || result.len() >= bytes.len() { return Ok(None); }
+    Ok(Some(result))
 }
 
 /// Bounded offline decoder microbenchmark, not an FMOD runtime benchmark.
@@ -465,10 +485,10 @@ pub fn run(profile: &str, input: &Path, output: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn fixture(extra_unknown: bool) -> Vec<u8> {
+    pub(crate) fn fixture(extra_unknown: bool) -> Vec<u8> {
         let frames = 44100usize;
         let mut enc = encoder(0.4,2).unwrap();
         let mut seed = 0x12345678u32;

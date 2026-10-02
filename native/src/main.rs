@@ -8,6 +8,8 @@ mod engines;
 mod unityfs;
 mod containers;
 mod gst2;
+mod texture_policy;
+mod audio_policy;
 mod godot3;
 mod gdst;
 mod md5;

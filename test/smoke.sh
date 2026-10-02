@@ -1899,6 +1899,7 @@ printf '\n----------------------------------------\n'
 group "Asset preview explains unsupported Hades containers"
 cat > "$WORK/asset-preview-shim" <<'SHIM'
 #!/bin/sh
+printf 'GODOT_TEXTURE|100|100|1|0|1|0|0.0000|NO_GAIN\n'
 printf 'ASSETS|plan|Balanced (1080p)|0|0|0|0|1594|12|0|0|0|0|11899644249|10048817801|1177574764\n'
 SHIM
 chmod +x "$WORK/asset-preview-shim"

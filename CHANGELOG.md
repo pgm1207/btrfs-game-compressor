@@ -1,6 +1,32 @@
 # Changelog
 
-## 0.2.0 — Native filesystem backend
+## 0.2.0 — Unreleased — Native backend and compatibility-first assets
+
+### Latest development improvements
+
+- Apply supported standalone Godot 3/4 PCK transforms through the main pipeline.
+  Chain Godot 3 audio and textures, preserve unknown resources, verify finished
+  packs, and make repeated texture applies stable. Packed PCK recovery uses Steam
+  verification; loose sources retain restorable backups.
+- Make small/thin texture protection, known-atlas protection, relative half-size
+  budgets and a 7-bit RGB rounding floor automatic across supported lossy paths.
+  Profile texture caps are soft targets, not game render resolutions. Godot 4
+  textures without reliable original/logical dimensions are skipped.
+- Share audio quality policy across WAV, Godot 3 audio and supported standalone
+  FMOD FSB5 Vorbis banks. Automatic FMOD applies are bounded, savings- and
+  waveform-gated, preserve playback metadata and use loose-file backups. Native
+  and Lossless never transcode audio; embedded Unity/Unreal audio stays untouched.
+- Verify Mech Havoc lossless copy bytes and exact Btrfs extent measurements:
+  90.23% less physical data than logical bytes, or 19.35% improvement over its
+  already-compressed installation. Do not conflate this with net free-space gain.
+- Validate conservative Slay texture copies, Hades bank apply/repeat/restore,
+  96 unit tests, 6 enabled real-Btrfs integration tests and 433 shell smoke checks.
+  Runtime visual/audio quality still requires manual playtesting.
+
+### Earlier development history
+
+The export-only notes below describe the initial implementation stages, not the
+current automatic-apply support. See README for current supported formats.
 
 - Initial Godot support: plain PCK v1–4 inventory/deduplication, Godot 3
   GDST and Godot 4 GST2 profile-aware texture exports, plus Godot 3 music/PCM

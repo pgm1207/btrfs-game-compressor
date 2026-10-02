@@ -32,18 +32,25 @@ struct Profile {
     color_bits: u8,
     audio_rate: u32,
     audio_bits: u16,
+    audio_target: Option<crate::audio_policy::Target>,
 }
 fn profile(s: &str) -> io::Result<Option<Profile>> {
-    Ok(Some(match s {
-        "ultra-performance" => Profile { label:"Ultra Performance (480p; WAV up to 11.025 kHz / 8-bit)", max_edge:640, jpeg_quality:60, color_bits:4, audio_rate:11025, audio_bits:8 },
-        "performance" => Profile { label:"Performance (720p)", max_edge:1280, jpeg_quality:80, color_bits:6, audio_rate:32000, audio_bits:16 },
-        "balanced" => Profile { label:"Balanced (1080p)", max_edge:1920, jpeg_quality:86, color_bits:7, audio_rate:44100, audio_bits:16 },
-        "quality" => Profile { label:"Quality (1440p)", max_edge:2560, jpeg_quality:91, color_bits:8, audio_rate:48000, audio_bits:16 },
-        "ultra-quality" => Profile { label:"Ultra Quality (4K)", max_edge:3840, jpeg_quality:95, color_bits:8, audio_rate:48000, audio_bits:16 },
-        "lossless" => Profile { label:"Lossless (Hades packages only)", max_edge:u32::MAX, jpeg_quality:100, color_bits:8, audio_rate:u32::MAX, audio_bits:u16::MAX },
+    let mut p = match s {
+        "ultra-performance" => Profile { label:"Ultra Performance (480p; WAV up to 11.025 kHz / 8-bit)", max_edge:640, jpeg_quality:60, color_bits:4, audio_rate:11025, audio_bits:8, audio_target:None },
+        "performance" => Profile { label:"Performance (720p)", max_edge:1280, jpeg_quality:80, color_bits:6, audio_rate:32000, audio_bits:16, audio_target:None },
+        "balanced" => Profile { label:"Balanced (1080p)", max_edge:1920, jpeg_quality:86, color_bits:7, audio_rate:44100, audio_bits:16, audio_target:None },
+        "quality" => Profile { label:"Quality (1440p)", max_edge:2560, jpeg_quality:91, color_bits:8, audio_rate:48000, audio_bits:16, audio_target:None },
+        "ultra-quality" => Profile { label:"Ultra Quality (4K)", max_edge:3840, jpeg_quality:95, color_bits:8, audio_rate:48000, audio_bits:16, audio_target:None },
+        "lossless" => Profile { label:"Lossless (Hades packages only)", max_edge:u32::MAX, jpeg_quality:100, color_bits:8, audio_rate:u32::MAX, audio_bits:u16::MAX, audio_target:None },
         "native" => return Ok(None),
         _ => return Err(bad("visual target must be ultra-performance, performance, balanced, quality, ultra-quality, lossless, or native")),
-    }))
+    };
+    p.audio_target = crate::audio_policy::target_for(s)?;
+    if let Some(audio) = p.audio_target {
+        p.audio_rate = audio.pcm_rate;
+        p.audio_bits = audio.pcm_bits;
+    }
+    Ok(Some(p))
 }
 fn bad(s: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, s)
@@ -813,6 +820,7 @@ fn resample_wav(path: &Path, p: &Profile) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(out))
 }
 fn prepare(path: &Path, p: &Profile) -> io::Result<Option<Vec<u8>>> {
+    if crate::texture_policy::atlas_hint(path) { return Ok(None); }
     let meta = fs::symlink_metadata(path)?;
     if !meta.file_type().is_file() || meta.nlink() != 1 || meta.len() == 0 || meta.len() > MAX_INPUT
     {
@@ -858,6 +866,7 @@ fn prepare(path: &Path, p: &Profile) -> io::Result<Option<Vec<u8>>> {
         || header_h == 0
         || header_w as u64 * header_h as u64 > MAX_PIXELS
         || header_w.max(header_h) <= p.max_edge
+        || crate::texture_policy::small_or_thin(header_w, header_h)
     {
         return Ok(None);
     }
@@ -899,15 +908,17 @@ fn prepare(path: &Path, p: &Profile) -> io::Result<Option<Vec<u8>>> {
     }
     let img = DynamicImage::from_decoder(decoder)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let scale = p.max_edge as f64 / img.width().max(img.height()) as f64;
+    let edge = crate::texture_policy::effective_edge(p.max_edge, img.width(), img.height());
+    let scale = (edge as f64 / img.width().max(img.height()) as f64).min(1.0);
     let align = if format == ImageFormat::Dds { 4 } else { 1 };
     let nw = (((img.width() as f64 * scale).round() as u32 / align) * align).max(align);
     let nh = (((img.height() as f64 * scale).round() as u32 / align) * align).max(align);
+    if crate::texture_policy::output_too_thin(nw, nh) { return Ok(None); }
     let mut resized = img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3);
     // JPEG and BCn have their own lossy encoders. For other supported 8-bit
     // RGB rasters, progressively quantize color after scaling; alpha is exact.
     if !matches!(format, ImageFormat::Jpeg | ImageFormat::Dds) {
-        reduce_rgb_precision(&mut resized, p.color_bits);
+        reduce_rgb_precision(&mut resized, crate::texture_policy::color_bits(p.color_bits));
     }
     let output = encode(&resized, format, p, path)?;
     if output.len() >= meta.len() as usize {
@@ -995,6 +1006,24 @@ fn collect(
                 .strip_prefix(root)
                 .map_err(|_| bad("asset escaped game directory"))?;
             if root.join(BACKUP).join(rel).exists() {
+                continue;
+            }
+            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fsb") || e.eq_ignore_ascii_case("bank")) {
+                // Unlike embedded .resource slices, standalone FMOD banks can
+                // be rebuilt without touching Unity/Unreal serialized offsets.
+                // Keep per-file work bounded; no unsafe signature scanning.
+                if m.len() <= 256 * 1024 * 1024 {
+                    match super::fmod::prepare(&path, p.audio_target) {
+                        Ok(Some(new)) => visit(path, new, AssetKind::Audio)?,
+                        Ok(None) => {},
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
+                        Err(e) => {
+                            if std::env::var_os("BGC_VERBOSE").is_some() {
+                                eprintln!("Skipping standalone FMOD audio {}: {e}", path.display());
+                            }
+                        }
+                    }
+                }
                 continue;
             }
             if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pkg")) {
@@ -1453,7 +1482,7 @@ pub fn run(action: &str, target: &str, level: u8, root: &Path) -> io::Result<()>
             let kind_name = match kind {
                 AssetKind::Image => "image",
                 AssetKind::Texture => "DDS texture",
-                AssetKind::Audio => "WAV audio",
+                AssetKind::Audio => "WAV / standalone FMOD audio",
                 AssetKind::Package => "lossless Hades LZ4 package",
             };
             eprintln!(
@@ -1665,6 +1694,93 @@ mod tests {
         let root = fixture("invalid-action");
         assert!(run("typo", "native", 0, &root).is_err());
         assert!(run("typo", "balanced", 0, &root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn standalone_fmod_uses_profile_policy_in_main_collection() {
+        let original = crate::fmod::tests::fixture(false);
+        let unsupported = crate::fmod::tests::fixture(true);
+        let mut changed = 0;
+        for name in ["native", "lossless", "ultra-performance", "performance", "balanced", "quality", "ultra-quality"] {
+            let root = fixture("fmod-pipeline");
+            let bank = root.join("sound.FSB");
+            fs::write(&bank, &original).unwrap();
+            fs::write(root.join("unknown.bank"), &unsupported).unwrap();
+            fs::write(root.join("resources.resource"), &original).unwrap();
+            fs::write(root.join("broken.bank"), b"not a bank").unwrap();
+            let mut found = Vec::new();
+            if let Some(p) = profile(name).unwrap() {
+                let expected = crate::fmod::prepare(&bank, p.audio_target).unwrap();
+                collect(&root, &p, |path, bytes, kind| {
+                    assert!(matches!(kind, AssetKind::Audio));
+                    found.push((path, bytes));
+                    Ok(())
+                }).unwrap();
+                if let Some(bytes) = expected {
+                    changed += 1;
+                    assert_eq!(found, vec![(bank.clone(), bytes.clone())], "{name}");
+                    // Main collection never mutates a source, including planning.
+                    assert_eq!(fs::read(&bank).unwrap(), original);
+                    // Once installed by the main writer, the original backup
+                    // prevents cumulative lossy transcoding on subsequent runs.
+                    fs::write(root.join(BACKUP).join("sound.FSB"), &original).unwrap();
+                    fs::write(&bank, bytes).unwrap();
+                    collect(&root, &p, |_, _, _| panic!("{name}: backed-up audio was transcoded again")).unwrap();
+                } else {
+                    assert!(found.is_empty(), "{name}");
+                }
+            }
+            assert_eq!(fs::read(root.join("resources.resource")).unwrap(), original);
+            assert_eq!(fs::read(root.join("unknown.bank")).unwrap(), unsupported);
+            fs::remove_dir_all(root).unwrap();
+        }
+        assert!(changed > 0, "the quality guards rejected every fixture; no successful integration exercised");
+    }
+
+    #[test]
+    fn standalone_fmod_real_btrfs_apply_and_restore() {
+        let Some(parent) = std::env::var_os("BGC_TEST_BTRFS_DIR") else { return; };
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = Path::new(&parent).join(format!("bgc-fmod-main-{stamp}"));
+        fs::create_dir(&root).unwrap();
+        let original = crate::fmod::tests::fixture(false);
+        let sound = root.join("sound.fsb");
+        fs::write(&sound, &original).unwrap();
+        let bank = root.join("sound.bank");
+        let mut riff = b"RIFF".to_vec();
+        riff.extend_from_slice(&(12u32 + original.len() as u32 + (original.len() as u32 & 1)).to_le_bytes());
+        riff.extend_from_slice(b"FEV SND ");
+        riff.extend_from_slice(&(original.len() as u32).to_le_bytes());
+        riff.extend_from_slice(&original);
+        if original.len() & 1 != 0 { riff.push(0); }
+        fs::write(&bank, &riff).unwrap();
+        let originals = [(sound, original), (bank, riff)];
+        // Choose a savings- and waveform-gated tier that actually transforms
+        // this synthetic sample, rather than counting a skip as success.
+        let name = ["ultra-performance", "performance", "balanced"].into_iter().find(|name| {
+            crate::fmod::prepare(&originals[0].0, crate::audio_policy::target_for(name).unwrap()).unwrap().is_some()
+        }).expect("no successful FMOD fixture");
+        for preserved in ["native", "lossless"] {
+            run("apply", preserved, 3, &root).unwrap();
+            for (path, bytes) in &originals { assert_eq!(&fs::read(path).unwrap(), bytes); }
+        }
+        run("plan", name, 3, &root).unwrap();
+        for (path, bytes) in &originals { assert_eq!(&fs::read(path).unwrap(), bytes); }
+        run("apply", name, 3, &root).unwrap();
+        for (path, bytes) in &originals {
+            let optimized = fs::read(path).unwrap();
+            assert!(optimized.len() < bytes.len());
+            let backup = root.join(BACKUP).join(path.file_name().unwrap());
+            assert_eq!(&fs::read(&backup).unwrap(), bytes);
+            assert!(sidecar(&backup).exists());
+        }
+        let applied: Vec<_> = originals.iter().map(|(p, _)| fs::read(p).unwrap()).collect();
+        run("apply", name, 3, &root).unwrap();
+        for ((path, _), bytes) in originals.iter().zip(applied) { assert_eq!(fs::read(path).unwrap(), bytes); }
+        run("restore", "native", 3, &root).unwrap();
+        for (path, bytes) in &originals { assert_eq!(&fs::read(path).unwrap(), bytes); }
+        assert!(!root.join(BACKUP).exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1881,7 +1997,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("bgc-assets-unit-{stamp}"));
         fs::create_dir(&root).unwrap();
         let path = root.join("background");
-        let image = image::ImageBuffer::from_fn(2048, 128, |x, y| {
+        let image = image::ImageBuffer::from_fn(2048, 256, |x, y| {
             let v = x.wrapping_mul(73).wrapping_add(y.wrapping_mul(151));
             image::Rgb([
                 (v & 255) as u8,
@@ -1903,11 +2019,11 @@ mod tests {
             .unwrap()
             .decode()
             .unwrap();
-        assert_eq!(decoded.width(), 640);
+        assert_eq!(decoded.width(), 1024);
         for pixel in decoded.to_rgb8().pixels() {
-            assert_eq!(quantize_channel(pixel[0], 4), pixel[0]);
-            assert_eq!(quantize_channel(pixel[1], 4), pixel[1]);
-            assert_eq!(quantize_channel(pixel[2], 4), pixel[2]);
+            assert_eq!(quantize_channel(pixel[0], 7), pixel[0]);
+            assert_eq!(quantize_channel(pixel[1], 7), pixel[1]);
+            assert_eq!(quantize_channel(pixel[2], 7), pixel[2]);
         }
         let p = profile("ultra-performance").unwrap().unwrap();
         let mut visits = 0;
@@ -1931,6 +2047,21 @@ mod tests {
         assert!(!may_have_raster_signature(Path::new("texture.tex")));
         assert!(!may_have_raster_signature(Path::new("game.assets")));
         assert!(may_have_raster_signature(Path::new("background")));
+    }
+
+    #[test]
+    fn loose_atlas_and_thin_images_are_preserved_for_all_profiles() {
+        let root = fixture("texture-protection");
+        let atlas = root.join("ui_atlas.png");
+        let thin = root.join("strip.png");
+        image::RgbImage::new(1000, 1000).save(&atlas).unwrap();
+        image::RgbImage::new(2048, 65).save(&thin).unwrap();
+        for target in ["ultra-performance", "performance", "balanced", "quality", "ultra-quality"] {
+            let p = profile(target).unwrap().unwrap();
+            assert!(prepare(&atlas, &p).unwrap().is_none(), "{target}");
+            assert!(prepare(&thin, &p).unwrap().is_none(), "{target}");
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

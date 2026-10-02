@@ -171,7 +171,30 @@ fn resize(image: &RgbaImage, width: u32, height: u32) -> RgbaImage {
 /// `Ok(None)` when the texture is unsupported, already small enough, or would not
 /// become strictly smaller. Only the base mip chain is regenerated; header flags,
 /// mipmap-limit and the declared pixel format are preserved.
-pub fn transform(bytes: &[u8], target: &TextureTarget) -> io::Result<Option<Vec<u8>>> {
+pub fn transform_safe(bytes: &[u8], target: &TextureTarget) -> io::Result<Option<Vec<u8>>> {
+    let Some(info) = inspect(bytes) else { return Ok(None); };
+    if crate::texture_policy::small_or_thin(info.width, info.height) {
+        return Ok(None);
+    }
+    // Without logical dimensions we cannot establish a stable original-size
+    // budget. Leave such layouts untouched rather than repeatedly shrinking.
+    let original_w = le_u32(bytes, 8);
+    let original_h = le_u32(bytes, 12);
+    if original_w == 0 || original_h == 0 { return Ok(None); }
+    let target = TextureTarget {
+        max_edge: crate::texture_policy::effective_edge(target.max_edge, original_w.max(info.width), original_h.max(info.height)),
+        color_bits: crate::texture_policy::color_bits(target.color_bits),
+        ..*target
+    };
+    let scale = (target.max_edge as f64 / info.width.max(info.height) as f64).min(1.0);
+    let w = ((info.width as f64 * scale).round() as u32).max(1);
+    let h = ((info.height as f64 * scale).round() as u32).max(1);
+    if crate::texture_policy::output_too_thin(w, h) { return Ok(None); }
+    transform(bytes, &target)
+}
+
+// Codec core; production callers use transform_safe to enforce quality guards.
+fn transform(bytes: &[u8], target: &TextureTarget) -> io::Result<Option<Vec<u8>>> {
     if bytes.len() < 52 || &bytes[..4] != b"GST2" {
         return Ok(None);
     }
@@ -422,6 +445,35 @@ mod tests {
         basis[36..40].copy_from_slice(&3u32.to_le_bytes());
         assert!(transform(&basis, &target).unwrap().is_none());
         assert!(transform(b"not a texture", &target).unwrap().is_none());
+    }
+
+    #[test]
+    fn safe_profiles_preserve_small_and_thin_textures_without_quantizing() {
+        let small = webp_ctex(512, 512);
+        let thin = webp_ctex(2048, 65);
+        for profile in ["ultra-performance", "performance", "balanced", "quality", "ultra-quality"] {
+            let target = target_for(profile).unwrap().unwrap();
+            assert!(transform_safe(&small, &target).unwrap().is_none(), "{profile}");
+            assert!(transform_safe(&thin, &target).unwrap().is_none(), "{profile}");
+        }
+        let large = webp_ctex(1000, 600);
+        assert!(transform_safe(&large, &target_for("ultra-performance").unwrap().unwrap()).unwrap().is_some());
+        assert!(target_for("native").unwrap().is_none());
+        assert!(target_for("lossless").unwrap().is_none());
+    }
+
+    #[test]
+    fn relative_budget_uses_original_dimensions_and_cannot_shrink_repeatedly() {
+        let source = webp_ctex(2048, 1024);
+        let target = target_for("ultra-performance").unwrap().unwrap();
+        let out = transform_safe(&source, &target).unwrap().unwrap();
+        let info = inspect(&out).unwrap();
+        assert_eq!((info.width, info.height), (1024, 512));
+        assert_eq!(&out[8..16], &source[8..16]);
+        assert!(transform_safe(&out, &target).unwrap().is_none());
+        let mut unknown_size = source.clone();
+        unknown_size[8..16].fill(0);
+        assert!(transform_safe(&unknown_size, &target).unwrap().is_none());
     }
 
     #[test]

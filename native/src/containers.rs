@@ -1,6 +1,6 @@
 //! Bounded, read-only Godot PCK directory and Unreal Pak footer inspection.
 //! Neither extension names nor footer codec names establish safe removability.
-use std::{collections::BTreeMap, fs::{self, File}, io::{self, Read, Write, Seek, SeekFrom},
+use std::{collections::{BTreeMap, BTreeSet}, fs::{self, File}, io::{self, Read, Write, Seek, SeekFrom},
     os::unix::fs::{MetadataExt, OpenOptionsExt}, path::Path};
 use super::invalid;
 
@@ -464,15 +464,7 @@ pub fn godot_dedup(input: &Path, output: Option<&Path>, min_efficiency: f64) -> 
 }
 
 fn godot3_vorbis_quality(profile: &str) -> io::Result<Option<f32>> {
-    Ok(Some(match profile {
-        "ultra-performance" => 0.10,
-        "performance" => 0.22,
-        "balanced" => 0.35,
-        "quality" => 0.50,
-        "ultra-quality" => 0.65,
-        "lossless" | "native" => return Ok(None),
-        _ => return Err(invalid("Godot 3 audio profile must be a quality profile or native")),
-    }))
+    Ok(crate::audio_policy::target_for(profile)?.map(|target| target.vorbis_quality))
 }
 
 /// Export-only Godot 3 (standalone PCK v1) audio optimization. `AudioStreamMP3`
@@ -483,6 +475,61 @@ fn godot3_vorbis_quality(profile: &str) -> io::Result<Option<f32>> {
 /// re-parsed and untouched entries are byte-compared against the source.
 pub fn godot3_optimize(input: &Path, output: Option<&Path>, min_efficiency: f64, profile: &str) -> io::Result<()> {
     godot3_transform(input, output, min_efficiency, profile, false)
+}
+
+/// Extract literal Godot resource paths from plain text/binary metadata. This
+/// does not attempt to decode compressed resources or infer atlas geometry.
+fn resource_paths(bytes: &[u8]) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    for (i, window) in bytes.windows(6).enumerate() {
+        if window != b"res://" { continue; }
+        let tail = &bytes[i + 6..];
+        let end = tail.iter().position(|b| *b < 32 || matches!(*b, b'"' | b'\''))
+            .unwrap_or(tail.len());
+        if end == 0 || end > 4096 { continue; }
+        if let Ok(path) = std::str::from_utf8(&tail[..end]) { paths.insert(path.to_owned()); }
+    }
+    paths
+}
+
+/// Protect all aliases of named atlases and of textures referenced by plain
+/// AtlasTexture resources. Resolve source texture paths through .import stubs
+/// to their encoded .ctex/.stex payloads. Unrecognized atlases remain a caveat.
+fn protected_texture_offsets(file: &mut File, pack: &Pack) -> io::Result<BTreeSet<u64>> {
+    let mut paths = BTreeSet::new();
+    let mut budget = 64u64 * 1024 * 1024;
+    for e in &pack.entries {
+        if crate::texture_policy::atlas_hint(Path::new(&e.name)) {
+            paths.insert(e.name.trim_start_matches("res://").to_owned());
+        }
+        let ext = Path::new(&e.name).extension().and_then(|s| s.to_str()).unwrap_or("");
+        if !matches!(ext, "tres" | "res" | "tscn" | "scn") { continue; }
+        // Fail the packed transform closed rather than silently omitting a
+        // potentially important atlas declaration when metadata exceeds bounds.
+        if e.size > 4 * 1024 * 1024 { return Err(invalid("atlas metadata exceeds inspection limit")); }
+        budget = budget.checked_sub(e.size).ok_or_else(|| invalid("atlas metadata inspection budget exceeded"))?;
+        let mut bytes = vec![0; e.size as usize];
+        file.seek(SeekFrom::Start(e.offset))?; file.read_exact(&mut bytes)?;
+        if bytes.windows(12).any(|w| w == b"AtlasTexture") {
+            paths.extend(resource_paths(&bytes));
+        }
+        super::cancelled()?;
+    }
+    // Use a snapshot: one import indirection resolves source images to their
+    // runtime payload; no recursive graph traversal or path guessing is needed.
+    let sources = paths.clone();
+    for e in &pack.entries {
+        let name = e.name.trim_start_matches("res://");
+        if !name.strip_suffix(".import").is_some_and(|source| sources.contains(source)) { continue; }
+        if e.size > 1024 * 1024 { return Err(invalid("atlas import metadata exceeds inspection limit")); }
+        budget = budget.checked_sub(e.size).ok_or_else(|| invalid("atlas metadata inspection budget exceeded"))?;
+        let mut bytes = vec![0; e.size as usize];
+        file.seek(SeekFrom::Start(e.offset))?; file.read_exact(&mut bytes)?;
+        paths.extend(resource_paths(&bytes));
+        super::cancelled()?;
+    }
+    Ok(pack.entries.iter().filter(|e| paths.contains(e.name.trim_start_matches("res://")))
+        .map(|e| e.offset).collect())
 }
 
 /// In-place Godot 3 PCK audio/texture rewrite used by the main asset pipeline.
@@ -561,6 +608,7 @@ fn godot3_transform(input: &Path, output: Option<&Path>, min_efficiency: f64, pr
     if pack.entries.iter().any(|e| e.flags != 0) {
         return Err(invalid("Godot 3 rewriting requires plain entries"));
     }
+    let protected = if textures_only { protected_texture_offsets(&mut file, &pack)? } else { BTreeSet::new() };
     // v1 keeps the directory immediately after its 84-byte header and stores
     // absolute payload offsets, so the structural prefix is fixed length.
     let directory = 84u64;
@@ -598,13 +646,14 @@ fn godot3_transform(input: &Path, output: Option<&Path>, min_efficiency: f64, pr
         let is_mp3 = !textures_only && name.ends_with(".mp3str");
         let is_wav = !textures_only && name.ends_with(".sample");
         let is_texture = textures_only && name.ends_with(".stex");
+        if is_texture && protected.contains(&off) { continue; }
         if !is_mp3 && !is_wav && !is_texture { continue; }
         if size > MAX_TEX_ENTRY { continue; }
         if is_mp3 || is_texture { mp3_total += 1; } else { wav_total += 1; }
         let mut buf = vec![0u8; size as usize];
         file.seek(SeekFrom::Start(off))?; file.read_exact(&mut buf)?;
         let result = if is_texture {
-            crate::gdst::transform(&buf, profile)?
+            crate::gdst::transform_safe(&buf, profile)?
         } else if is_mp3 {
             crate::godot3::transform_mp3(&buf, quality)?
         } else {
@@ -900,6 +949,7 @@ pub fn godot_texture_transform(input: &Path, output: Option<&Path>, min_efficien
     file.seek(SeekFrom::Start(0))?;
     let pack = pck(&mut file, meta.len())?;
     if pack.entries.iter().any(|e| e.flags != 0) { return Err(invalid("PCK texture rewriting requires plain entries without removal flags")); }
+    let protected = protected_texture_offsets(&mut file, &pack)?;
 
     let mut prefix = vec![0u8; base as usize];
     file.seek(SeekFrom::Start(0))?; file.read_exact(&mut prefix)?;
@@ -928,9 +978,18 @@ pub fn godot_texture_transform(input: &Path, output: Option<&Path>, min_efficien
         let mut result_size = size;
         let mut result_hash = *original_hash.get(&off).unwrap_or(&[0; 16]);
         if transformable.contains_key(&off) && size <= MAX_TEX_ENTRY {
+            if protected.contains(&off) {
+                skipped += 1;
+                new_offset.insert(off, aligned);
+                new_size.insert(off, size);
+                new_hash.insert(off, result_hash);
+                pos = aligned + size;
+                super::cancelled()?;
+                continue;
+            }
             let mut buf = vec![0u8; size as usize];
             file.seek(SeekFrom::Start(off))?; file.read_exact(&mut buf)?;
-            match crate::gst2::transform(&buf, &target)? {
+            match crate::gst2::transform_safe(&buf, &target)? {
                 Some(new_bytes) => {
                     saved += size as i64 - new_bytes.len() as i64;
                     result_size = new_bytes.len() as u64;
@@ -1280,10 +1339,51 @@ mod tests {
         out
     }
     #[test]
+    fn atlas_metadata_and_names_protect_payloads_in_every_profile() {
+        let root = std::env::temp_dir().join(format!("bgc-atlas-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&root).unwrap();
+        let entries = [
+            ("res://.godot/sheet.ctex", raw_ctex(1200, 900)),
+            ("res://card_atlas_0.ctex", raw_ctex(1200, 900)),
+            ("res://small.ctex", raw_ctex(256, 256)),
+            ("res://background.ctex", raw_ctex(1200, 900)),
+            ("res://card.tres", b"[gd_resource type=\"AtlasTexture\"]\n[ext_resource path=\"res://art/sheet.png\"]\nregion = Rect2(1, 1, 250, 351)\n".to_vec()),
+            ("res://art/sheet.png.import", b"[remap]\npath=\"res://.godot/sheet.ctex\"\n".to_vec()),
+        ];
+        let input = root.join("in.pck");
+        fs::write(&input, build_pck(&entries)).unwrap();
+        for profile in ["ultra-performance", "performance", "balanced", "quality", "ultra-quality"] {
+            let (mut f, m) = open(&input).unwrap();
+            let pack = pck(&mut f, m.len()).unwrap();
+            let protected = protected_texture_offsets(&mut f, &pack).unwrap();
+            assert!(protected.contains(&pack.entries[0].offset));
+            assert!(protected.contains(&pack.entries[1].offset));
+            assert!(!protected.contains(&pack.entries[3].offset));
+            let output = root.join(format!("{profile}.pck"));
+            godot_texture_transform(&input, Some(&output), 0.0, profile).unwrap();
+            if output.exists() {
+                let bytes = fs::read(output).unwrap();
+                let check = pck(&mut io::Cursor::new(&bytes), bytes.len() as u64).unwrap();
+                for i in [0usize, 1, 2, 4, 5] {
+                    let e = &check.entries[i];
+                    assert_eq!(&bytes[e.offset as usize..(e.offset + e.size) as usize], &entries[i].1, "{profile}: protected resource {i}");
+                }
+                assert!(check.entries[3].size < pack.entries[3].size);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resource_path_inspection_handles_text_and_binary_delimiters() {
+        let paths = resource_paths(b"path=\"res://art/a.png\"\nres://.godot/b.ctex\0padding");
+        assert_eq!(paths, BTreeSet::from(["art/a.png".to_owned(), ".godot/b.ctex".to_owned()]));
+    }
+    #[test]
     fn godot3_texture_export_preserves_payloads_and_gates_before_writing() {
         let root = std::env::temp_dir().join(format!("bgc-gdst-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         fs::create_dir(&root).unwrap();
-        let texture = crate::gdst::tests::fixture(256, 256);
+        let texture = crate::gdst::tests::fixture(600, 600);
         let entries = [("res://art.stex", texture), ("res://data.bin", vec![7u8; 1000])];
         let mut bytes = b"GDPC".to_vec();
         for v in [1u32, 3, 7, 0] { bytes.extend_from_slice(&v.to_le_bytes()); }

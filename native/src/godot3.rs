@@ -508,14 +508,8 @@ fn patch_properties(bytes: &[u8], changes: &[(String, Variant)]) -> io::Result<V
 
 /// Profile-aware PCM reduction; no ADPCM and no resource-type change.
 pub fn transform_sample_pcm(bytes: &[u8], profile: &str) -> io::Result<Option<Vec<u8>>> {
-    let (limit_rate, limit_bits) = match profile {
-        "ultra-performance" => (11025u32, 8),
-        "performance" => (32000, 16),
-        "balanced" => (44100, 16),
-        "quality" | "ultra-quality" => (48000, 16),
-        "native" | "lossless" => return Ok(None),
-        _ => return Err(bad("unknown PCM profile")),
-    };
+    let target = match crate::audio_policy::target_for(profile)? { Some(t) => t, None => return Ok(None) };
+    let (limit_rate, limit_bits) = (target.pcm_rate, target.pcm_bits as usize);
     let res = match parse(bytes) { Ok(r) => r, Err(_) => return Ok(None) };
     if res.res_type != "AudioStreamSample" || bytes[4..12] != [0; 8] { return Ok(None); }
     let format = match res.get("format") { None => 0, Some(Variant::Int(v @ (0 | 1))) => *v, _ => return Ok(None) };

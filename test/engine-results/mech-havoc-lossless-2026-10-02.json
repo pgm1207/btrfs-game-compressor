@@ -1,0 +1,30 @@
+{
+  "game": "Mech Havoc",
+  "date": "2026-10-02",
+  "engine": "Unity",
+  "scope": "new copy only; installed game not modified",
+  "profile": "ultra-performance",
+  "asset_files_rewritten": 0,
+  "unsupported_assets": "Unity serialized textures and FMOD kept unchanged",
+  "zstd_level": 3,
+  "file_count": 357,
+  "logical_file_bytes": 4761730125,
+  "all_file_lengths_and_sha256_match_original": true,
+  "files_with_compressed_extents_detected": 349,
+  "measurement": "privileged Btrfs extent inspection; unique referenced physical data; excludes filesystem metadata",
+  "installed_already_compressed": {
+    "disk_bytes": 576727490,
+    "raw_extent_bytes": 4762382228,
+    "referenced_bytes": 4762374036
+  },
+  "compressed_copy": {
+    "disk_bytes": 465111125,
+    "raw_extent_bytes": 4762374036,
+    "referenced_bytes": 4762374036
+  },
+  "copy_reduction_relative_to_logical_percent": 90.2323,
+  "additional_referenced_reduction_bytes": 111616365,
+  "additional_referenced_reduction_percent": 19.3534,
+  "net_filesystem_free_space_saving_measured": false,
+  "games_launched_or_killed": false
+}

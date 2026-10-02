@@ -34,9 +34,33 @@ fn decode(bytes: &[u8]) -> io::Result<Option<RgbaImage>> {
         .map(|image| Some(image.into_rgba8())).map_err(|e| bad(&format!("GDST image: {e}")))
 }
 
-pub fn transform(bytes: &[u8], profile: &str) -> io::Result<Option<Vec<u8>>> {
+pub fn transform_safe(bytes: &[u8], profile: &str) -> io::Result<Option<Vec<u8>>> {
+    let mut target = match crate::gst2::target_for(profile)? { Some(t) => t, None => return Ok(None) };
+    if bytes.len() < 28 || &bytes[..4] != b"GDST" { return Ok(None); }
+    let (w, h) = (u16le(bytes, 4) as u32, u16le(bytes, 8) as u32);
+    if crate::texture_policy::small_or_thin(w, h) { return Ok(None); }
+    let original_w = (u16le(bytes, 6) as u32).max(w);
+    let original_h = (u16le(bytes, 10) as u32).max(h);
+    target.max_edge = crate::texture_policy::effective_edge(target.max_edge, original_w, original_h);
+    target.color_bits = crate::texture_policy::color_bits(target.color_bits);
+    let edge = w.max(h);
+    let (nw, nh) = if edge > target.max_edge {
+        ((w as u64 * target.max_edge as u64 / edge as u64).max(1) as u32,
+         (h as u64 * target.max_edge as u64 / edge as u64).max(1) as u32)
+    } else { (w, h) };
+    if crate::texture_policy::output_too_thin(nw, nh) { return Ok(None); }
+    transform_target(bytes, &target)
+}
+
+// Codec core; production callers use transform_safe to enforce quality guards.
+#[cfg(test)]
+fn transform(bytes: &[u8], profile: &str) -> io::Result<Option<Vec<u8>>> {
     let target = match crate::gst2::target_for(profile)? { Some(t) => t, None => return Ok(None) };
-    let bits = match profile { "ultra-performance" => 4, "performance" => 6, "balanced" => 7, _ => 8 };
+    transform_target(bytes, &target)
+}
+
+fn transform_target(bytes: &[u8], target: &crate::gst2::TextureTarget) -> io::Result<Option<Vec<u8>>> {
+    let bits = target.color_bits;
     let original = match decode(bytes)? { Some(image) => image, None => return Ok(None) };
     let (w, h) = original.dimensions();
     let edge = w.max(h);
@@ -127,5 +151,25 @@ pub(crate) mod tests {
         let mut unknown = input.clone(); unknown[20..24].copy_from_slice(&2u32.to_le_bytes());
         assert!(transform(&unknown, "ultra-performance").unwrap().is_none());
         assert!(transform(b"GDST", "ultra-performance").unwrap().is_none());
+    }
+
+    #[test]
+    fn safe_profiles_preserve_small_and_thin_textures() {
+        let small = fixture(512, 512);
+        let thin = fixture(2048, 65);
+        for profile in ["ultra-performance", "performance", "balanced", "quality", "ultra-quality", "native", "lossless"] {
+            assert!(transform_safe(&small, profile).unwrap().is_none(), "{profile}");
+            assert!(transform_safe(&thin, profile).unwrap().is_none(), "{profile}");
+        }
+        assert!(transform_safe(&fixture(1000, 600), "ultra-performance").unwrap().is_some());
+    }
+
+    #[test]
+    fn relative_budget_is_retained_in_logical_overrides() {
+        let source = fixture(2048, 1024);
+        let out = transform_safe(&source, "ultra-performance").unwrap().unwrap();
+        assert_eq!((u16le(&out, 4), u16le(&out, 8)), (1024, 512));
+        assert_eq!((u16le(&out, 6), u16le(&out, 10)), (2048, 1024));
+        assert!(transform_safe(&out, "ultra-performance").unwrap().is_none());
     }
 }
