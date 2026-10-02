@@ -102,7 +102,10 @@ Supported Unity type trees expose bounded texture fields without resolving strea
 paths. Unencrypted Pak v1-9 directory/data headers and v10/v11 path-hash and
 directory-index SHA1 values are checked before bounded entry classification.
 Modern/compressed/encrypted payloads and signatures remain
-unverified. No Unity/Unreal texture or audio writer is enabled.
+unverified. IoStore TOC v1-8 headers expose counts, security/partition metadata,
+minimum file-size bounds and regular companion presence only; chunk arrays,
+signatures and .ucas payloads remain unverified.
+No Unity/Unreal texture or audio writer is enabled.
 Reports logical sizes, not physical
 savings. Unsupported codecs, encryption and layouts are not bypassed.
 .TP

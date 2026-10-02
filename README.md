@@ -451,7 +451,7 @@ enabled for automatic installed-file replacement**:
   buffers; encrypted/sparse packs, removal records, partial overlaps and newer
   layouts are rejected. No new decoder or per-entry Zstd flag is introduced.
 - **Unreal Pak:** read-only footer versions 1–11, index bounds, encryption and
-  declared codec names. Unencrypted primary indexes up to 256 MiB are streamed
+  declared codec names. Unencrypted primary indexes up to 256 MiB are read
   through the format's SHA1 check; mismatches fail, encrypted/oversized indexes
   are explicitly skipped. Legacy v1–9 unencrypted indexes additionally
   report method IDs and entry kinds, validate data-header consistency/nonoverlap,
@@ -463,8 +463,14 @@ enabled for automatic installed-file replacement**:
   `UNPARSED`, not as corruption. Companion `.sig` presence and frozen-index flags
   are reported, but signatures and entry payloads are not verified.
   SHA1 is a corruption check, not an authenticity guarantee. This does not decrypt
-  or rewrite indexes, identify actual per-entry codec usage, or support IoStore/
+   or rewrite indexes, independently verify codec semantics, or support IoStore/
   RE Engine repacking. A declared codec is not permission to switch codecs.
+- **Unreal IoStore:** content-detected `.utoc` header inventory for TOC versions
+  1–8: chunk/block counts, method-table dimensions, partition metadata, security
+  flags and a version-aware minimum file-size check. Same-stem regular `.ucas`,
+  `.sig` and `.pak` companions are reported using metadata only; links are not
+  followed. Chunk tables, signatures, directory contents and `.ucas` payloads
+  remain unverified. This is not cooked-texture decoding or repacking.
 - **Godot PCK textures (lossy, asset apply or export):** `--export-godot-textures PROFILE`
    supports Godot 3 `.stex` (GDST, PCK v1) and Godot 4 `.ctex` (GST2, PCK v3/v4).
    It downscales supported textures to the profile's longest edge

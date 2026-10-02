@@ -29,7 +29,7 @@ New records: `UNREAL_SECONDARY|name|status|size`,
 ## Real-archive survey (read-only)
 
 Every `.pak` under the Steam library was audited. 70 files carry an Unreal
-footer; 55 are encrypted (25 v11, 2 v4, 1 v7 directory plus footer-only cases)
+footer; 28 are encrypted (25 v11, 2 v4, 1 v7)
 and were skipped at the primary hash. All **42 unencrypted v11** archives parsed
 with no `UNPARSED` result. The remaining `.pak` files are Chromium/CEF or Qt Web
 resources, correctly rejected as non-Unreal footers.
@@ -59,7 +59,7 @@ re-encode entries, and SHA1 is a corruption check, not an authenticity guarantee
 
 - **116 unit tests** and **7 integration tests** with real-Btrfs fixtures, plus
   **433 shell smoke checks**, all passed; Bash syntax and `git diff --check` pass.
-- Synthetic fixtures cover both endians/layouts, secondary-hash mismatch,
+- Synthetic fixtures cover little-endian index layouts, secondary-hash mismatch,
   directory-vs-encoded reference errors, deleted sentinels, encrypted/compressed
   classification, truncation at every index length and version bounds.
 - Real validation is read-only and specific to the tested archives. Encrypted or

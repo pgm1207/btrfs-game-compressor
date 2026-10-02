@@ -4,6 +4,11 @@
 
 ### Latest development improvements
 
+- Add content-detected, read-only IoStore `.utoc` header inventory: TOC versions
+  1–8, security/count/partition metadata and version-aware minimum extents.
+  Surveyed 69 real v6/v8 headers; companions are metadata-only and links are
+  never followed. No chunk decoding, signature verification or writer enabled.
+
 - Audit modern Unreal Pak v10/v11 indexes read-only: verify path-hash and
   directory-index SHA1, then classify bounded encoded entries (compression slot,
   encryption, stored/decoded bytes, entry kinds) without decompressing. A
@@ -12,7 +17,7 @@
   names for v8/v9 entries and explicit empty-slot handling.
 - Confirm across 42 real unencrypted UE5 paks that shipped `.pak` files hold
   config/Wwise/raw media rather than cooked `.uasset` textures; those live in
-  IoStore `.ucas`/`.utoc`, which remain unsupported.
+  IoStore `.ucas`/`.utoc`, whose cooked payloads remain unsupported.
 
 - Inspect bounded type-tree Texture2D metadata: dimensions, format ID, mips,
   inline bytes and declared stream ranges. No stripped-schema guessing, stream

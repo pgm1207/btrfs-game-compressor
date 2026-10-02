@@ -68,6 +68,32 @@ fn content_detected_engine_audits_are_read_only_and_reject_corruption() {
     let failed = run(&["container-audit", path.to_str().unwrap()]);
     assert!(!failed.status.success()); assert!(String::from_utf8_lossy(&failed.stderr).contains("SHA1 mismatch"));
     assert_eq!(fs::read(&path).unwrap(), pak);
+    // Minimal valid IoStore TOC header plus an unparsed sibling `.ucas`.
+    let mut utoc = vec![0u8; 144];
+    utoc[..16].copy_from_slice(b"-==--==--==--==-"); utoc[16] = 8;
+    utoc[20..24].copy_from_slice(&144u32.to_le_bytes()); utoc[32..36].copy_from_slice(&12u32.to_le_bytes());
+    utoc[44..48].copy_from_slice(&0x10000u32.to_le_bytes()); utoc[52..56].copy_from_slice(&1u32.to_le_bytes());
+    utoc[80] = 8;
+    let toc_path = root.join("pakchunk0-Windows.utoc"); fs::write(&toc_path, &utoc).unwrap();
+    fs::write(root.join("pakchunk0-Windows.ucas"), b"opaque chunk store").unwrap();
+    let output = success(&["container-audit", toc_path.to_str().unwrap()]);
+    assert!(output.contains("UNREAL_IOSTORE|8|144|0|0|65536|0|0|0|1|8|"));
+    assert!(output.contains(&format!("UNREAL_IOSTORE_UCAS|1|{}", b"opaque chunk store".len())));
+    assert!(output.contains("UNREAL_IOSTORE_SECURITY|0|0|0|1|0|0"));
+    assert_eq!(fs::read(&toc_path).unwrap(), utoc);
+    let cas_path = root.join("pakchunk0-Windows.ucas");
+    assert_eq!(fs::read(&cas_path).unwrap(), b"opaque chunk store");
+    fs::rename(&cas_path, root.join("actual.ucas")).unwrap();
+    std::os::unix::fs::symlink(root.join("actual.ucas"), &cas_path).unwrap();
+    assert!(success(&["container-audit", toc_path.to_str().unwrap()]).contains("UNREAL_IOSTORE_UCAS|0|0"));
+    let linked_toc = root.join("linked.utoc");
+    std::os::unix::fs::symlink(&toc_path, &linked_toc).unwrap();
+    assert!(!run(&["container-audit", linked_toc.to_str().unwrap()]).status.success());
+    let mut impossible = utoc.clone(); impossible[24..28].copy_from_slice(&1u32.to_le_bytes());
+    fs::write(&toc_path, &impossible).unwrap();
+    assert!(!run(&["container-audit", toc_path.to_str().unwrap()]).status.success());
+    utoc[16] = 99; fs::write(&toc_path, &utoc).unwrap();
+    assert!(!run(&["container-audit", toc_path.to_str().unwrap()]).status.success());
     fs::remove_dir_all(root).unwrap();
 }
 

@@ -210,6 +210,7 @@ pub fn audit(path: &Path) -> io::Result<()> {
     match &prefix[..4] {
         b"GDPC" => godot_audit(path),
         b"Unit" => super::unityfs::run(path, None, 5.0),
+        b"-==-" => super::unreal_iostore::audit(path),
         _ if super::unity_serialized::plausible(&prefix[..n]) => super::unity_serialized::audit(path),
         _ => unreal_audit(path),
     }

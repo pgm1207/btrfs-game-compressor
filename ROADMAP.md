@@ -36,7 +36,7 @@ of compatible rewriting across an entire engine family.
 | **Godot 3.x** | GDPC signature; PCK v1 directory/resources | Beta apply/export for supported GDST `.stex`; atlas/small/thin guards | PCK MP3-resource → Vorbis, supported PCM; PCK dedup export | More import/resource variants and reference-aware protection; P1 |
 | **Godot 4.x** | Plain PCK v2–4 audit; GST2 inventory | Beta apply/export for supported GST2 in standalone PCK v3/v4; reliable logical size required | Packed audio not implemented; PCK dedup export | AudioStreamWAV/Vorbis packet resources, QOA, embedded packs, unsupported texture codecs; P1 |
 | **Unity legacy / 2017–2022 LTS / Unity 6** | Player/layout markers; UnityFS audit; standalone SerializedFile v17–22 metadata and supported type-tree Texture2D fields | G only; **no SerializedFile Texture2D writer** | UnityFS v6–8 same-codec LZ4/HC **export only**; embedded AudioClip streams not rewritten | Stripped schemas, `.resS`/`.resource` resolution, SpriteAtlas/UI protection, bundle/catalog integrity; **P0** |
-| **Unreal 4.x / 5.x** | Pak footer v1–11, bounded primary SHA1; v1–9 directory/data-header/stored-payload checks; v10/v11 PHI/FDI secondary SHA1 + bounded entry classification; signature presence | G only; **no cooked Texture2D writer** | No Pak/IoStore repacker or packed SoundWave transcode | IoStore `.utoc`/`.ucas` first for UE5 textures; modern/compressed entry decode; cooked package schemas and references; **P0** |
+| **Unreal 4.x / 5.x** | Pak footer v1–11, bounded primary SHA1; v1–9 directory/data-header/stored-payload checks; v10/v11 secondary SHA1 + entry classification; IoStore TOC v1–8 header/bounds/security inventory | G only; **no cooked Texture2D writer** | No Pak/IoStore repacker or packed SoundWave transcode | IoStore chunk/block and package-store/Zen references first for UE5 textures; compressed entry decode; cooked schemas; **P0** |
 | Unreal 1–3 / licensed forks | No dedicated adapter | G only | None | Legacy package/compression formats; do not reuse UE4 parser; P3 |
 | **GameMaker / Studio / modern runtime** | `data.win` heuristic | G only; packed texture pages untouched | None | FORM chunk reader/writer, texture-page/sprite/font geometry and audio references; P2 |
 | **RPG Maker XP/VX/Ace; MV/MZ** | None | G only; no packed/encrypted asset adapter | None | Distinguish RGSS archives from MV/MZ NW.js output; tileset/animation coordinate protection; encrypted assets remain skipped; P2 |
@@ -125,6 +125,10 @@ high-value families; **P3** deferred investigations, not scheduled commitments.
   only then main-pipeline apply. No per-game sizing recipes.
 
 ### M2 — Unreal foundations (candidate 0.4.0, independent workstream)
+
+- [x] Separate read-only IoStore `.utoc` header inventory (TOC v1–8),
+  version-aware minimum extents, security flags and metadata-only companion
+  presence. Real v6/v8 headers surveyed; no chunk/directory/payload verification.
 
 - [x] Bounded primary-index SHA1 check for unencrypted Paks; explicitly skip
   encrypted or >256 MiB indexes. Report `.sig` presence and frozen index flag.
