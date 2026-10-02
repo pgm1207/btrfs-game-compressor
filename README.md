@@ -471,6 +471,11 @@ enabled for automatic installed-file replacement**:
   `.sig` and `.pak` companions are reported using metadata only; links are not
   followed. Chunk tables, signatures, directory contents and `.ucas` payloads
   remain unverified. This is not cooked-texture decoding or repacking.
+- **Real-game Ultra Performance trial:** Pathogenic's PCK became 45.4% smaller
+  on a copy, with independent unchanged-entry verification and a zero-change
+  repeat. This exposed and fixed large-scene atlas scanning and BC block-padding
+  repeat drift. Physical savings and gameplay remain unverified; see
+  [the trial record](test/engine-results/pathogenic-ultra-2026-10-02.md).
 - **Godot PCK textures (lossy, asset apply or export):** `--export-godot-textures PROFILE`
    supports Godot 3 `.stex` (GDST, PCK v1) and Godot 4 `.ctex` (GST2, PCK v3/v4).
    It downscales supported textures to the profile's longest edge

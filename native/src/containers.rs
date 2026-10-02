@@ -546,16 +546,57 @@ pub fn godot3_optimize(input: &Path, output: Option<&Path>, min_efficiency: f64,
 /// Extract literal Godot resource paths from plain text/binary metadata. This
 /// does not attempt to decode compressed resources or infer atlas geometry.
 fn resource_paths(bytes: &[u8]) -> BTreeSet<String> {
+    resource_paths_complete(bytes, true)
+}
+fn resource_paths_complete(bytes: &[u8], eof: bool) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
     for (i, window) in bytes.windows(6).enumerate() {
         if window != b"res://" { continue; }
         let tail = &bytes[i + 6..];
-        let end = tail.iter().position(|b| *b < 32 || matches!(*b, b'"' | b'\''))
-            .unwrap_or(tail.len());
+        let delimiter = tail.iter().position(|b| *b < 32 || matches!(*b, b'"' | b'\''));
+        if delimiter.is_none() && !eof { continue; }
+        let end = delimiter.unwrap_or(tail.len());
         if end == 0 || end > 4096 { continue; }
         if let Ok(path) = std::str::from_utf8(&tail[..end]) { paths.insert(path.to_owned()); }
     }
     paths
+}
+
+/// Stream literal metadata with overlap sufficient for a complete 4096-byte
+/// resource path and the AtlasTexture marker. Never interpret a chunk tail as
+/// an entire path; no compressed metadata decoding or semantic guessing.
+fn stream_metadata<R: Read + Seek>(file: &mut R, offset: u64, size: u64,
+    paths: bool, budget: &mut u64) -> io::Result<(bool, BTreeSet<String>)> {
+    if size > 64 * 1024 * 1024 { return Err(invalid("atlas metadata exceeds inspection limit")); }
+    *budget = budget.checked_sub(size).ok_or_else(|| invalid("atlas metadata inspection budget exceeded"))?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut left = size;
+    let mut bytes = Vec::with_capacity(65536 + 4102);
+    let mut found = false;
+    let mut refs = BTreeSet::new();
+    let mut text_bytes = 0usize;
+    while left > 0 {
+        super::cancelled()?;
+        let old = bytes.len();
+        let n = left.min(65536) as usize;
+        bytes.resize(old + n, 0);
+        file.read_exact(&mut bytes[old..])?;
+        left -= n as u64;
+        found |= bytes.windows(12).any(|w| w == b"AtlasTexture");
+        if paths {
+            for path in resource_paths_complete(&bytes, left == 0) {
+                if refs.insert(path.clone()) { text_bytes += path.len(); }
+                if refs.len() > 16384 || text_bytes > 8 * 1024 * 1024 {
+                    return Err(invalid("atlas metadata path budget exceeded"));
+                }
+            }
+        }
+        let keep = bytes.len().min(4102);
+        let from = bytes.len() - keep;
+        bytes.copy_within(from.., 0);
+        bytes.truncate(keep);
+    }
+    Ok((found, refs))
 }
 
 /// Protect all aliases of named atlases and of textures referenced by plain
@@ -563,7 +604,9 @@ fn resource_paths(bytes: &[u8]) -> BTreeSet<String> {
 /// to their encoded .ctex/.stex payloads. Unrecognized atlases remain a caveat.
 fn protected_texture_offsets(file: &mut File, pack: &Pack) -> io::Result<BTreeSet<u64>> {
     let mut paths = BTreeSet::new();
-    let mut budget = 64u64 * 1024 * 1024;
+    // Bounds cover bytes actually read, including a second pass only for
+    // metadata declaring AtlasTexture. Peak scan buffer stays below 70 KiB.
+    let mut budget = 256u64 * 1024 * 1024;
     for e in &pack.entries {
         if crate::texture_policy::atlas_hint(Path::new(&e.name)) {
             paths.insert(e.name.trim_start_matches("res://").to_owned());
@@ -572,12 +615,11 @@ fn protected_texture_offsets(file: &mut File, pack: &Pack) -> io::Result<BTreeSe
         if !matches!(ext, "tres" | "res" | "tscn" | "scn") { continue; }
         // Fail the packed transform closed rather than silently omitting a
         // potentially important atlas declaration when metadata exceeds bounds.
-        if e.size > 4 * 1024 * 1024 { return Err(invalid("atlas metadata exceeds inspection limit")); }
-        budget = budget.checked_sub(e.size).ok_or_else(|| invalid("atlas metadata inspection budget exceeded"))?;
-        let mut bytes = vec![0; e.size as usize];
-        file.seek(SeekFrom::Start(e.offset))?; file.read_exact(&mut bytes)?;
-        if bytes.windows(12).any(|w| w == b"AtlasTexture") {
-            paths.extend(resource_paths(&bytes));
+        if stream_metadata(file, e.offset, e.size, false, &mut budget)?.0 {
+            paths.extend(stream_metadata(file, e.offset, e.size, true, &mut budget)?.1);
+            if paths.len() > 32768 || paths.iter().map(String::len).sum::<usize>() > 32 * 1024 * 1024 {
+                return Err(invalid("atlas protected path budget exceeded"));
+            }
         }
         super::cancelled()?;
     }
@@ -592,6 +634,9 @@ fn protected_texture_offsets(file: &mut File, pack: &Pack) -> io::Result<BTreeSe
         let mut bytes = vec![0; e.size as usize];
         file.seek(SeekFrom::Start(e.offset))?; file.read_exact(&mut bytes)?;
         paths.extend(resource_paths(&bytes));
+        if paths.len() > 32768 || paths.iter().map(String::len).sum::<usize>() > 32 * 1024 * 1024 {
+            return Err(invalid("atlas protected path budget exceeded"));
+        }
         super::cancelled()?;
     }
     Ok(pack.entries.iter().filter(|e| paths.contains(e.name.trim_start_matches("res://")))
@@ -1210,6 +1255,27 @@ fn changed_directory_verified(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn streamed_atlas_metadata_preserves_boundary_paths_and_bounds() {
+        let mut bytes = vec![b' '; 5 * 1024 * 1024];
+        let marker = b"AtlasTexture";
+        bytes[65530..65530 + marker.len()].copy_from_slice(marker);
+        let path = b"res://textures/card_sheet.png\"";
+        bytes[131065..131065 + path.len()].copy_from_slice(path);
+        let long = format!("res://{}\"", "a".repeat(4096));
+        let at = 196600;
+        bytes[at..at + long.len()].copy_from_slice(long.as_bytes());
+        let mut budget = 16 * 1024 * 1024;
+        let (atlas, refs) = super::stream_metadata(&mut std::io::Cursor::new(&bytes), 0, bytes.len() as u64, true, &mut budget).unwrap();
+        assert!(atlas);
+        assert_eq!(refs, super::resource_paths(&bytes));
+        assert!(refs.contains("textures/card_sheet.png"));
+        assert!(!refs.contains("textures/card"));
+        assert!(super::stream_metadata(&mut std::io::Cursor::new(&bytes), 0, bytes.len() as u64, false, &mut 1).is_err());
+        let mut unlimited = u64::MAX;
+        assert!(super::stream_metadata(&mut std::io::Cursor::new(&bytes), 0, 64 * 1024 * 1024 + 1, false, &mut unlimited).is_err());
+        assert!(super::stream_metadata(&mut std::io::Cursor::new(&bytes[..65536]), 0, bytes.len() as u64, true, &mut unlimited).is_err());
+    }
     use super::*;
     fn fixture(version: u32) -> Vec<u8> {
         let dir = if version == 1 { 84 } else { 96 };

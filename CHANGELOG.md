@@ -4,6 +4,14 @@
 
 ### Latest development improvements
 
+- Use bounded streaming atlas metadata inspection for large Godot scenes;
+  preserve cross-chunk resource paths and fail closed on scan/path budgets.
+  A real Pathogenic trial now exports where the former 4 MiB limit refused.
+- Stabilize BC texture repeats: account for original block padding in logical
+  size budgets and skip quantization-only lossy BC re-encoding at the cap.
+  Pathogenic Ultra Performance reduces its pack by 45.4%, with a zero-change
+  repeat. Physical measurements and user playtesting remain pending.
+
 - Add content-detected, read-only IoStore `.utoc` header inventory: TOC versions
   1–8, security/count/partition metadata and version-aware minimum extents.
   Surveyed 69 real v6/v8 headers; companions are metadata-only and links are

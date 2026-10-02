@@ -181,8 +181,16 @@ pub fn transform_safe(bytes: &[u8], target: &TextureTarget) -> io::Result<Option
     let original_w = le_u32(bytes, 8);
     let original_h = le_u32(bytes, 12);
     if original_w == 0 || original_h == 0 { return Ok(None); }
+    // BC source dimensions can include up to three pixels of block padding.
+    // Reconstruct that same original-size budget from the logical dimensions
+    // on repeat; otherwise e.g. 1100 physical / 1098 logical first becomes 550,
+    // then 549 on the next pass and gets lossily re-encoded for a one-pixel gain.
+    let block_padded = |v: u32| if info.encoding == ENC_IMAGE && block_bytes(info.format).is_some() {
+        v.div_ceil(4).saturating_mul(4)
+    } else { v };
     let target = TextureTarget {
-        max_edge: crate::texture_policy::effective_edge(target.max_edge, original_w.max(info.width), original_h.max(info.height)),
+        max_edge: crate::texture_policy::effective_edge(target.max_edge,
+            block_padded(original_w).max(info.width), block_padded(original_h).max(info.height)),
         color_bits: crate::texture_policy::color_bits(target.color_bits),
         ..*target
     };
@@ -211,6 +219,12 @@ fn transform(bytes: &[u8], target: &TextureTarget) -> io::Result<Option<Vec<u8>>
         return Ok(None);
     }
     if width.max(height) <= target.max_edge && target.color_bits == 8 {
+        return Ok(None);
+    }
+    // BC decoding/re-encoding is lossy even with identical physical dimensions.
+    // Quantization-only BC passes cannot establish repeat stability without a
+    // marker or original pixels; do not trade quality for tiny repeated gains.
+    if width.max(height) <= target.max_edge && encoding == ENC_IMAGE && block_bytes(format).is_some() {
         return Ok(None);
     }
     // Decode the base level only; the mip chain is regenerated from it.
@@ -394,6 +408,26 @@ mod tests {
         out
     }
 
+    #[test]
+    fn bc_padded_physical_dimensions_have_a_stable_logical_budget() {
+        let mut source = bc_ctex(FMT_BC7, 1100, 800);
+        source[8..12].copy_from_slice(&1098u32.to_le_bytes());
+        let target = TextureTarget { max_edge: 256, quality: image_dds::Quality::Fast, color_bits: 7 };
+        let output = transform_safe(&source, &target).unwrap().expect("should downscale");
+        assert_eq!(inspect(&output).unwrap().width, 550);
+        assert!(transform_safe(&output, &target).unwrap().is_none());
+    }
+    #[test]
+    fn bc_quantization_never_reencodes_at_cap_or_on_repeat() {
+        let target = TextureTarget { max_edge: 32, quality: image_dds::Quality::Fast, color_bits: 7 };
+        for format in [FMT_BC1, FMT_BC2, FMT_BC3, FMT_BC7] {
+            let source = bc_ctex(format, 128, 96);
+            let output = transform(&source, &target).unwrap().expect("downscale should save bytes");
+            assert!(transform(&output, &target).unwrap().is_none());
+            let already_at_cap = bc_ctex(format, 32, 24);
+            assert!(transform(&already_at_cap, &target).unwrap().is_none());
+        }
+    }
     #[test]
     fn round_trips_bc_formats_through_decode_and_encode() {
         for format in [FMT_BC1, FMT_BC3, FMT_BC7] {
