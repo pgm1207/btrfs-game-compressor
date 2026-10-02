@@ -36,7 +36,7 @@ of compatible rewriting across an entire engine family.
 | **Godot 3.x** | GDPC signature; PCK v1 directory/resources | Beta apply/export for supported GDST `.stex`; atlas/small/thin guards | PCK MP3-resource → Vorbis, supported PCM; PCK dedup export | More import/resource variants and reference-aware protection; P1 |
 | **Godot 4.x** | Plain PCK v2–4 audit; GST2 inventory | Beta apply/export for supported GST2 in standalone PCK v3/v4; reliable logical size required | Packed audio not implemented; PCK dedup export | AudioStreamWAV/Vorbis packet resources, QOA, embedded packs, unsupported texture codecs; P1 |
 | **Unity legacy / 2017–2022 LTS / Unity 6** | Player/layout markers; UnityFS audit; standalone SerializedFile v17–22 metadata and supported type-tree Texture2D fields | G only; **no SerializedFile Texture2D writer** | UnityFS v6–8 same-codec LZ4/HC **export only**; embedded AudioClip streams not rewritten | Stripped schemas, `.resS`/`.resource` resolution, SpriteAtlas/UI protection, bundle/catalog integrity; **P0** |
-| **Unreal 4.x / 5.x** | Pak footer v1–11, bounded primary SHA1; v1–7 unencrypted directory/data-header and eligible stored-payload checks; signature presence | G only; **no cooked Texture2D writer** | No Pak/IoStore repacker or packed SoundWave transcode | Modern Pak entries/secondary indexes, compressed payloads; cooked `.uasset`/`.uexp`/`.ubulk`, versioned properties and references; IoStore separately; **P0** |
+| **Unreal 4.x / 5.x** | Pak footer v1–11, bounded primary SHA1; v1–9 directory/data-header/stored-payload checks; v10/v11 PHI/FDI secondary SHA1 + bounded entry classification; signature presence | G only; **no cooked Texture2D writer** | No Pak/IoStore repacker or packed SoundWave transcode | IoStore `.utoc`/`.ucas` first for UE5 textures; modern/compressed entry decode; cooked package schemas and references; **P0** |
 | Unreal 1–3 / licensed forks | No dedicated adapter | G only | None | Legacy package/compression formats; do not reuse UE4 parser; P3 |
 | **GameMaker / Studio / modern runtime** | `data.win` heuristic | G only; packed texture pages untouched | None | FORM chunk reader/writer, texture-page/sprite/font geometry and audio references; P2 |
 | **RPG Maker XP/VX/Ace; MV/MZ** | None | G only; no packed/encrypted asset adapter | None | Distinguish RGSS archives from MV/MZ NW.js output; tileset/animation coordinate protection; encrypted assets remain skipped; P2 |
@@ -131,9 +131,14 @@ high-value families; **P3** deferred investigations, not scheduled commitments.
   This is corruption checking, not signature verification or entry validation.
 - [ ] Validate bounded unencrypted Pak indexes/entries and their hashes; report
   signature/encryption/codec blockers, not merely footer declarations.
-- [x] Legacy v1–7 directory and data-header consistency audit, method IDs and
-  cooked-extension counts; eligible unencrypted stored-payload SHA1 within a
-  64 MiB budget. Compressed payloads and modern index layouts are still skipped.
+- [x] Unencrypted v1–9 directory/data-header consistency and eligible stored-payload
+  checks; v10/v11 primary + PHI/FDI secondary-index SHA1 verification and bounded
+  encoded-entry classification (method, encryption, sizes, entry kinds). Unparseable
+  but hash-matching bodies are reported as UNPARSED rather than treated as corruption.
+- [x] Confirmed on real UE5 IoStore paks that shipped `.pak` files contain
+  config/Wwise/raw media, not cooked `.uasset`/`.uexp`/`.ubulk`: cooked textures
+  live in `.ucas`/`.utoc`. IoStore is therefore a first-class prerequisite, not an
+  add-on, for Unreal texture work.
 - [ ] Same-codec lossless export + independent byte comparison before any cooked
   asset changes. Do not claim IoStore support from Pak support.
 - [ ] Cooked package summary/name/import/export tables; exact engine/custom

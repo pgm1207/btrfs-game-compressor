@@ -101,9 +101,10 @@ export-only. Unity Texture2D/`.resS` rewriting, Amplify virtual textures, Godot 
 audio/non-GST2 resources, Basis/ETC/ASTC/half-float textures, Unreal cooked texture
 rewriting and Pak/IoStore repacking are not implemented. The Unreal Pak footer
 audit reports encryption and declared codecs and checks bounded unencrypted
-primary-index SHA1; legacy v1–7 additionally checks directory/data-header consistency
-and bounded stored-payload hashes. Modern/compressed/encrypted payloads stay opaque.
-A bounded Unity SerializedFile v17–22 audit reports version/type-tree/class
+primary-index SHA1; legacy v1–9 additionally checks directory/data-header consistency
+and bounded stored-payload hashes, and modern v10/v11 verifies path-hash and
+directory-index SHA1 before classifying bounded encoded entries. Compressed/encrypted
+payloads stay opaque. A bounded Unity SerializedFile v17–22 audit reports version/type-tree/class
 evidence and supported type-tree Texture2D fields without following stream paths.
 Stripped schemas still need explicit resolution; no writer is enabled.
 `--audit-container` exposes these investigations. Audit,

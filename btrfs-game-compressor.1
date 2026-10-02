@@ -99,8 +99,9 @@ Read-only, content-detected UnityFS compression analysis, standalone Unity
 SerializedFile v17-22 metadata/class inventory, Godot PCK resource inventory, or
 Unreal Pak footer and bounded unencrypted primary-index SHA1 inspection.
 Supported Unity type trees expose bounded texture fields without resolving stream
-paths. Legacy unencrypted Pak v1-7 indexes expose entry/header checks and bounded
-stored-payload hashes. Modern/compressed/encrypted payloads and signatures remain
+paths. Unencrypted Pak v1-9 directory/data headers and v10/v11 path-hash and
+directory-index SHA1 values are checked before bounded entry classification.
+Modern/compressed/encrypted payloads and signatures remain
 unverified. No Unity/Unreal texture or audio writer is enabled.
 Reports logical sizes, not physical
 savings. Unsupported codecs, encryption and layouts are not bypassed.

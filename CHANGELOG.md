@@ -4,6 +4,16 @@
 
 ### Latest development improvements
 
+- Audit modern Unreal Pak v10/v11 indexes read-only: verify path-hash and
+  directory-index SHA1, then classify bounded encoded entries (compression slot,
+  encryption, stored/decoded bytes, entry kinds) without decompressing. A
+  hash-matching unsupported body is reported as UNPARSED, not corruption.
+- Extend unencrypted legacy audits from v1–7 to v1–9 with positional compression
+  names for v8/v9 entries and explicit empty-slot handling.
+- Confirm across 42 real unencrypted UE5 paks that shipped `.pak` files hold
+  config/Wwise/raw media rather than cooked `.uasset` textures; those live in
+  IoStore `.ucas`/`.utoc`, which remain unsupported.
+
 - Inspect bounded type-tree Texture2D metadata: dimensions, format ID, mips,
   inline bytes and declared stream ranges. No stripped-schema guessing, stream
   path traversal, texture decoding or writing.

@@ -453,12 +453,15 @@ enabled for automatic installed-file replacement**:
 - **Unreal Pak:** read-only footer versions 1–11, index bounds, encryption and
   declared codec names. Unencrypted primary indexes up to 256 MiB are streamed
   through the format's SHA1 check; mismatches fail, encrypted/oversized indexes
-  are explicitly skipped. Legacy v1–7 unencrypted indexes up to 32 MiB additionally
+  are explicitly skipped. Legacy v1–9 unencrypted indexes additionally
   report method IDs and entry kinds, validate data-header consistency/nonoverlap,
-  and check eligible stored payload SHA1 within a 64 MiB total budget. Compressed
-  or encrypted entry payloads are skipped; modern indexes remain opaque.
-  Companion `.sig` presence and frozen-index flags are reported, but signatures
-  and modern secondary index hashes are not verified.
+  and check eligible stored payload SHA1 within a 64 MiB total budget. Modern
+  v10/v11 unencrypted indexes verify the primary, path-hash and directory-index
+  SHA1 values, then classify bounded encoded entries (compression slot, encryption,
+  stored/decoded bytes, `.uasset`/`.uexp`/`.ubulk`/Wwise/config/raw-media kind)
+  without decompressing them. A hash-matching but unsupported body is reported as
+  `UNPARSED`, not as corruption. Companion `.sig` presence and frozen-index flags
+  are reported, but signatures and entry payloads are not verified.
   SHA1 is a corruption check, not an authenticity guarantee. This does not decrypt
   or rewrite indexes, identify actual per-entry codec usage, or support IoStore/
   RE Engine repacking. A declared codec is not permission to switch codecs.

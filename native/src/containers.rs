@@ -283,7 +283,7 @@ pub fn godot_audit(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-struct Footer { version: u32, offset: u64, size: u64, encrypted: bool, frozen: bool, hash: [u8; 20], codecs: Vec<String> }
+struct Footer { version: u32, offset: u64, size: u64, encrypted: bool, frozen: bool, hash: [u8; 20], codecs: Vec<String>, codec_slots: usize, limit: u64 }
 fn footer(b: &[u8], file_length: u64) -> io::Result<Footer> {
     let magic = 0x5a6f12e1u32.to_le_bytes();
     let mut matches = Vec::new();
@@ -312,16 +312,19 @@ fn footer(b: &[u8], file_length: u64) -> io::Result<Footer> {
                 if slot[n..].iter().any(|v| *v != 0) || !slot[..n].iter().all(|v| v.is_ascii_alphanumeric() || *v == b'_') {
                     valid = false; break;
                 }
-                if n > 0 { codecs.push(String::from_utf8(slot[..n].to_vec()).unwrap()); }
+                // Keep empty positional slots so entry compression indexes map to names.
+                codecs.push(String::from_utf8(slot[..n].to_vec()).unwrap());
             }
             if valid { matches.push(Footer { version, offset, size, encrypted,
                 frozen: frozen != 0 && b[pos + 44] != 0,
-                hash: b[pos + 24..pos + 44].try_into().unwrap(), codecs }); }
+                hash: b[pos + 24..pos + 44].try_into().unwrap(), codecs, codec_slots: *count, limit: footer_start }); }
         }
     }
     if matches.len() != 1 { return Err(invalid("unsupported/ambiguous Unreal Pak footer (not a generic .pak parser)")); }
     Ok(matches.remove(0))
 }
+
+enum Either { Legacy(super::unreal_legacy::Report), Modern(super::unreal_modern::Report) }
 
 pub fn unreal_audit(path: &Path) -> io::Result<()> {
     let (mut file, meta) = open(path)?;
@@ -329,10 +332,20 @@ pub fn unreal_audit(path: &Path) -> io::Result<()> {
     file.seek(SeekFrom::End(-(n as i64)))?;
     let mut b = vec![0; n]; file.read_exact(&mut b)?;
     let f = footer(&b, meta.len())?;
-    let index_status = verify_unreal_index(&mut file, &f)?;
-    let entries = if index_status == "VERIFIED_PRIMARY_SHA1" && f.version <= 7 && f.size <= 32 * 1024 * 1024 {
-        Some(super::unreal_legacy::inspect(&mut file, f.version, f.offset, f.size)?)
-    } else { None };
+    let (index_status, index_bytes) = verify_unreal_index(&mut file, &f)?;
+    let mut legacy = None; let mut modern = None; let mut parse_status = None;
+    if let Some(bytes) = &index_bytes {
+        let parsed = if f.version <= 9 {
+            let compression_u8 = f.version == 8 && f.codec_slots == 4;
+            super::unreal_legacy::inspect(&mut file, f.version, f.offset, bytes, &f.codecs, compression_u8)
+                .map(Either::Legacy)
+        } else {
+            super::unreal_modern::inspect(&mut file, f.version, f.offset, f.limit, bytes, &f.codecs).map(Either::Modern)
+        };
+        // The primary index hash already matches, so an unparseable body means an
+        // unsupported layout, not random corruption: report it without aborting.
+        match parsed { Ok(Either::Legacy(r)) => legacy = Some(r), Ok(Either::Modern(r)) => modern = Some(r), Err(e) => parse_status = Some(e.to_string()) }
+    }
     // A companion signature's presence is a blocker for future writers, not
     // proof of authenticity. Do not read/execute it or follow companion links.
     let signature = path.with_extension("sig");
@@ -342,37 +355,45 @@ pub fn unreal_audit(path: &Path) -> io::Result<()> {
         Err(e) => return Err(e),
     };
     unchanged(&meta, &file.metadata()?)?;
-    let codecs = if f.version < 8 { "legacy-method-IDs".into() } else { f.codecs.join(",") };
+    let codecs = if f.version < 8 { "legacy-method-IDs".into() } else {
+        f.codecs.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(",")
+    };
     println!("UNREAL_PAK|{}|{}|{}|{}|{}|{}", f.version, meta.len(), f.offset, f.size, u8::from(f.encrypted), codecs);
     println!("UNREAL_INDEX|{index_status}|{}", f.size);
     println!("UNREAL_SECURITY|{}|{}|{}", u8::from(f.encrypted), u8::from(signed), u8::from(f.frozen));
-    if let Some(r) = entries {
+    if let Some(r) = legacy {
         println!("UNREAL_LEGACY_ENTRIES|{}|{}|{}|{}|{}|{}|{}", r.entries, r.stored, r.encrypted,
             r.deleted, r.header_checked, r.payload_checked, r.payload_skipped);
-        for (id, count) in r.methods { println!("UNREAL_METHOD_ID|{id}|{count}"); }
+        for (name, count) in r.methods { println!("UNREAL_METHOD|{name}|{count}"); }
         for (kind, count) in r.kinds { println!("UNREAL_ENTRY_KIND|{kind}|{count}"); }
-    } else {
-        println!("UNREAL_LEGACY_ENTRIES|SKIPPED_VERSION_ENCRYPTION_OR_BUDGET");
+    } else if legacy.is_none() && modern.is_none() {
+        if let Some(status) = parse_status {
+            println!("UNREAL_ENTRIES|UNPARSED|{status}");
+        } else {
+            println!("UNREAL_ENTRIES|SKIPPED_VERSION_ENCRYPTION_OR_BUDGET");
+        }
     }
-    eprintln!("Read-only Unreal Pak: primary SHA1 is not signature verification. Bounded legacy v1–7 audits inspect indexed methods, data headers and eligible stored payload hashes; compressed/encrypted payloads and modern/secondary indexes remain unverified. No texture/audio writer or Pak/IoStore repacker is implemented; RE Engine archives are not Unreal Paks.");
+    if let Some(r) = modern {
+        for (name, status, size) in &r.secondary { println!("UNREAL_SECONDARY|{name}|{status}|{size}"); }
+        println!("UNREAL_MODERN_ENTRIES|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", r.entry_count, r.files,
+            r.encoded_bytes, r.non_encoded, r.compressed, r.encrypted, r.deleted, r.stored_bytes, r.decoded_bytes, r.path_hash_seed);
+        for (name, count) in r.methods { println!("UNREAL_METHOD|{name}|{count}"); }
+        for (kind, count) in r.kinds { println!("UNREAL_ENTRY_KIND|{kind}|{count}"); }
+    }
+    eprintln!("Read-only Unreal Pak: primary SHA1 is not signature verification. Unencrypted v1–9 audits inspect indexed methods, data headers and eligible stored payloads; v10/v11 additionally verify secondary-index hashes and classify bounded encoded entries. Encrypted/compressed payloads and signatures remain unverified. No texture/audio writer or Pak/IoStore repacker is implemented; RE Engine archives are not Unreal Paks.");
     Ok(())
 }
 
-fn verify_unreal_index<R: Read + Seek>(file: &mut R, footer: &Footer) -> io::Result<&'static str> {
+fn verify_unreal_index<R: Read + Seek>(file: &mut R, footer: &Footer) -> io::Result<(&'static str, Option<Vec<u8>>)> {
     use sha1::{Digest, Sha1};
-    if footer.encrypted { return Ok("SKIPPED_ENCRYPTED"); }
-    if footer.size > 256 * 1024 * 1024 { return Ok("SKIPPED_BUDGET"); }
-    let mut hash = Sha1::new();
-    file.seek(SeekFrom::Start(footer.offset))?;
-    let mut remaining = footer.size; let mut b = [0u8; 65536];
-    while remaining > 0 {
-        super::cancelled()?;
-        let n = remaining.min(b.len() as u64) as usize;
-        file.read_exact(&mut b[..n])?; hash.update(&b[..n]); remaining -= n as u64;
-    }
+    if footer.encrypted { return Ok(("SKIPPED_ENCRYPTED", None)); }
+    if footer.size > 256 * 1024 * 1024 { return Ok(("SKIPPED_BUDGET", None)); }
+    let mut bytes = vec![0; footer.size as usize];
+    file.seek(SeekFrom::Start(footer.offset))?; file.read_exact(&mut bytes)?;
+    let mut hash = Sha1::new(); hash.update(&bytes);
     let digest: [u8; 20] = hash.finalize().into();
     if digest != footer.hash { return Err(invalid("Unreal Pak primary index SHA1 mismatch")); }
-    Ok("VERIFIED_PRIMARY_SHA1")
+    Ok(("VERIFIED_PRIMARY_SHA1", Some(bytes)))
 }
 
 // A stored MD5 is only a grouping hint. Every shared payload is compared byte
@@ -1290,15 +1311,15 @@ mod tests {
         let index = b"primary index bytes";
         let hash = Sha1::digest(index).into();
         let f = Footer { version: 11, offset: 6, size: index.len() as u64, hash,
-            encrypted: false, frozen: false, codecs: vec!["Oodle".into()] };
-        assert_eq!(verify_unreal_index(&mut io::Cursor::new(bytes), &f).unwrap(), "VERIFIED_PRIMARY_SHA1");
+            encrypted: false, frozen: false, codecs: vec!["Oodle".into()], codec_slots: 1, limit: bytes.len() as u64 };
+        assert_eq!(verify_unreal_index(&mut io::Cursor::new(bytes), &f).unwrap().0, "VERIFIED_PRIMARY_SHA1");
         let mut broken = bytes.to_vec(); broken[7] ^= 1;
         assert!(verify_unreal_index(&mut io::Cursor::new(broken), &f).is_err());
         assert!(verify_unreal_index(&mut io::Cursor::new(&bytes[..10]), &f).is_err());
         let encrypted = Footer { encrypted: true, ..f };
-        assert_eq!(verify_unreal_index(&mut io::Cursor::new([]), &encrypted).unwrap(), "SKIPPED_ENCRYPTED");
+        assert_eq!(verify_unreal_index(&mut io::Cursor::new([]), &encrypted).unwrap().0, "SKIPPED_ENCRYPTED");
         let oversized = Footer { encrypted: false, size: 256 * 1024 * 1024 + 1, ..encrypted };
-        assert_eq!(verify_unreal_index(&mut io::Cursor::new([]), &oversized).unwrap(), "SKIPPED_BUDGET");
+        assert_eq!(verify_unreal_index(&mut io::Cursor::new([]), &oversized).unwrap().0, "SKIPPED_BUDGET");
     }
     fn duplicate_fixture(version: u32) -> Vec<u8> {
         let directory = if version == 3 { 1280 } else if version == 1 { 84 } else { 96 };

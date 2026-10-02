@@ -61,6 +61,9 @@ fn content_detected_engine_audits_are_read_only_and_reject_corruption() {
     let output = success(&["container-audit", path.to_str().unwrap()]);
     assert!(output.contains("UNREAL_INDEX|VERIFIED_PRIMARY_SHA1|3"));
     assert!(output.contains("UNREAL_SECURITY|0|1|0")); assert_eq!(fs::read(&path).unwrap(), pak);
+    // The SHA1 matches, so an unparseable (here nonsensical) index body is an
+    // unsupported layout, not corruption: report it without a nonzero exit.
+    assert!(output.contains("UNREAL_ENTRIES|UNPARSED|"));
     pak[0] ^= 1; fs::write(&path, &pak).unwrap();
     let failed = run(&["container-audit", path.to_str().unwrap()]);
     assert!(!failed.status.success()); assert!(String::from_utf8_lossy(&failed.stderr).contains("SHA1 mismatch"));
