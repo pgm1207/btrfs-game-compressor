@@ -56,12 +56,26 @@ native FIEMAP measurement needs privileges and `sudo -n` was unavailable.
 Keeping original and candidate copies means this trial itself consumes space;
 the pack reduction is not a filesystem free-space delta.
 
-## User playtest
+## Runtime compatibility failure — candidate on hold
+
+The user reported that Pathogenic **does not launch with the candidate supplied
+via `--main-pack`**. Removing that custom option launches the installed game
+normally. The installed PCK remains byte-identical to the recorded original SHA256
+above. The most recent Godot log is from the subsequent successful launch of the
+installed game; the failed-run error was not retained, so the cause is unknown.
+
+Godot's documented CLI supports `--main-pack`, and offline PCK structure and
+per-entry MD5 checks pass, but neither establishes runtime compatibility. Treat
+this candidate as **failed runtime validation; do not use it as a playable build**.
+Further lossy candidate trials are paused pending the failed-run Godot/console
+error and investigation of texture compatibility.
+
+## Original-vs-candidate manual test details
 
 Automated validation: 122 unit tests, 7 integration tests with real Btrfs fixtures
 enabled, and 433 shell smoke checks passed. The release backend was rebuilt.
 
-Candidate:
+Candidate (currently known not to launch; for diagnosis only):
 `/mnt/storage/Games/bgc-pathogenic-ultra-20261002/pathogenic-ultra-final.pck`
 
 Steam launch option to load the candidate while leaving the installed pack intact:
