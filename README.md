@@ -9,6 +9,11 @@ titles can save much more than games built from compressed assets.**
 [![Platform](https://img.shields.io/badge/platform-any%20Linux%20with%20Btrfs-informational)](#requirements)
 [![Shell](https://img.shields.io/badge/shell-bash%204%2B-4EAA25)](#requirements)
 
+**Engine coverage and future work:** [support chart and roadmap](ROADMAP.md).
+The current `0.2.0` development version is unreleased; detection, export and
+beta asset apply are listed separately. Native filesystem compression works
+independently of the engine; Unity/Unreal packed texture writers are not implemented.
+
 If you game on Linux with a Btrfs filesystem — a Steam Deck, an Arch/CachyOS box, a
 Fedora or Ubuntu desktop, a Bazzite handheld — there is a good chance a large part of
 your library is sitting on disk **uncompressed**, even though compression is switched

@@ -1,8 +1,9 @@
 # Scope
 
 This document records the project's current scope and goals. The initial 0.1.0
-finish line is retained below; the current extension adds safe, measurable extent
-deduplication to the existing compression workflow.
+finish line is retained below. Current development is 0.2.0 (unreleased), adding
+native extent deduplication and opt-in format-aware asset optimization. See
+[ROADMAP.md](ROADMAP.md) for the engine support chart and delivery/versioning plan.
 
 The short version: **a terminal tool that finds Steam games wasting space on a
 Btrfs filesystem, compresses them, and remembers what it has already done.**
@@ -67,51 +68,41 @@ benchmark question, not an expected result from this tool: the native backend ca
 identical extents, but it cannot remove near-duplicates or redesign a game's
 asset bundles.
 
-Filesystem compression and deduplication preserve Steam file contents.
-The optional [BETA] asset stage follows compression and precedes final
-deduplication. Profiles resize supported loose images, re-encode simple legacy
-BC1/BC2/BC3 DDS textures, and reduce simple mono/stereo PCM or 32-bit-float WAV.
-Non-native profiles produce integer PCM. Ultra
-Performance additionally converts PCM to 8-bit using deterministic TPDF dither;
-higher tiers target up to 16-bit without up-converting. Resized 8-bit RGB/RGBA images use tiered
-color quantization with alpha retained. File paths and
-containers stay intact; original bytes stay in a restore copy until the user
-tests the game and explicitly discards it. Hades v7 LZ4 packages can be recompressed
-losslessly without changing decoded chunks, textures or atlas manifests. A
-Lossless profile disables image resizing and WAV resampling while enabling this
-package pass. Other packed engine assets, Bink and encoded FMOD audio are
-    inventoried but skipped by installed apply. WAV is not converted to Opus because game
-loaders expect their declared codec/container. Hollow Knight and Hades store
-many assets in containers; only Hades v7 LZ4 PKG recompression is implemented. This stage may
-change visual/audio quality and does not claim universal reduction or faster
-runtime.
+Filesystem compression and deduplication preserve Steam file contents. The
+optional [BETA] asset stage follows compression and precedes final deduplication.
+Native is byte-preserving and Lossless never degrades assets. Lossy profiles are
+explicitly selected and unknown formats are skipped, without per-game recipes.
 
-An experimental, separate `--export-fmod QUALITY FILE OUTPUT` command can
-decode/re-encode mono/stereo Vorbis and rebuild FSB5 v1 or single-FSB RIFF/FEV
-banks using bundled codecs. It exports to a new file only, preserves declared
-timing and non-codec metadata, and rejects unknown layouts. It is deliberately
-not part of automatic asset replacement until in-game playback/seek tests pass.
-Bink 2 re-encoding remains unimplemented.
+Implemented beta paths include supported loose images/simple legacy BC1/BC2/BC3
+DDS, simple mono/stereo PCM/float WAV, Hades v7 same-codec lossless LZ4 PKG, plain
+standalone Godot 3 PCK audio/GDST textures and supported Godot 4 PCK GST2 textures.
+Texture policy preserves small/thin and known-atlas assets, uses soft profile caps
+with an original/logical half-size budget, and retains at least 7-bit explicit RGB
+precision. Audio quality follows the asset profile, not the Zstd level. WAV is not
+renamed or replaced with Opus. Godot 3 MP3 resources can change to Vorbis only with
+their matching resource/import metadata updated.
 
-Additional compiled-in, experimental export-only paths support lossless UnityFS
-v6–8 LZ4 bundle recompression, standalone Godot PCK v1–3 duplicate-resource
-sharing, lossy Godot 3 PCK v1 `.mp3str`→Ogg Vorbis audio rewriting, and lossy
-Godot 4 PCK `.ctex` texture downscaling. The texture path decodes supported GST2
-encodings (WebP/PNG and BC1/BC2/BC3/BC7) with bundled codecs, resizes to the
-selected profile's longest edge, and re-encodes in the same format; unsupported
-encodings are copied unchanged. The Godot 3 path decodes `AudioStreamMP3` with a
-pure-Rust decoder, writes Ogg Vorbis under the same entry name, and retypes the
-matching `.import` stub; other entries are copied unchanged. Both packs are
-rebuilt with relocated offsets and recomputed MD5, then re-parsed, and untouched
-entries are byte-compared. Finished output bytes are verified, existing
-destinations refused, and logical savings/output-write efficiency checked before
-writing. Neither path is part of installed auto-apply. Unity Texture2D/`.resS`
-resizing, Amplify virtual textures, Godot 3 `AudioStreamSample`/`.stex`
-rewriting, Godot 4 non-GST2 resources, Basis Universal/ETC/ASTC/half-float
-textures, and Unreal/IoStore repacking remain unimplemented. A native Unreal Pak
-footer audit reports encryption and declared codecs without claiming that it
-understands actual entry contents or can safely switch codecs.
-`--audit-container` exposes these format-specific investigations.
+Supported standalone FMOD FSB5 Vorbis and single-FSB RIFF/FEV banks now have
+bounded main-pipeline apply as well as separate exports. Codebook, waveform and
+savings gates preserve unknown/poor candidates. Declared timing, loop/event
+metadata and identities are retained; encoded packet/seek offsets are rebuilt.
+Main-pipeline files are limited to 256 MiB; this is beta and does not certify
+in-game playback or seeking. Embedded Unity/Unreal audio remains unsupported.
+Bink 2 re-encoding is not implemented.
+
+Loose-file originals remain in a restore copy until the user tests and explicitly
+finalizes them. Supported Godot PCK applies have no restore copy; recovery uses
+Steam verification. Packs are rebuilt with relocated offsets/recomputed hashes,
+then independently re-parsed and untouched resources verified. No games are
+launched or killed for testing, and installed games are not modified as test data.
+
+UnityFS v6–8 LZ4/HC recompression and Godot PCK v1–4 duplicate sharing remain
+export-only. Unity Texture2D/`.resS` rewriting, Amplify virtual textures, Godot 4
+audio/non-GST2 resources, Basis/ETC/ASTC/half-float textures, Unreal cooked texture
+rewriting and Pak/IoStore repacking are not implemented. The Unreal Pak footer
+audit reports encryption and declared codecs, not per-entry usage or writer
+support. `--audit-container` exposes format-specific investigations. Audit,
+export and apply are distinct capability levels in the roadmap.
 See `test/ENGINE_EXPERIMENTS.md` for reproducible negative results and current
 resource bottlenecks; logical improvements alone are not physical savings.
 

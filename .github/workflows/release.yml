@@ -20,6 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Fetch locked build dependencies
+        run: cargo fetch --locked --manifest-path native/Cargo.toml
       - name: Verify tag and build static release
         run: |
           version=$(sed -n 's/^VERSION="\(.*\)"/\1/p' btrfs-game-compressor)

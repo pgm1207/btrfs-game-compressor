@@ -152,7 +152,7 @@ service-off:
 package: native
 	@rm -rf dist/$(PROG)-$(VERSION)
 	@mkdir -p dist/$(PROG)-$(VERSION)
-	@cp -R $(PROG) $(MANPAGE) README.md LICENSE THIRD_PARTY.md CHANGELOG.md CONTRIBUTING.md install.sh Makefile GAMES.md ratios $(TESTDIR) $(SYSTEMDDIR) $(NATIVE) dist/$(PROG)-$(VERSION)/
+	@cp -R $(PROG) $(MANPAGE) README.md LICENSE THIRD_PARTY.md CHANGELOG.md CONTRIBUTING.md ROADMAP.md SCOPE.md install.sh Makefile GAMES.md ratios $(TESTDIR) $(SYSTEMDDIR) $(NATIVE) dist/$(PROG)-$(VERSION)/
 	@mkdir -p dist/$(PROG)-$(VERSION)/native
 	@cp -R native/Cargo.toml native/Cargo.lock native/src native/tests native/vendor dist/$(PROG)-$(VERSION)/native/
 	@tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \

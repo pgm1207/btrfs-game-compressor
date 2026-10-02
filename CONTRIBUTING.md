@@ -5,8 +5,9 @@ The application consists of a Bash interface and a small Rust backend.
 ## Ground rules
 
 - **No external filesystem tools or runtime packages.** Use the bundled native
-  backend for filesystem operations. It has no third-party crates and never
-  launches subprocesses. Release executables are statically linked.
+  backend for filesystem operations. Asset codecs are pinned and bundled at
+  build time; the backend never launches external media tools. Release executables
+  are statically linked. No proprietary encoders or runtime services.
 - **Keep unsafe code limited to Linux UAPI calls.** Validate returned lengths,
   preserve file contents, and use kernel byte comparison before sharing data.
 - **Standard POSIX-ish bash only.** Target bash 4+ (`${var,,}`, associative
@@ -55,6 +56,12 @@ Open an issue with:
 That last one usually identifies the problem immediately.
 
 ## Adding a feature
+
+Consult [ROADMAP.md](ROADMAP.md) for engine/format coverage, writer acceptance
+gates and versioning. Push coherent tested increments; do not equate an audit with
+texture/audio rewriting. Synchronize script, Cargo package/lock and manpage
+versions at release boundaries. A `v*` tag publishes release archives through CI;
+ordinary commits do not constitute a tagged release.
 
 Non-interactive modes are the easiest place to add value, because they are
 testable. If you add a flag, wire it through `parse_args`, add a `cmd_*`
