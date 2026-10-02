@@ -35,8 +35,8 @@ of compatible rewriting across an entire engine family.
 | --- | --- | --- | --- | --- |
 | **Godot 3.x** | GDPC signature; PCK v1 directory/resources | Beta apply/export for supported GDST `.stex`; atlas/small/thin guards | PCK MP3-resource → Vorbis, supported PCM; PCK dedup export | More import/resource variants and reference-aware protection; P1 |
 | **Godot 4.x** | Plain PCK v2–4 audit; GST2 inventory | Beta apply/export for supported GST2 in standalone PCK v3/v4; reliable logical size required | Packed audio not implemented; PCK dedup export | AudioStreamWAV/Vorbis packet resources, QOA, embedded packs, unsupported texture codecs; P1 |
-| **Unity legacy / 2017–2022 LTS / Unity 6** | Player/layout markers; UnityFS bundle audit | G only; **no SerializedFile Texture2D writer** | UnityFS v6–8 same-codec LZ4/HC **export only**; embedded AudioClip streams not rewritten | SerializedFile versions/types/objects, type-tree or exact-schema resolution, `.resS`/`.resource` references, SpriteAtlas/UI protection, bundle/catalog integrity; **P0** |
-| **Unreal 4.x / 5.x** | Shipping/Paks/IoStore markers; Pak footer v1–11 audit only | G only; **no cooked Texture2D writer** | No Pak/IoStore repacker or packed SoundWave transcode | Pak entries/index hashes first; cooked `.uasset`/`.uexp`/`.ubulk`, custom versions/unversioned properties, mip/bulk references; IoStore separately; **P0** |
+| **Unity legacy / 2017–2022 LTS / Unity 6** | Player/layout markers; UnityFS audit; standalone SerializedFile v17–22 metadata/class inventory | G only; **no SerializedFile Texture2D writer** | UnityFS v6–8 same-codec LZ4/HC **export only**; embedded AudioClip streams not rewritten | Type-tree or exact-schema payload resolution, `.resS`/`.resource` references, SpriteAtlas/UI protection, bundle/catalog integrity; **P0** |
+| **Unreal 4.x / 5.x** | Shipping/Paks/IoStore markers; Pak footer v1–11, bounded unencrypted primary-index SHA1, signature-companion presence | G only; **no cooked Texture2D writer** | No Pak/IoStore repacker or packed SoundWave transcode | Pak entries/secondary index hashes first; cooked `.uasset`/`.uexp`/`.ubulk`, custom versions/unversioned properties, mip/bulk references; IoStore separately; **P0** |
 | Unreal 1–3 / licensed forks | No dedicated adapter | G only | None | Legacy package/compression formats; do not reuse UE4 parser; P3 |
 | **GameMaker / Studio / modern runtime** | `data.win` heuristic | G only; packed texture pages untouched | None | FORM chunk reader/writer, texture-page/sprite/font geometry and audio references; P2 |
 | **RPG Maker XP/VX/Ace; MV/MZ** | None | G only; no packed/encrypted asset adapter | None | Distinguish RGSS archives from MV/MZ NW.js output; tileset/animation coordinate protection; encrypted assets remain skipped; P2 |
@@ -101,9 +101,11 @@ high-value families; **P3** deferred investigations, not scheduled commitments.
 
 ### M1 — Unity foundations (candidate 0.3.0, no release date)
 
-- [ ] Bounded SerializedFile audit: header/file version/endian/platform/Unity
-  version, type-tree availability, types, objects and external references.
-- [ ] Report Texture2D/AudioClip object counts without guessing their payloads.
+- [x] Bounded standalone SerializedFile v17–22 audit: header/file
+  version/endian/platform/Unity version, type-tree availability, types, objects
+  and external-reference count. Metadata limit 32 MiB; object payloads are opaque.
+- [x] Report Texture2D/AudioClip/Sprite/SpriteAtlas class counts without guessing
+  their payloads. Reject duplicate IDs, overlaps and out-of-bounds objects.
 - [ ] Versioned type-tree reader; explicit validated schema fallback for stripped
   player builds. Unknown or stripped versions never trigger trial-and-error writes.
 - [ ] Texture2D codec/dimensions/mips/stream-offset inventory, including atlases
@@ -121,6 +123,9 @@ high-value families; **P3** deferred investigations, not scheduled commitments.
 
 ### M2 — Unreal foundations (candidate 0.4.0, independent workstream)
 
+- [x] Bounded primary-index SHA1 check for unencrypted Paks; explicitly skip
+  encrypted or >256 MiB indexes. Report `.sig` presence and frozen index flag.
+  This is corruption checking, not signature verification or entry validation.
 - [ ] Validate bounded unencrypted Pak indexes/entries and their hashes; report
   signature/encryption/codec blockers, not merely footer declarations.
 - [ ] Same-codec lossless export + independent byte comparison before any cooked

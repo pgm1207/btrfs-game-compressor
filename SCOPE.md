@@ -100,8 +100,10 @@ UnityFS v6–8 LZ4/HC recompression and Godot PCK v1–4 duplicate sharing remai
 export-only. Unity Texture2D/`.resS` rewriting, Amplify virtual textures, Godot 4
 audio/non-GST2 resources, Basis/ETC/ASTC/half-float textures, Unreal cooked texture
 rewriting and Pak/IoStore repacking are not implemented. The Unreal Pak footer
-audit reports encryption and declared codecs, not per-entry usage or writer
-support. `--audit-container` exposes format-specific investigations. Audit,
+audit reports encryption and declared codecs and checks bounded unencrypted
+primary-index SHA1, not entries or writer support. A bounded Unity SerializedFile
+v17–22 metadata audit now reports version/type-tree/class evidence while leaving
+object payloads opaque. `--audit-container` exposes these investigations. Audit,
 export and apply are distinct capability levels in the roadmap.
 See `test/ENGINE_EXPERIMENTS.md` for reproducible negative results and current
 resource bottlenecks; logical improvements alone are not physical savings.

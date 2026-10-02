@@ -23,6 +23,51 @@ fn success(args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 #[test]
+fn content_detected_engine_audits_are_read_only_and_reject_corruption() {
+    let parent = env::var_os("BGC_TEST_BTRFS_DIR").map(std::path::PathBuf::from).unwrap_or_else(env::temp_dir);
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let root = parent.join(format!("bgc-engine-audit-{stamp}"));
+    fs::create_dir(&root).unwrap();
+    // A stripped v22 metadata table with one opaque Texture2D object.
+    let mut m = b"6000.0.59f2\0".to_vec();
+    m.extend(19u32.to_le_bytes()); m.push(0); m.extend(1u32.to_le_bytes());
+    m.extend(28u32.to_le_bytes()); m.push(0); m.extend([255; 2]); m.extend([0; 16]);
+    m.extend(1u32.to_le_bytes()); while m.len() % 4 != 0 { m.push(0); }
+    m.extend(1u64.to_le_bytes()); m.extend(0u64.to_le_bytes());
+    m.extend(16u32.to_le_bytes()); m.extend(0u32.to_le_bytes());
+    for _ in 0..3 { m.extend(0u32.to_le_bytes()); } m.push(0);
+    let data = (48 + m.len()).div_ceil(16) * 16;
+    let mut bytes = vec![0; 48]; bytes[8..12].copy_from_slice(&22u32.to_be_bytes());
+    bytes[20..24].copy_from_slice(&(m.len() as u32).to_be_bytes());
+    bytes[24..32].copy_from_slice(&((data + 16) as u64).to_be_bytes());
+    bytes[32..40].copy_from_slice(&(data as u64).to_be_bytes());
+    bytes.extend(m); bytes.resize(data + 16, 0);
+    let serialized = root.join("extensionless-player-data"); fs::write(&serialized, &bytes).unwrap();
+    let output = success(&["container-audit", serialized.to_str().unwrap()]);
+    assert!(output.contains("UNITY_SERIALIZED|22|"));
+    assert!(output.contains("|little|6000.0.59f2|19|0|1|1|0"));
+    assert!(output.contains("UNITY_CLASS|28|Texture2D|1|16"));
+    assert_eq!(fs::read(&serialized).unwrap(), bytes);
+    let link = root.join("linked.assets"); symlink(&serialized, &link).unwrap();
+    assert!(!run(&["container-audit", link.to_str().unwrap()]).status.success());
+    // Known SHA1 test vector "abc", not a hash computed by the reader under test.
+    let mut pak = b"abc".to_vec(); pak.extend(0x5a6f12e1u32.to_le_bytes());
+    pak.extend(3u32.to_le_bytes()); pak.extend(0u64.to_le_bytes()); pak.extend(3u64.to_le_bytes());
+    pak.extend([0xa9,0x99,0x3e,0x36,0x47,0x06,0x81,0x6a,0xba,0x3e,
+        0x25,0x71,0x78,0x50,0xc2,0x6c,0x9c,0xd0,0xd8,0x9d]);
+    let path = root.join("sample.pak"); fs::write(&path, &pak).unwrap();
+    fs::write(path.with_extension("sig"), b"presence only; never claimed verified").unwrap();
+    let output = success(&["container-audit", path.to_str().unwrap()]);
+    assert!(output.contains("UNREAL_INDEX|VERIFIED_PRIMARY_SHA1|3"));
+    assert!(output.contains("UNREAL_SECURITY|0|1|0")); assert_eq!(fs::read(&path).unwrap(), pak);
+    pak[0] ^= 1; fs::write(&path, &pak).unwrap();
+    let failed = run(&["container-audit", path.to_str().unwrap()]);
+    assert!(!failed.status.success()); assert!(String::from_utf8_lossy(&failed.stderr).contains("SHA1 mismatch"));
+    assert_eq!(fs::read(&path).unwrap(), pak);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn real_btrfs_preserves_data_and_shares_blocks() {
     let Some(parent) = env::var_os("BGC_TEST_BTRFS_DIR") else {
         eprintln!("Set BGC_TEST_BTRFS_DIR for real Btrfs tests");

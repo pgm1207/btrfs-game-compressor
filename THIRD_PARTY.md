@@ -148,3 +148,39 @@ above, with the respective copyright holders.
 The Godot 3 PCK audio exporter decodes MP3 with `nanomp3` (MIT OR Apache-2.0; a
 safe port of MIT-licensed minimp3) and re-encodes Ogg Vorbis through the
 already-bundled `vorbis_rs`. No external encoder or runtime service is used.
+
+## Unreal primary-index SHA1 — MIT
+
+`sha1` 0.10.6 (RustCrypto, MIT OR Apache-2.0) is compiled into the native backend
+for read-only Pak primary-index corruption checks. SHA1 here matches the on-disk
+format; it is **not** a digital signature or an authenticity/security guarantee.
+This distribution uses the MIT license option. New dependencies use the same
+MIT permission/disclaimer text below, with these copyright holders:
+
+- `sha1`: Copyright (c) 2006-2009 Graydon Hoare; Copyright (c) 2009-2013 Mozilla
+  Foundation; Copyright (c) 2016 Artyom Pavlov.
+- `block-buffer`: Copyright (c) 2018-2019 The RustCrypto Project Developers.
+- `crypto-common`: Copyright (c) 2021 RustCrypto Developers.
+- `digest`: Copyright (c) 2017 Artyom Pavlov.
+- `generic-array`: Copyright (c) 2015 Bartłomiej Kamiński.
+- `cpufeatures`: Copyright (c) 2020-2025 The RustCrypto Project Developers.
+- `typenum`: Copyright (c) 2014 Paho Lurie-Gregg.
+- `version_check` (build dependency): Copyright (c) 2017-2018 Sergio Benitez.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

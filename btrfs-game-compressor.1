@@ -95,8 +95,11 @@ changes nothing and needs no privilege, and reports engines it does not
 recognize honestly.
 .TP
 .BI \-\-audit\-container " FILE"
-Read-only, signature-detected UnityFS compression analysis, Godot PCK resource
-inventory, or Unreal Pak footer inspection. Reports logical sizes, not physical
+Read-only, content-detected UnityFS compression analysis, standalone Unity
+SerializedFile v17-22 metadata/class inventory, Godot PCK resource inventory, or
+Unreal Pak footer and bounded unencrypted primary-index SHA1 inspection.
+Object payloads, Pak entries and signatures are not verified or rewritten.
+Reports logical sizes, not physical
 savings. Unsupported codecs, encryption and layouts are not bypassed.
 .TP
 .BI \-\-export\-unityfs " FILE OUTPUT"

@@ -6,6 +6,7 @@ mod fmod;
 mod variants;
 mod engines;
 mod unityfs;
+mod unity_serialized;
 mod containers;
 mod gst2;
 mod texture_policy;

@@ -4,6 +4,17 @@
 
 ### Latest development improvements
 
+- Add bounded standalone Unity SerializedFile v17–22 metadata/class audit through
+  `--audit-container`, including stripped-player version/type-tree evidence.
+  Texture/audio payloads remain opaque; no Unity writer is implied.
+- Verify bounded unencrypted Unreal Pak primary-index SHA1; explicitly report
+  encrypted/budget skips, signature-companion presence and frozen indexes.
+  Entry/secondary-index/signature verification and cooked texture/IoStore writers
+  remain unimplemented.
+- Publish the engine/format support chart, staged Unity/Unreal roadmap and
+  incremental version/release policy. Fetch locked dependencies on clean release
+  runners before offline builds.
+
 - Apply supported standalone Godot 3/4 PCK transforms through the main pipeline.
   Chain Godot 3 audio and textures, preserve unknown resources, verify finished
   packs, and make repeated texture applies stable. Packed PCK recovery uses Steam

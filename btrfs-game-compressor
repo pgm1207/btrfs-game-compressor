@@ -207,8 +207,8 @@ OPTIONS
         --engines GAME    read-only report of the game engine (Unity, Unreal,
                           Godot, ...) and where its bytes live; nothing changed
         --audit-container FILE
-                          read-only UnityFS compression, Godot resource inventory,
-                          or Unreal Pak footer audit (auto-detected from contents)
+                           read-only UnityFS/SerializedFile, Godot resource inventory,
+                           or Unreal Pak footer/primary-index audit (content-detected)
         --export-unityfs FILE OUTPUT
                           experimental lossless LZ4 bundle recompression; new file
                           only, gated by savings/output-write percentage
