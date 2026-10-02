@@ -4,6 +4,14 @@
 
 ### Latest development improvements
 
+- Inspect bounded type-tree Texture2D metadata: dimensions, format ID, mips,
+  inline bytes and declared stream ranges. No stripped-schema guessing, stream
+  path traversal, texture decoding or writing.
+- Extend unencrypted legacy Pak v1–7 audits with directory/data-header checks,
+  indexed method/entry-kind counts and bounded stored-payload SHA1 verification.
+  Unknown flags/overlaps/corruption fail closed; compressed/encrypted payloads,
+  modern indexes and cooked asset writers remain unsupported.
+
 - Add bounded standalone Unity SerializedFile v17–22 metadata/class audit through
   `--audit-container`, including stripped-player version/type-tree evidence.
   Texture/audio payloads remain opaque; no Unity writer is implied.

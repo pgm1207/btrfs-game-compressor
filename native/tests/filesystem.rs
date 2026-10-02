@@ -51,10 +51,11 @@ fn content_detected_engine_audits_are_read_only_and_reject_corruption() {
     let link = root.join("linked.assets"); symlink(&serialized, &link).unwrap();
     assert!(!run(&["container-audit", link.to_str().unwrap()]).status.success());
     // Known SHA1 test vector "abc", not a hash computed by the reader under test.
-    let mut pak = b"abc".to_vec(); pak.extend(0x5a6f12e1u32.to_le_bytes());
-    pak.extend(3u32.to_le_bytes()); pak.extend(0u64.to_le_bytes()); pak.extend(3u64.to_le_bytes());
+    let mut pak = b"abc".to_vec(); pak.extend([0; 17]); pak.extend(0x5a6f12e1u32.to_le_bytes());
+    pak.extend(11u32.to_le_bytes()); pak.extend(0u64.to_le_bytes()); pak.extend(3u64.to_le_bytes());
     pak.extend([0xa9,0x99,0x3e,0x36,0x47,0x06,0x81,0x6a,0xba,0x3e,
         0x25,0x71,0x78,0x50,0xc2,0x6c,0x9c,0xd0,0xd8,0x9d]);
+    pak.extend([0; 160]);
     let path = root.join("sample.pak"); fs::write(&path, &pak).unwrap();
     fs::write(path.with_extension("sig"), b"presence only; never claimed verified").unwrap();
     let output = success(&["container-audit", path.to_str().unwrap()]);

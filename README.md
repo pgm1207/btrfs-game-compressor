@@ -438,10 +438,12 @@ enabled for automatic installed-file replacement**:
   engine/file versions, platform, type-tree availability, type/object/external
   counts and per-class object bytes (including Texture2D, AudioClip, Sprite and
   SpriteAtlas). Metadata is limited to 32 MiB; both endian layouts are supported.
-  IDs/type references/object extents are checked, but type-tree nodes and object
-  payloads remain opaque. Counts do not establish codecs, texture dimensions or
-  external stream sizes. Stripped player builds need exact validated schemas
-  before a writer can be enabled. No file is rewritten.
+  IDs/type references/object extents are checked. A bounded type-tree walker now
+  reports supported Texture2D dimensions, numeric format ID, mip count, inline
+  bytes and declared external path/offset/size. Unknown trees or stripped schemas
+  remain opaque; paths are not followed and external extents are not verified.
+  Texture payload decoding and writing are not implemented. Large objects/work
+  budgets are skipped explicitly in the inspected/opaque texture summary.
 - **Godot standalone PCK v1–4 (plain packs):** share byte-identical resource payloads using
   directory offsets. Stored MD5 values are grouping hints only; candidates are
   compared byte-for-byte and every exported resource is verified against the
@@ -451,8 +453,12 @@ enabled for automatic installed-file replacement**:
 - **Unreal Pak:** read-only footer versions 1–11, index bounds, encryption and
   declared codec names. Unencrypted primary indexes up to 256 MiB are streamed
   through the format's SHA1 check; mismatches fail, encrypted/oversized indexes
-  are explicitly skipped. Companion `.sig` presence and frozen-index flags are
-  reported, but signatures, secondary index hashes and entries are not verified.
+  are explicitly skipped. Legacy v1–7 unencrypted indexes up to 32 MiB additionally
+  report method IDs and entry kinds, validate data-header consistency/nonoverlap,
+  and check eligible stored payload SHA1 within a 64 MiB total budget. Compressed
+  or encrypted entry payloads are skipped; modern indexes remain opaque.
+  Companion `.sig` presence and frozen-index flags are reported, but signatures
+  and modern secondary index hashes are not verified.
   SHA1 is a corruption check, not an authenticity guarantee. This does not decrypt
   or rewrite indexes, identify actual per-entry codec usage, or support IoStore/
   RE Engine repacking. A declared codec is not permission to switch codecs.
@@ -497,7 +503,8 @@ enabled for automatic installed-file replacement**:
 compression/verification in RAM without an output file; Godot auditing reports
 resource-type sizes and GST2 texture headers (encoding, numeric GPU format,
 dimensions, mipmapped counts). Unreal auditing reads the footer and, within its
-budget, verifies unencrypted primary-index bytes only; it does not parse entries.
+budget, verifies unencrypted primary-index bytes and supported legacy directory/
+data-header/stored-payload subsets. No cooked textures or audio are rewritten.
 
 Exports refuse existing destinations, including the source itself. Before any
 export writes, **logical bytes saved / complete output bytes** must meet

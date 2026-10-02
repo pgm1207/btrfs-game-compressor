@@ -330,6 +330,9 @@ pub fn unreal_audit(path: &Path) -> io::Result<()> {
     let mut b = vec![0; n]; file.read_exact(&mut b)?;
     let f = footer(&b, meta.len())?;
     let index_status = verify_unreal_index(&mut file, &f)?;
+    let entries = if index_status == "VERIFIED_PRIMARY_SHA1" && f.version <= 7 && f.size <= 32 * 1024 * 1024 {
+        Some(super::unreal_legacy::inspect(&mut file, f.version, f.offset, f.size)?)
+    } else { None };
     // A companion signature's presence is a blocker for future writers, not
     // proof of authenticity. Do not read/execute it or follow companion links.
     let signature = path.with_extension("sig");
@@ -343,7 +346,15 @@ pub fn unreal_audit(path: &Path) -> io::Result<()> {
     println!("UNREAL_PAK|{}|{}|{}|{}|{}|{}", f.version, meta.len(), f.offset, f.size, u8::from(f.encrypted), codecs);
     println!("UNREAL_INDEX|{index_status}|{}", f.size);
     println!("UNREAL_SECURITY|{}|{}|{}", u8::from(f.encrypted), u8::from(signed), u8::from(f.frozen));
-    eprintln!("Read-only Unreal Pak: index SHA1 checks only the unencrypted primary index bytes, not entries, secondary indexes, signatures or runtime compatibility. Codec names are declarations, not measured usage. No texture/audio writer or Pak/IoStore repacker is implemented; RE Engine archives are not Unreal Paks.");
+    if let Some(r) = entries {
+        println!("UNREAL_LEGACY_ENTRIES|{}|{}|{}|{}|{}|{}|{}", r.entries, r.stored, r.encrypted,
+            r.deleted, r.header_checked, r.payload_checked, r.payload_skipped);
+        for (id, count) in r.methods { println!("UNREAL_METHOD_ID|{id}|{count}"); }
+        for (kind, count) in r.kinds { println!("UNREAL_ENTRY_KIND|{kind}|{count}"); }
+    } else {
+        println!("UNREAL_LEGACY_ENTRIES|SKIPPED_VERSION_ENCRYPTION_OR_BUDGET");
+    }
+    eprintln!("Read-only Unreal Pak: primary SHA1 is not signature verification. Bounded legacy v1–7 audits inspect indexed methods, data headers and eligible stored payload hashes; compressed/encrypted payloads and modern/secondary indexes remain unverified. No texture/audio writer or Pak/IoStore repacker is implemented; RE Engine archives are not Unreal Paks.");
     Ok(())
 }
 

@@ -7,6 +7,8 @@ mod variants;
 mod engines;
 mod unityfs;
 mod unity_serialized;
+mod unity_tree;
+mod unreal_legacy;
 mod containers;
 mod gst2;
 mod texture_policy;
