@@ -1,4 +1,4 @@
-# Engine support and roadmap (hoja de ruta)
+# Engine support and roadmap 
 
 Status: **2026-10-02**, development branch **0.2.0 (unreleased)**.
 This is a quick market/format survey, not an exhaustive catalogue of every engine,
