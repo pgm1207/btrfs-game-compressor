@@ -22,7 +22,7 @@ use std::{
 };
 
 const BACKUP: &str = ".bgc-assets-backup";
-const NOFOLLOW: i32 = 0x20000;
+const NOFOLLOW: i32 = libc::O_NOFOLLOW;
 const MAX_INPUT: u64 = 512 * 1024 * 1024;
 const MAX_PIXELS: u64 = 80_000_000;
 

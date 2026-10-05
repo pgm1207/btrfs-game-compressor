@@ -191,7 +191,7 @@ fn pck<R: Read + Seek>(f: &mut R, length: u64) -> io::Result<Pack> {
 }
 
 fn open(path: &Path) -> io::Result<(fs::File, fs::Metadata)> {
-    let file = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(path)?;
+    let file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() { return Err(invalid("container audit expects a regular file")); }
     Ok((file, meta))
@@ -494,7 +494,7 @@ pub fn godot_dedup(input: &Path, output: Option<&Path>, min_efficiency: f64) -> 
         if plan.removed.iter().any(|&(start, _)| start < base.max(100)) { return Err(invalid("unsupported PCK payload/header placement")); }
         let directory = if pack.version >= 3 { file.seek(SeekFrom::Start(32))?; Some(u64le(&mut file)?) } else { None };
         let new_base = shifted(base, &plan)?;
-        let mut target = fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).custom_flags(0x20000).open(path)?;
+        let mut target = fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path)?;
         let write = (|| {
             let mut pos = 0;
             for &(start, size) in &plan.removed { copy_range(&mut file, &mut target, pos, start - pos)?; pos = start + size; }
@@ -821,7 +821,7 @@ fn godot3_transform(input: &Path, output: Option<&Path>, min_efficiency: f64, pr
     }).sum();
     let write_export = predicted_saved > 0 && predicted_saved as f64 * 100.0 / predicted_after.max(1) as f64 >= min_efficiency;
     let mut target_file = match output.filter(|_| write_export) {
-        Some(path) => Some(fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).custom_flags(0x20000).open(path)?),
+        Some(path) => Some(fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path)?),
         None => None,
     };
     if let Some(t) = target_file.as_mut() { t.write_all(&prefix)?; }
@@ -1146,7 +1146,7 @@ pub fn godot_texture_transform(input: &Path, output: Option<&Path>, min_efficien
     if let Some(path) = output {
         if keep {
             // Create only after the savings gate passes; no speculative writes.
-            let mut t = fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).custom_flags(0x20000).open(path)?;
+            let mut t = fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path)?;
             t.write_all(&prefix)?;
             let mut written_pos = base;
             for (&off, &size) in &extents {

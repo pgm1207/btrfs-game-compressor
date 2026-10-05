@@ -175,13 +175,15 @@ fn rebuild(b: &[u8]) -> io::Result<(Vec<u8>, usize, Bundle)> {
 }
 
 fn read_source(path: &Path) -> io::Result<Vec<u8>> {
-    // Fail closed on symlinks explicitly instead of relying only on the
-    // hardcoded O_NOFOLLOW flag below. An aarch64 release runner followed the
-    // link and produced a candidate, so the portable check is mandatory.
+    // Belt-and-suspenders symlink refusal. The flags here used to be the
+    // hardcoded 0x20000, which is O_NOFOLLOW on x86_64 but not on aarch64, so
+    // an aarch64 release runner followed the link and produced a candidate.
+    // libc::O_NOFOLLOW is now correct per-architecture; this explicit check is a
+    // second, flag-independent gate.
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(invalid("UnityFS source must not be a symlink"));
     }
-    let mut f = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(path)?;
+    let mut f = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let before = f.metadata()?;
     if !before.is_file() || before.len() > MAX_FILE { return Err(invalid("UnityFS expects a regular file up to 512 MiB")); }
     let mut b = Vec::new(); Read::by_ref(&mut f).take(MAX_FILE + 1).read_to_end(&mut b)?;
@@ -213,7 +215,7 @@ pub fn run(input: &Path, output: Option<&Path>, min_efficiency: f64) -> io::Resu
     let efficiency = gain as f64 * 100.0 / candidate.len().max(1) as f64;
     let status = if gain == 0 { "NO_GAIN" } else if efficiency < min_efficiency { "LOW_EFFICIENCY" } else if let Some(path) = output {
         super::cancelled()?;
-        let mut target = fs::OpenOptions::new().write(true).create_new(true).custom_flags(0x20000).open(path)?;
+        let mut target = fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
         let result = (|| {
             for chunk in candidate.chunks(65536) { super::cancelled()?; target.write_all(chunk)?; }
             super::cancelled()?; target.sync_all()

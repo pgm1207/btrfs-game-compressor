@@ -118,7 +118,7 @@ impl Tree {
     fn new(path: &Path) -> io::Result<Self> {
         let root = OpenOptions::new()
             .read(true)
-            .custom_flags(0x20000 | 0x10000)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
             .open(path)?; // NOFOLLOW | DIRECTORY
         let mut info = [0u64; 128];
         call(&root, request(2, 0x94, 31, 1024), &mut info)?;

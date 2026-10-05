@@ -38,6 +38,7 @@ dependencies = [
  "image",
  "image_dds",
  "lewton",
+ "libc",
  "lz4",
  "nanomp3",
  "ogg",

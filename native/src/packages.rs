@@ -21,7 +21,7 @@ fn invalid(message: &str) -> io::Error {
 pub fn prepare(path: &Path) -> io::Result<Option<Vec<u8>>> {
     let mut file = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(0x20000)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.nlink() != 1 || meta.len() < 10 || meta.len() > MAX_FILE {
@@ -128,7 +128,7 @@ fn recompress(bytes: &[u8]) -> io::Result<Option<Vec<u8>>> {
 /// Bounded warm LZ4 decoder microbenchmark. No input mutation and no caches
 /// dropped. Reports best of five runs, excluding I/O and uncompressed chunks.
 pub fn audit(path: &Path) -> io::Result<()> {
-    let mut file = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(path)?;
+    let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_FILE {
         return Err(invalid("package audit expects a single-link file up to 512 MiB"));

@@ -35,7 +35,7 @@ pub fn plausible(bytes: &[u8], actual_size: u64) -> bool {
 }
 
 pub fn audit(path: &Path) -> io::Result<()> {
-    let mut file = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(path)?;
+    let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let before = file.metadata()?;
     if !before.is_file() {
         return Err(invalid("XNB audit requires a regular file"));

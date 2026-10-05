@@ -179,7 +179,7 @@ fn inventory(bytes: &[u8], h: &Header) -> io::Result<Inventory> {
 }
 
 pub fn audit(path: &Path) -> io::Result<()> {
-    let mut file = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(path)?;
+    let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() { return Err(bad("Unity audit requires a regular file")); }
     let mut prefix = [0u8; 48];
@@ -225,7 +225,7 @@ pub fn audit(path: &Path) -> io::Result<()> {
 /// Return the number of readable type-tree Texture2D objects without decoding
 /// or following streamed content. Used only by the dry-run coverage inventory.
 pub fn texture_coverage(path: &Path) -> io::Result<(u64, u64)> {
-    let mut file = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(path)?;
+    let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() { return Err(bad("Unity coverage requires a regular file")); }
     let mut prefix = [0u8; 48];

@@ -1,13 +1,16 @@
 # Changelog
 
-## 0.2.1 — 2026-10-05 — Portable symlink refusal on the audit/export path
+## 0.2.1 — 2026-10-05 — Correct open flags on aarch64; release fix
 
-- Refuse symlinked UnityFS and FMOD sources with an explicit
-  `symlink_metadata` check instead of relying only on the hardcoded
-  `O_NOFOLLOW` open flag. The 0.2.0 release build failed on the aarch64
-  runner because that platform followed the link and produced a candidate;
-  failing closed is now deterministic on every architecture. 0.2.0 did not
-  publish a release artifact.
+- Use `libc::O_NOFOLLOW`, `libc::O_NONBLOCK` and `libc::O_DIRECTORY` instead of
+  hardcoded magic numbers on every source-open and destination-create path. The
+  value `0x20000` is `O_NOFOLLOW` on x86_64 but a different flag on aarch64, so
+  the 0.2.0 release build followed symlinks there and failed its own
+  read-only-audit tests. This corrects the flag on every architecture.
+- Keep an explicit `symlink_metadata` gate on the UnityFS and FMOD source readers
+  as a flag-independent second check.
+- 0.2.0 failed its aarch64 release build and published no artifact; 0.2.1 is the
+  first 0.2.x release.
 
 ## 0.2.0 — 2026-10-05 — Native backend and compatibility-first assets
 

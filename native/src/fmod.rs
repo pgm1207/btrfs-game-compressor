@@ -357,12 +357,13 @@ fn rebuild(b: &[u8], policy: Policy) -> io::Result<(Vec<u8>,usize,usize)> {
     Ok((output,changed,skipped))
 }
 fn read_source(input: &Path) -> io::Result<Vec<u8>> {
-    // Explicit symlink refusal: do not depend on O_NOFOLLOW alone. An aarch64
-    // release runner followed a symlink and produced a candidate bundle.
+    // Belt-and-suspenders symlink refusal: libc::O_NOFOLLOW is now correct
+    // per-architecture, and this explicit check is a second, flag-independent
+    // gate. The old hardcoded 0x20000 followed links on aarch64.
     if fs::symlink_metadata(input)?.file_type().is_symlink() {
         return Err(bad("FMOD input must not be a symlink"));
     }
-    let mut source = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(input)?;
+    let mut source = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(input)?;
     let meta = source.metadata()?;
     if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_FILE { return Err(bad("FMOD input must be a single-link regular file of at most 1 GiB")); }
     let mut b = Vec::new(); Read::by_ref(&mut source).take(MAX_FILE+1).read_to_end(&mut b)?;
@@ -478,7 +479,7 @@ pub fn run(profile: &str, input: &Path, output: &Path) -> io::Result<()> {
         println!("FMOD|{}|{}|0|{skipped}|NO_OUTPUT",b.len(),b.len()); return Ok(());
     }
     super::cancelled()?;
-    let mut target = fs::OpenOptions::new().write(true).create_new(true).custom_flags(0x20000).open(output)?;
+    let mut target = fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).open(output)?;
     let write = (|| {
         for chunk in result.chunks(65536) { super::cancelled()?; target.write_all(chunk)?; }
         super::cancelled()?;

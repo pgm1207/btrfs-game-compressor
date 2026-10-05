@@ -66,7 +66,7 @@ pub fn parse(bytes: &[u8]) -> io::Result<Header> {
 }
 
 pub fn audit(path: &Path) -> io::Result<()> {
-    let mut file = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(path)?;
+    let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() { return Err(bad("IoStore audit requires a regular file")); }
     let mut bytes = [0u8; 144];

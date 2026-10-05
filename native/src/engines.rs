@@ -81,19 +81,19 @@ fn survey(dir: &Path, dev: u64, rel: &str, out: &mut Survey, budget: &mut u64) -
                 // Wwise also uses .pck; the extension alone is not Godot evidence.
                 if class == "pck" {
                     let mut magic = [0; 4];
-                    let mut source = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(entry.path())?;
+                    let mut source = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(entry.path())?;
                     if source.read_exact(&mut magic).is_ok() {
                         class = match &magic { b"GDPC" => { out.godot = true; "godot-pck" }, b"AKPK" => "wwise-pck", _ => "unknown-pck" };
                     } else { class = "unknown-pck"; }
                 } else if class == "xnb" {
                     let mut header = [0; 10];
-                    let mut source = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(entry.path())?;
+                    let mut source = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(entry.path())?;
                     if source.read_exact(&mut header).is_err() || !super::xnb::plausible(&header, meta.len()) {
                         continue;
                     }
                 } else if class == "unknown-hash-file" || class == "unity-resource" || class == "unity-bundle" {
                     let mut magic = [0; 8];
-                    let mut source = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(entry.path())?;
+                    let mut source = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(entry.path())?;
                     if source.read_exact(&mut magic).is_ok() {
                         if &magic == b"UnityFS\0" { out.unityfs = true; class = "unity-bundle"; }
                         else if &magic[..4] == b"FSB5" { class = "fmod-audio"; }
