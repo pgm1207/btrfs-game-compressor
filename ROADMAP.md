@@ -115,8 +115,9 @@ high-value families; **P3** deferred investigations, not scheduled commitments.
 - [ ] Texture2D codec/dimensions/mips/stream-offset inventory, including atlases
   and shared streams. Build fixtures before enabling a writer.
   (Dimensions/format/mips/inline-vs-streamed extents, shared-stream grouping and
-  same-directory bounds-checked stream resolution are inspected read-only;
-  SpriteAtlas protection and any writer remain pending.)
+  same-directory bounds-checked stream resolution are inspected read-only, with
+  per-format byte totals and a file-level atlas/UI risk flag;
+  full SpriteAtlas reference resolution and any writer remain pending.)
 - [ ] Export-first inline BC1/BC3/RGBA subset, complete mip chains and metadata;
   preserve alpha/color space and skip normal/data textures unless understood.
 - [ ] `.resS` relocation and all referencing objects updated together. Multi-file

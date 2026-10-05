@@ -8,6 +8,10 @@
   non-regular files are refused, and shared streams are grouped per stream file.
   This is groundwork for a streamed-texture writer and enables no writer by
   itself.
+- The same audit now aggregates declared inline and streamed bytes per
+  TextureFormat and emits a file-level `UNITY_ATLAS_RISK` flag when SpriteAtlas
+  or Sprite objects are present, so a future writer must protect atlas/UI
+  textures. Totals cover only textures with a supported schema.
 
 ## 0.2.1 — 2026-10-05 — Correct open flags on aarch64; release fix
 

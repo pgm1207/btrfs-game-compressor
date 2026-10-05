@@ -238,6 +238,24 @@ fn summarize_streams(parent: &Path, details: &[(u64, crate::unity_tree::Texture)
     summary
 }
 
+#[derive(Default)]
+struct FormatTotal { count: u64, inline: u64, streamed: u64 }
+
+/// Aggregate declared bytes per Unity TextureFormat over the textures whose
+/// schema was readable. `inline` is declared inline payload and `streamed` is the
+/// declared same-file stream extent. Both are metadata, not decoded or verified
+/// bytes, and formats whose names are unknown stay labelled `Unknown`.
+fn summarize_formats(details: &[(u64, crate::unity_tree::Texture)]) -> BTreeMap<(u32, &'static str), FormatTotal> {
+    let mut totals: BTreeMap<(u32, &'static str), FormatTotal> = BTreeMap::new();
+    for (_, texture) in details {
+        let entry = totals.entry((texture.format, crate::unity_tree::format_name(texture.format))).or_default();
+        entry.count += 1;
+        entry.inline = entry.inline.saturating_add(texture.inline_bytes as u64);
+        entry.streamed = entry.streamed.saturating_add(texture.stream_size);
+    }
+    totals
+}
+
 pub fn audit(path: &Path) -> io::Result<()> {
     let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let meta = file.metadata()?;
@@ -286,6 +304,17 @@ pub fn audit(path: &Path) -> io::Result<()> {
         println!("UNITY_STREAM_FILE|{stream_path}|{count}|{bytes}");
     }
     println!("UNITY_STREAM_TOTAL|{}|{}|{}", streams.resolved, streams.unresolved, streams.bytes);
+    for ((format, name), total) in summarize_formats(&details) {
+        println!("UNITY_TEXTURE_FORMAT|{format}|{name}|{}|{}|{}", total.count, total.inline, total.streamed);
+    }
+    // SpriteAtlas and Sprite objects mean some textures may be atlas-referenced or
+    // UI-bound. Without a resolved atlas schema this is only a file-level warning
+    // that a future writer must not blindly resize those textures.
+    let atlas = v.classes.get(&687078895).map_or(0, |(count, _)| *count);
+    let sprites = v.classes.get(&213).map_or(0, |(count, _)| *count);
+    if atlas > 0 || sprites > 0 {
+        println!("UNITY_ATLAS_RISK|{atlas}|{sprites}");
+    }
     let total = v.classes.get(&28).map_or(0, |(count, _)| *count);
     println!("UNITY_TEXTURE_AUDIT|{}|{}", details.len(), total - details.len() as u64);
     eprintln!("Read-only Unity: bounded type-tree Texture2D fields are reported when supported; absent/unknown trees leave payloads opaque. Declared stream paths are resolved read-only against the same directory only to bounds-check their extent; no payload is read and no texture/audio writer is implemented.");
@@ -482,5 +511,23 @@ mod tests {
         assert_eq!(s.status[2].1, "OUT_OF_RANGE");
         assert_eq!(s.status[3].1, "MISSING");
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn format_summary_aggregates_declared_bytes_per_format() {
+        let make = |format: u32, inline: usize, stream: u64| crate::unity_tree::Texture {
+            width: 4, height: 4, format, mips: 1, inline_bytes: inline,
+            stream_offset: 0, stream_size: stream, stream_path: "s.resS".to_string() };
+        let details = vec![
+            (1u64, make(10, 128, 0)),     // DXT1, inline
+            (2u64, make(10, 0, 4096)),    // DXT1, streamed
+            (3u64, make(25, 64, 0)),      // BC7, inline
+            (4u64, make(u32::MAX, 8, 0)), // Unknown format stays labelled Unknown
+        ];
+        let totals = summarize_formats(&details);
+        let dxt1 = totals.get(&(10, "DXT1")).unwrap();
+        assert_eq!((dxt1.count, dxt1.inline, dxt1.streamed), (2, 128, 4096));
+        let bc7 = totals.get(&(25, "BC7")).unwrap();
+        assert_eq!((bc7.count, bc7.inline, bc7.streamed), (1, 64, 0));
+        assert_eq!(totals.get(&(u32::MAX, "Unknown")).unwrap().count, 1);
     }
 }
