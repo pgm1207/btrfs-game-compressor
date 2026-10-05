@@ -91,6 +91,17 @@ seek tables are rebuilt. Not enabled for automatic game-asset replacement;
 in-game audio, loop and seeking validation is required. Bink 2 re-encoding is
 not implemented.
 .TP
+.BI \-\-texture\-compress " MAX_DIM FILE OUTPUT"
+Export\-only DDS downscale (experimental). Decodes the base mip of a bounded 2D
+DDS texture, downscales it to MAX_DIM without upscaling, re\-encodes it to the
+same codec with a regenerated mip chain, and writes OUTPUT. The source is never
+modified and an existing OUTPUT is refused. Supported inputs are legacy
+BC1/BC2/BC3 and 32\-bit BGRA/RGBA, plus DX10 BC1/BC2/BC3/BC4/BC5/BC7 and
+R8G8B8A8/B8G8R8A8; cubemaps, arrays, volumes, BC6H and float formats are
+rejected. The exported payload is lossy, the container is verified by
+re\-parsing and re\-decoding, and the result is not validated in\-game and is not
+applied to installed games.
+.TP
 .BI \-\-apply\-assets " GAME"
 Apply beta asset optimization to a stopped game, retaining originals in a
 local restore copy. Visual media may lose detail; supported WAV files may be

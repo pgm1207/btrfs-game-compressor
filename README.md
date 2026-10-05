@@ -83,6 +83,13 @@ Existing recovery files are not deleted or overwritten. This mode is not runtime
 validation: Steam verification/downloads may be required to restore originals,
 and unsupported formats stay untouched. Do not use it on a running game.
 
+**Export-only DDS downscale MVP:** `--texture-compress MAX_DIM FILE OUTPUT`
+downscales a bounded 2D DDS to `MAX_DIM`, rebuilds its mip chain, and writes a
+new file while preserving the source codec; the source is never modified. It
+supports legacy BC1/2/3 and 32-bit BGRA/RGBA plus DX10 BC1/2/3/4/5/7 and
+R8G8B8A8/B8G8R8A8, and refuses cubemaps/arrays/volumes/BC6H. The output is lossy
+and unverified in-game, and this is not applied to installed games.
+
 For recovery after a lost lossy-run journal, the optional Python helper
 `tools/resume-library-compaction.py --state-dir ~/.local/state/bgc-live-1080p-recovery`
 checkpoints lossless Zstd/dedupe stages and writes `stats.md` plus per-game logs.

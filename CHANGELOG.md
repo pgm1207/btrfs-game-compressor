@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add an export-only DDS texture compressor: `--texture-compress MAX_DIM FILE
+  OUTPUT` (native `texture-compress`) downscales the base mip of a bounded 2D DDS
+  to a maximum dimension, re-encodes it to the same codec with a regenerated mip
+  chain, and verifies the written file by re-parsing and re-decoding it. Supports
+  legacy BC1/BC2/BC3 and 32-bit BGRA/RGBA plus DX10 BC1/BC2/BC3/BC4/BC5/BC7 and
+  R8G8B8A8/B8G8R8A8. Cubemaps, arrays, volumes, BC6H and float formats are
+  refused. Never writes in place; the source is untouched and the output is a new
+  file. The payload is lossy and unverified in-game, and this is not main-pipeline
+  apply or net savings.
 - Unity read-only audit now resolves declared Texture2D stream paths against the
   audited file's own directory and bounds-checks `offset .. offset+size` without
   reading payload bytes. Absolute paths, `..` traversal, symlinks and

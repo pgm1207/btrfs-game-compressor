@@ -40,6 +40,40 @@ fn no_backup_assets_replace_atomically_without_recovery_files() {
 }
 
 #[test]
+fn texture_compress_exports_a_smaller_dds_and_leaves_the_source() {
+    let parent = env::var_os("BGC_TEST_BTRFS_DIR").map(std::path::PathBuf::from).unwrap_or_else(env::temp_dir);
+    let root = parent.join(format!("bgc-texture-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+    fs::create_dir(&root).unwrap();
+    // A 64x64 legacy uncompressed BGRA DDS: 32-bit masks, single mip.
+    let mut dds = vec![0u8; 128 + 64 * 64 * 4];
+    dds[..4].copy_from_slice(b"DDS ");
+    dds[4..8].copy_from_slice(&124u32.to_le_bytes());
+    dds[12..16].copy_from_slice(&64u32.to_le_bytes()); // height
+    dds[16..20].copy_from_slice(&64u32.to_le_bytes()); // width
+    dds[20..24].copy_from_slice(&(64 * 4u32).to_le_bytes()); // pitch
+    dds[28..32].copy_from_slice(&1u32.to_le_bytes()); // mips
+    dds[76..80].copy_from_slice(&32u32.to_le_bytes());
+    dds[80..84].copy_from_slice(&0x41u32.to_le_bytes()); // RGB | ALPHAPIXELS
+    dds[88..92].copy_from_slice(&32u32.to_le_bytes());
+    dds[92..96].copy_from_slice(&0x00ff0000u32.to_le_bytes());
+    dds[96..100].copy_from_slice(&0x0000ff00u32.to_le_bytes());
+    dds[100..104].copy_from_slice(&0x000000ffu32.to_le_bytes());
+    dds[104..108].copy_from_slice(&0xff000000u32.to_le_bytes());
+    dds[108..112].copy_from_slice(&0x1000u32.to_le_bytes());
+    for pixel in dds[128..].chunks_mut(4) { pixel.copy_from_slice(&[10, 20, 30, 255]); }
+    let input = root.join("texture.dds");
+    let output = root.join("texture.out.dds");
+    fs::write(&input, &dds).unwrap();
+    let printed = success(&["texture-compress", "16", input.to_str().unwrap(), output.to_str().unwrap()]);
+    assert!(printed.starts_with("TEXTURE_COMPRESS|"), "{printed}");
+    assert_eq!(fs::read(&input).unwrap(), dds, "source must be untouched");
+    assert!(fs::metadata(&output).unwrap().len() < dds.len() as u64);
+    // The destination is export-only and must never be overwritten.
+    assert!(!run(&["texture-compress", "16", input.to_str().unwrap(), output.to_str().unwrap()]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn content_detected_engine_audits_are_read_only_and_reject_corruption() {
     let parent = env::var_os("BGC_TEST_BTRFS_DIR").map(std::path::PathBuf::from).unwrap_or_else(env::temp_dir);
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();

@@ -128,6 +128,8 @@ OPT_ENGINES=0
 ENGINES_QUERY=""
 OPT_FMOD_EXPORT=0
 FMOD_QUALITY="" FMOD_SOURCE="" FMOD_OUTPUT=""
+OPT_TEXTURE_COMPRESS=0
+TEXTURE_MAX_DIM="" TEXTURE_SOURCE="" TEXTURE_OUTPUT=""
 OPT_CONTAINER=0
 CONTAINER_ACTION="" CONTAINER_SOURCE="" CONTAINER_OUTPUT="" CONTAINER_PROFILE=""
 ASSET_QUERY=""
@@ -257,6 +259,10 @@ OPTIONS
         --export-fmod QUALITY FILE OUTPUT
                           experimental FMOD export (conservative, balanced, 0.0-0.4)
                           writes a new file only; never replaces game assets
+        --texture-compress MAX_DIM FILE OUTPUT
+                          experimental DDS downscale export (2D BC1/2/3/4/5/7 and
+                          BGRA/RGBA); preserves the codec and rebuilds mips;
+                          writes a new file only; never replaces game assets
     -l, --library DIR     add DIR as a game library, then exit
                            (accepts the library root or its steamapps/common)
         --pending         with --status/--dry-run, only show pending games
@@ -352,6 +358,12 @@ parse_args() {
                     echo "$PROGNAME: --export-fmod requires QUALITY FILE OUTPUT" >&2; exit 2;
                 }
                 OPT_FMOD_EXPORT=1; FMOD_QUALITY="$2"; FMOD_SOURCE="$3"; FMOD_OUTPUT="$4"
+                shift 3 ;;
+            --texture-compress)
+                [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] || {
+                    echo "$PROGNAME: --texture-compress requires MAX_DIM FILE OUTPUT" >&2; exit 2;
+                }
+                OPT_TEXTURE_COMPRESS=1; TEXTURE_MAX_DIM="$2"; TEXTURE_SOURCE="$3"; TEXTURE_OUTPUT="$4"
                 shift 3 ;;
             --audit-container)
                 [ "$OPT_CONTAINER" -eq 0 ] || { echo "$PROGNAME: container modes cannot be combined" >&2; exit 2; }
@@ -525,6 +537,7 @@ parse_args() {
         "OPT_SLIM:--slim:0"
         "OPT_ENGINES:--engines:0"
         "OPT_FMOD_EXPORT:--export-fmod:0"
+        "OPT_TEXTURE_COMPRESS:--texture-compress:0"
         "OPT_CONTAINER:--audit-container/--audit-godot-textures/--audit-godot3-audio/--export-unityfs/--export-godot/--export-godot-textures/--export-godot3-audio:0"
         "OPT_BALANCE:--balance:0"
         "OPT_NOTIFY:--notify:0"
@@ -3011,6 +3024,18 @@ cmd_export_fmod() {
     fi
 }
 
+cmd_texture_compress() {
+    local result tag before after width height new_width new_height format mips status
+    result=$("$(native_backend)" texture-compress "$TEXTURE_MAX_DIM" "$TEXTURE_SOURCE" "$TEXTURE_OUTPUT") || return $?
+    IFS='|' read -r tag before after width height new_width new_height format mips status <<< "$result"
+    [ "$tag" = TEXTURE_COMPRESS ] || { printf 'Invalid texture backend response.\n' >&2; return 1; }
+    printf '[EXPERIMENTAL] Exported %s\n' "$TEXTURE_OUTPUT"
+    printf '%s → %s, %sx%s → %sx%s, %s, %s mip(s), %s (logical bytes %s → %s).\n' \
+        "$TEXTURE_SOURCE" "$TEXTURE_OUTPUT" "$width" "$height" "$new_width" "$new_height" \
+        "$format" "$mips" "$status" "$(bytes_human "$before")" "$(bytes_human "$after")"
+    printf 'Source unchanged and its codec is preserved; the exported payload is lossy and unverified in-game. This is not net disk savings and no installed game is modified.\n'
+}
+
 # Container transforms are intentionally not part of automatic installed apply.
 # Their write gate uses savings/output bytes, not total game size. Audit stays
 # read-only; successful export retains the source and therefore is not net savings.
@@ -4705,6 +4730,11 @@ fi
 
 if [ "$OPT_FMOD_EXPORT" -eq 1 ]; then
     cmd_export_fmod
+    exit $?
+fi
+
+if [ "$OPT_TEXTURE_COMPRESS" -eq 1 ]; then
+    cmd_texture_compress
     exit $?
 fi
 

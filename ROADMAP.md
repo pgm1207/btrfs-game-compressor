@@ -76,7 +76,7 @@ codec, container layout and operation (audit/export/apply).
 
 | Format / middleware | Current | Next work |
 | --- | --- | --- |
-| Loose raster / DDS | Shared guarded beta apply; DDS limited to simple legacy BC1/2/3 | Complete mip chains, DX10 headers, BC7; arrays/cubes/HDR/normal maps require explicit handling |
+| Loose raster / DDS | Shared guarded beta apply (legacy BC1/2/3 only in place); export-only `--texture-compress` downscales and rebuilds mips for legacy BC1/2/3, 32-bit BGRA/RGBA, DX10 BC1/2/3/4/5/7 and R8G8B8A8/B8G8R8A8 | Wire the DX10/BC7 + mip path into the in-place apply after export validation; arrays/cubes/HDR/normal maps require explicit handling |
 | Godot BC1/2/3/7, PNG/WebP/raw | Supported subsets with original/logical size and mip rebuilding | Basis/ETC/ASTC/half-float and compressed metadata remain unsupported |
 | PCM / float WAV | Supported simple mono/stereo files, profile ceilings | Metadata-rich/looped/multichannel WAV must preserve timing/chunks before enabling |
 | FMOD FSB5 Vorbis / RIFF FEV banks | Bounded standalone beta apply/export; codebook, savings and waveform gates | Broader seek/playback fixtures, embedded stream references, other codecs; manual listening |

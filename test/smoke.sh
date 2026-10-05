@@ -2189,6 +2189,27 @@ check_rc "FMOD export does not advertise unsupported JSON" 2 "$rc"
 out=$(run --help)
 check_contains "help documents export-only FMOD re-encoding" "--export-fmod QUALITY FILE OUTPUT" "$out"
 
+group "Experimental DDS texture-compress CLI"
+out=$(run --texture-compress 2>&1); rc=$?
+check_rc "texture-compress requires dimension, input and output" 2 "$rc"
+check_contains "missing texture arguments explain usage" "requires MAX_DIM FILE OUTPUT" "$out"
+out=$(run --texture-compress 1024 in.dds out.dds --status 2>&1); rc=$?
+check_rc "texture-compress cannot combine with status" 2 "$rc"
+out=$(run --help)
+check_contains "help documents export-only DDS downscaling" "--texture-compress MAX_DIM FILE OUTPUT" "$out"
+cat > "$WORK/texture-shim" <<'SHIM'
+#!/bin/sh
+printf 'TEXTURE_COMPRESS|2048|1024|1920|1080|1024|576|BC3RgbaUnorm|11|downscaled\n'
+SHIM
+chmod +x "$WORK/texture-shim"
+out=$(
+    native_backend() { printf '%s\n' "$WORK/texture-shim"; }
+    TEXTURE_MAX_DIM=1024 TEXTURE_SOURCE=in.dds TEXTURE_OUTPUT=out.dds
+    cmd_texture_compress
+)
+check_contains "texture-compress reports the downscale" "1920x1080 → 1024x576" "$out"
+check_contains "texture-compress warns the export is unverified" "Source unchanged and its codec is preserved" "$out"
+
 group "Unused-content pruning CLI"
 out=$(run --prune-assets 2>&1); rc=$?
 check_rc "prune requires a game name" 2 "$rc"
