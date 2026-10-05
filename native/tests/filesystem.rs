@@ -23,6 +23,23 @@ fn success(args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 #[test]
+fn no_backup_assets_replace_atomically_without_recovery_files() {
+    let Some(parent) = env::var_os("BGC_TEST_BTRFS_DIR") else { return; };
+    let root = std::path::PathBuf::from(parent).join(format!("bgc-no-backup-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+    fs::create_dir(&root).unwrap();
+    let path = root.join("large.png");
+    image::RgbImage::from_pixel(3840, 2160, image::Rgb([17, 31, 49])).save(&path).unwrap();
+    let original = fs::read(&path).unwrap();
+    let output = success(&["assets", "apply-no-backup", "balanced", "1", root.to_str().unwrap()]);
+    assert!(output.contains("ASSETS|apply|Balanced (1080p)|1|"), "{output}");
+    assert!(!root.join(".bgc-assets-backup").exists());
+    assert_ne!(fs::read(&path).unwrap(), original);
+    assert_eq!(image::image_dimensions(&path).unwrap(), (1920, 1080));
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn content_detected_engine_audits_are_read_only_and_reject_corruption() {
     let parent = env::var_os("BGC_TEST_BTRFS_DIR").map(std::path::PathBuf::from).unwrap_or_else(env::temp_dir);
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -48,6 +65,16 @@ fn content_detected_engine_audits_are_read_only_and_reject_corruption() {
     assert!(output.contains("|little|6000.0.59f2|19|0|1|1|0"));
     assert!(output.contains("UNITY_CLASS|28|Texture2D|1|16"));
     assert_eq!(fs::read(&serialized).unwrap(), bytes);
+    let xnb = root.join("page000.xnb");
+    let mut xnb_bytes = b"XNBd\x05\x01".to_vec();
+    xnb_bytes.extend(10u32.to_le_bytes());
+    fs::write(&xnb, &xnb_bytes).unwrap();
+    let output = success(&["container-audit", xnb.to_str().unwrap()]);
+    assert!(output.contains("XNB_HEADER|d|5|1|none|10|1"));
+    assert_eq!(fs::read(&xnb).unwrap(), xnb_bytes);
+    let broken_xnb = root.join("broken.xnb");
+    fs::write(&broken_xnb, b"XNBd\x05\0\x0b\0\0\0").unwrap();
+    assert!(!run(&["container-audit", broken_xnb.to_str().unwrap()]).status.success());
     let link = root.join("linked.assets"); symlink(&serialized, &link).unwrap();
     assert!(!run(&["container-audit", link.to_str().unwrap()]).status.success());
     // Known SHA1 test vector "abc", not a hash computed by the reader under test.

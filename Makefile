@@ -18,10 +18,10 @@ SYSTEMDDIR  := systemd
 # referring to it earlier would silently yield an empty string and drop the
 # manpage from the release tarball.
 FILES       := $(PROG) $(MANPAGE) README.md LICENSE THIRD_PARTY.md CHANGELOG.md CONTRIBUTING.md \
-               install.sh Makefile GAMES.md ratios native/Cargo.toml native/Cargo.lock native/src native/vendor
+               install.sh Makefile GAMES.md SUPPORT.md ratios tools native/Cargo.toml native/Cargo.lock native/src native/vendor
 
 .PHONY: all check test lint syntax install uninstall service service-off package \
-        ratios-doc ratios-merge clean help native native-test
+        ratios-doc ratios-merge clean help native native-test python-test
 
 all: native
 
@@ -39,7 +39,7 @@ help:
 	@echo "  make package            build a release tarball in dist/"
 	@echo "  make clean              remove build artifacts"
 
-check: syntax lint native-test test
+check: syntax lint native-test python-test test
 
 syntax:
 	@bash -n $(PROG) && echo "syntax: ok"
@@ -73,6 +73,11 @@ native-test:
 
 test: native
 	@./test/smoke.sh
+
+# Fixture-only tests for the checkpointed library compaction runner. They use a
+# stub backend, touch no real games and need no Btrfs or privileges.
+python-test:
+	@python3 -m unittest discover -s test -p 'test_*.py'
 
 # Regenerate the browsable Markdown table from ratios/games.json. The renderer is
 # the script itself, so this needs no extra tooling and no network access.
@@ -108,6 +113,7 @@ install: native
 	@install -d $(DESTDIR)$(BINDIR)
 	@install -m 0755 $(PROG) $(DESTDIR)$(BINDIR)/$(PROG)
 	@install -m 0755 $(NATIVE) $(DESTDIR)$(BINDIR)/$(NATIVE)
+	@install -m 0644 tools/resume-library-compaction.py $(DESTDIR)$(BINDIR)/bgc-library-compaction.py
 	@if [ -f $(MANPAGE) ]; then \
 		install -d $(DESTDIR)$(MANDIR); \
 		install -m 0644 $(MANPAGE) $(DESTDIR)$(MANDIR)/$(MANPAGE); \
@@ -121,6 +127,7 @@ install: native
 	@echo "installed $(DESTDIR)$(BINDIR)/$(PROG)"
 
 uninstall:
+	@rm -f $(DESTDIR)$(BINDIR)/bgc-library-compaction.py
 	@rm -f $(DESTDIR)$(BINDIR)/$(PROG) $(DESTDIR)$(BINDIR)/$(NATIVE)
 	@rm -f $(DESTDIR)$(MANDIR)/$(MANPAGE)
 	@rm -f $(DESTDIR)$(DATADIR)/ratios/games.json $(DESTDIR)$(DATADIR)/GAMES.md
@@ -154,6 +161,7 @@ package: native
 	@mkdir -p dist/$(PROG)-$(VERSION)
 	@cp -R $(PROG) $(MANPAGE) README.md LICENSE THIRD_PARTY.md CHANGELOG.md CONTRIBUTING.md ROADMAP.md SCOPE.md install.sh Makefile GAMES.md ratios $(TESTDIR) $(SYSTEMDDIR) $(NATIVE) dist/$(PROG)-$(VERSION)/
 	@mkdir -p dist/$(PROG)-$(VERSION)/native
+	@cp -R tools dist/$(PROG)-$(VERSION)/
 	@cp -R native/Cargo.toml native/Cargo.lock native/src native/tests native/vendor dist/$(PROG)-$(VERSION)/native/
 	@tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
 		-cf - -C dist $(PROG)-$(VERSION) | gzip -n > dist/$(PROG)-$(VERSION)-linux-$(ARCH).tar.gz

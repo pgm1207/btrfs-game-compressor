@@ -109,6 +109,13 @@ OPT_DRY_RUN=0
 OPT_DEDUPE=0
 OPT_RECHECK=0
 OPT_ASSETS=0
+OPT_ASSET_INVENTORY=0
+OPT_ASSET_CONTAINERS=0
+OPT_AUDIT_GAME_PACKS=0
+OPT_AUDIT_GAME_FMOD=0
+OPT_ASSETS_ALL=0
+OPT_ASSETS_VERIFY_ALL=0
+OPT_COMPACT_ALL=0
 OPT_PRUNE=0
 PRUNE_QUERY=""
 PRUNE_FALLBACKS=0
@@ -184,7 +191,23 @@ OPTIONS
         --restore-assets GAME
                           restore original assets from the local copy
         --finalize-assets GAME
-                          discard restore copy after checking the game works
+                           discard restore copy after checking the game works
+        --asset-inventory GAME
+                            fast format inventory only; does not estimate savings
+        --asset-containers GAME
+                            list standalone PCK, FMOD and package trial targets
+        --audit-game-packs GAME
+                            read-only validate every standalone Godot PCK in a game
+        --audit-game-fmod GAME
+                            read-only validate standalone FMOD banks in a game
+        --assets-all
+                            fast format inventory for every installed game
+        --assets-verify-all
+                            read-only Balanced candidate scan for every game
+        --compact-all-no-backup
+                            checkpointed library pass: supported Balanced assets
+                            (irreversible, no restore copy), then Zstd, then
+                            dedupe; resumable; writes a stats chart
         --prune-assets GAME
                           remove unused developer debug symbols (*.pdb/*.ilk),
                           retaining a restorable copy
@@ -238,7 +261,7 @@ OPTIONS
                            (accepts the library root or its steamapps/common)
         --pending         with --status/--dry-run, only show pending games
         --history         print separate compression and deduplication history
-        --stats           print ZSTD savings and latest dedupe estimates
+        --stats           print savings by category (bytes and percent), sorted by percent
         --benchmark       measure real savings per game from recorded data
                           (add --json for machine-readable output)
         --ratios [GAME]   look up expected savings in the community table
@@ -275,7 +298,7 @@ EXAMPLES
     $PROGNAME --recheck              refresh measurements without recompressing
     $PROGNAME --library /mnt/games   register a library outside Steam's VDF
     $PROGNAME --balance              finish the job with a filesystem balance
-    $PROGNAME --stats                how much space has been reclaimed
+    $PROGNAME --stats                savings by category, sorted by percentage
     $PROGNAME --history              every recorded compression, newest first
     $PROGNAME --benchmark            measured savings per game, sorted
     $PROGNAME --ratios               the whole community table
@@ -376,6 +399,29 @@ parse_args() {
                 ASSET_ACTION="$1"
                 ASSET_QUERY="$2"
                 shift ;;
+            --asset-inventory)
+                [ -n "${2:-}" ] || { echo "$PROGNAME: --asset-inventory requires a game name or path" >&2; exit 2; }
+                OPT_ASSET_INVENTORY=1
+                ASSET_QUERY="$2"
+                shift ;;
+            --asset-containers)
+                [ -n "${2:-}" ] || { echo "$PROGNAME: --asset-containers requires a game name or path" >&2; exit 2; }
+                OPT_ASSET_CONTAINERS=1
+                ASSET_QUERY="$2"
+                shift ;;
+            --audit-game-packs)
+                [ -n "${2:-}" ] || { echo "$PROGNAME: --audit-game-packs requires a game name or path" >&2; exit 2; }
+                OPT_AUDIT_GAME_PACKS=1
+                ASSET_QUERY="$2"
+                shift ;;
+            --audit-game-fmod)
+                [ -n "${2:-}" ] || { echo "$PROGNAME: --audit-game-fmod requires a game name or path" >&2; exit 2; }
+                OPT_AUDIT_GAME_FMOD=1
+                ASSET_QUERY="$2"
+                shift ;;
+            --assets-all) OPT_ASSETS_ALL=1 ;;
+            --assets-verify-all) OPT_ASSETS_VERIFY_ALL=1 ;;
+            --compact-all-no-backup) OPT_COMPACT_ALL=1 ;;
             --variants)
                 [ -n "${2:-}" ] || { echo "$PROGNAME: --variants requires a game name or path" >&2; exit 2; }
                 OPT_VARIANTS=1
@@ -466,6 +512,13 @@ parse_args() {
         "OPT_DEDUPE:--dedupe:0"
         "OPT_RECHECK:--recheck:0"
         "OPT_ASSETS:--assets:0"
+        "OPT_ASSET_INVENTORY:--asset-inventory:0"
+        "OPT_ASSET_CONTAINERS:--asset-containers:0"
+        "OPT_AUDIT_GAME_PACKS:--audit-game-packs:0"
+        "OPT_AUDIT_GAME_FMOD:--audit-game-fmod:0"
+        "OPT_ASSETS_ALL:--assets-all:0"
+        "OPT_ASSETS_VERIFY_ALL:--assets-verify-all:0"
+        "OPT_COMPACT_ALL:--compact-all-no-backup:0"
         "OPT_PRUNE:--prune-assets/--prune-fallbacks:0"
         "OPT_VARIANTS:--variants:0"
         "OPT_OPPORTUNITIES:--opportunities:0"
@@ -2877,7 +2930,7 @@ cmd_stats() {
     overall=$(pct_of "$saved" "$tu")
 
     hrule
-    echo -e "  ${BOLD}COMPRESSION STATISTICS${RESET}"
+    echo -e "  ${BOLD}SAVINGS STATISTICS${RESET}"
     hrule
     if [ "$rows" -eq 0 ]; then
         echo "  No compressed games recorded yet."
@@ -2892,20 +2945,53 @@ cmd_stats() {
             printf "  %-40s %s\n" "Most recent compression:" "$(epoch_local "$newest")"
         fi
     fi
-    local dedupe_line dedupe_passes dedupe_libs dedupe_latest dedupe_newest
+    local dedupe_line dedupe_passes dedupe_libs dedupe_latest dedupe_newest dedupe_pct
     dedupe_line=$(dedupe_history_summary)
     IFS=$'\t' read -r dedupe_passes dedupe_libs dedupe_latest dedupe_newest <<< "$dedupe_line"
+    dedupe_pct=$(awk -F'|' '
+        NF >= 9 && $1 ~ /^[0-9]+$/ && $2 != "" && $3 ~ /^[0-9]+$/ && $7 ~ /^[0-9]+$/ && $9 ~ /^-?[0-9]+$/ {
+            path = $2; ts = $1 + 0
+            if (!(path in newest) || ts >= newest[path]) {
+                newest[path] = ts; before[path] = $3 + 0; after[path] = $7 + 0; saved[path] = $9 + 0
+            }
+        }
+        END {
+            for (path in newest) {
+                if (before[path] <= 0) continue
+                pct = saved[path] * 100 / before[path]
+                if (!found || pct > best) { best = pct; found = 1 }
+            }
+            if (found) printf "%.1f", best; else printf "0.0"
+        }
+    ' "$DEDUPE_HISTORY_FILE" 2>/dev/null)
     hrule
-    echo '  DEDUPLICATION MEASUREMENTS (game data footprint)'
-    if [ "${dedupe_passes:-0}" -eq 0 ]; then
-        echo '  No measured dedupe passes recorded yet.'
-    else
-        printf "  %-40s %s\n" "Measured passes:" "$dedupe_passes"
-        printf "  %-40s %s\n" "Directories with recorded passes:" "$dedupe_libs"
-        printf "  %-40s %s\n" "Latest measured savings¹:" "$(bytes_human "$dedupe_latest")"
-        printf "  %-40s %s\n" "Most recent pass:" "$(epoch_local "$dedupe_newest")"
-        echo '  ¹ Sum of the latest measured pass for each directory; overlapping scopes may double-count. Not a cumulative total.'
+    echo '  SAVINGS BY CATEGORY (largest measured percentage first)'
+    printf '  %-23s %14s %11s  %s\n' 'CATEGORY' 'SAVED' 'REDUCTION' 'MEASUREMENT'
+    local -a stat_rows=()
+    if [ "$rows" -gt 0 ]; then
+        stat_rows+=("$(printf '%08.2f|%s|%s|%s|%s' "$overall" 'ZSTD compression' "$(mib_human "$saved")" "$overall" 'current recorded games vs original bytes')")
     fi
+    if [ "${dedupe_passes:-0}" -gt 0 ]; then
+        stat_rows+=("$(printf '%08.2f|%s|%s|%s|%s' "${dedupe_pct:-0.0}" 'Deduplication' "$(bytes_human "$dedupe_latest")" "${dedupe_pct:-0.0}" 'latest physical extent delta per directory')")
+    else
+        stat_rows+=("99999999|Deduplication|not measured|n/a|no successful physical measurement recorded")
+    fi
+    if [ "${#stat_rows[@]}" -gt 0 ]; then
+        while IFS='|' read -r _ category amount pct description; do
+            [ -n "$category" ] || continue
+            if [ "$pct" = n/a ]; then
+                printf '  %-23s %14s %10s  %s\n' "$category" "$amount" "$pct" "$description"
+            else
+                printf '  %-23s %14s %9s%%  %s\n' "$category" "$amount" "$pct" "$description"
+            fi
+        done < <(printf '%s\n' "${stat_rows[@]}" | sort -t '|' -k1,1nr)
+    fi
+    if [ "${dedupe_passes:-0}" -gt 0 ]; then
+        printf '  Dedupe: %s successful pass(es), %s directory(s); latest pass %s.\n' "$dedupe_passes" "$dedupe_libs" "$(epoch_local "$dedupe_newest")"
+    fi
+    printf '  %-23s %14s %10s  %s\n' 'Language removal' 'not tracked' 'n/a' 'no durable before/after ledger yet'
+    printf '  %-23s %14s %10s  %s\n' 'Asset optimization' 'not tracked' 'n/a' 'logical changes exist; net physical history not persisted'
+    echo '  Percentages use each category’s own measured before-size. Dedupe scope can overlap game records; do not add rows into a grand total.'
     hrule
     return 0
 }
@@ -3476,6 +3562,171 @@ asset_workflow() {
                 printf 'Discarded restore copy: %s logical bytes. Snapshots or other references may retain the blocks.\n' "$(bytes_human "$retained")"
             fi ;;
     esac
+}
+
+# Fast read-only format/extension inventory, unlike --assets which runs bounded
+# decoders to estimate actual transform candidates and may take much longer.
+asset_inventory_report() {
+    local query="$1" game="" matches=0 i output tag files bytes raster packed packed_bytes audio audio_bytes
+    for i in "${!GAMES_PATH[@]}"; do
+        if [ "$query" = "${GAMES_PATH[$i]}" ] || [ "${query,,}" = "${GAMES_NAME[$i],,}" ]; then
+            game="${GAMES_PATH[$i]}"; matches=$((matches+1))
+        fi
+    done
+    if [ "$matches" -ne 1 ]; then
+        printf '%s: expected one installed game, found %d for %s\n' "$PROGNAME" "$matches" "$query" >&2
+        return 2
+    fi
+    output=$("$(native_backend)" asset-inventory "$game") || return $?
+    IFS='|' read -r tag files bytes raster packed packed_bytes audio audio_bytes <<< "$output"
+    [ "$tag" = ASSET_INVENTORY ] || { printf 'Invalid inventory response.\n' >&2; return 1; }
+    printf 'Read-only inventory for %s (not a savings estimate):\n' "$query"
+    printf '  Files: %s · logical bytes: %s\n' "$files" "$(bytes_human "$bytes")"
+    printf '  Loose raster files: %s\n' "$raster"
+    printf '  Packed/media-looking files: %s · %s\n' "$packed" "$(bytes_human "$packed_bytes")"
+    printf '  Audio-looking files: %s · %s\n' "$audio" "$(bytes_human "$audio_bytes")"
+    printf 'Inventory is extension-based only; --assets runs bounded format-aware decoders to estimate candidates. Unsupported containers stay untouched.\n'
+}
+
+asset_container_report() {
+    local query="$1" game="" matches=0 i output wanted
+    wanted=$(basename -- "$query")
+    for i in "${!GAMES_PATH[@]}"; do
+        if is_ignored "${GAMES_NAME[$i]}"; then continue; fi
+        local install_base=${GAMES_PATH[$i]##*/}
+        install_base=${install_base//[^[:alnum:]]/}
+        wanted=${wanted//[^[:alnum:]]/}
+        if [ "$query" = "${GAMES_PATH[$i]}" ] || [ "${query,,}" = "${GAMES_NAME[$i],,}" ] || [ "${wanted,,}" = "${GAMES_NAME[$i]//[^[:alnum:]]/}" ] || [ "${wanted,,}" = "${install_base,,}" ]; then
+            game="${GAMES_PATH[$i]}"; matches=$((matches+1))
+        fi
+    done
+    if [ "$matches" -ne 1 ]; then
+        printf '%s: expected one installed game, found %d for %s\n' "$PROGNAME" "$matches" "$query" >&2
+        return 2
+    fi
+    output=$("$(native_backend)" asset-container-inventory "$game") || return $?
+    printf 'Standalone writer-supported format candidates in %s (inventory only):\n' "$query"
+    if [ -z "$output" ]; then
+        printf '  None detected.\n'
+    else
+        printf '%s\n' "$output" | while IFS='|' read -r tag class count bytes example; do
+            [ "$tag" = ASSET_CONTAINER ] || continue
+            printf '  %-12s %s file(s), %s · example: %s\n' "$class" "$count" "$(bytes_human "$bytes")" "$example"
+        done
+    fi
+    printf 'Detection does not establish transform eligibility; unsupported inputs remain untouched.\n'
+}
+
+asset_pack_audit_report() {
+    local query="$1" game="" matches=0 i output wanted
+    wanted=$(basename -- "$query")
+    for i in "${!GAMES_PATH[@]}"; do
+        if is_ignored "${GAMES_NAME[$i]}"; then continue; fi
+        local install_base=${GAMES_PATH[$i]##*/}
+        install_base=${install_base//[^[:alnum:]]/}
+        wanted=${wanted//[^[:alnum:]]/}
+        if [ "$query" = "${GAMES_PATH[$i]}" ] || [ "${query,,}" = "${GAMES_NAME[$i],,}" ] || [ "${wanted,,}" = "${GAMES_NAME[$i]//[^[:alnum:]]/}" ] || [ "${wanted,,}" = "${install_base,,}" ]; then
+            game="${GAMES_PATH[$i]}"; matches=$((matches+1))
+        fi
+    done
+    if [ "$matches" -ne 1 ]; then
+        printf '%s: expected one installed game, found %d for %s\n' "$PROGNAME" "$matches" "$query" >&2
+        return 2
+    fi
+    output=$("$(native_backend)" asset-audit-packs "$game") || return $?
+    if [ -z "$output" ]; then
+        printf 'No standalone Godot PCKs found in %s.\n' "$query"
+        return 0
+    fi
+    printf '%s\n' "$output" | while IFS='|' read -r tag status bytes version engine declared relative reason; do
+        [ "$tag" = ASSET_PACK_AUDIT ] || continue
+        printf '%s %-10s %s · PCK v%s / Godot %s' "$status" "$relative" "$(bytes_human "$bytes")" "$version" "$engine"
+        if [ "${declared:-0}" -gt 0 ]; then printf ' · %s directory entries' "$declared"; fi
+        printf ' · %s\n' "${reason:-}"
+    done
+    printf 'Read-only PCK structure audit only; it does not certify game loading.\n'
+}
+
+asset_fmod_audit_report() {
+    local query="$1" game="" matches=0 i output wanted
+    wanted=$(basename -- "$query")
+    wanted=${wanted//[^[:alnum:]]/}
+    for i in "${!GAMES_PATH[@]}"; do
+        if is_ignored "${GAMES_NAME[$i]}"; then continue; fi
+        local install_base=${GAMES_PATH[$i]##*/}
+        install_base=${install_base//[^[:alnum:]]/}
+        if [ "$query" = "${GAMES_PATH[$i]}" ] || [ "${query,,}" = "${GAMES_NAME[$i],,}" ] || [ "${wanted,,}" = "${GAMES_NAME[$i]//[^[:alnum:]]/}" ] || [ "${wanted,,}" = "${install_base,,}" ]; then
+            game="${GAMES_PATH[$i]}"; matches=$((matches+1))
+        fi
+    done
+    if [ "$matches" -ne 1 ]; then
+        printf '%s: expected one installed game, found %d for %s\n' "$PROGNAME" "$matches" "$query" >&2
+        return 2
+    fi
+    output=$("$(native_backend)" asset-audit-fmod "$game") || return $?
+    if [ -z "$output" ]; then
+        printf 'No standalone FMOD banks found in %s.\n' "$query"
+        return 0
+    fi
+    printf 'Read-only FMOD bank audit for %s:\n' "$query"
+    printf '%s\n' "$output" | while IFS='|' read -r tag status bytes relative reason; do
+        [ "$tag" = ASSET_FMOD_AUDIT ] || continue
+        printf '  %-6s %s · %s %s\n' "$status" "$relative" "$(bytes_human "$bytes")" "${reason:-}"
+    done
+    printf 'Structural audit is not a playback/compatibility guarantee.\n'
+}
+
+# Library-wide read-only inventory and candidate report modes. No game is
+# transformed by either mode.
+assets_all_report() {
+    local i output line
+    local total=${#GAMES_PATH[@]}
+    local completed=0 errors=0
+    printf 'Fast read-only asset format inventory for %d installed games. No decoders or transformations run.\n' "$total"
+    for i in "${!GAMES_PATH[@]}"; do
+        printf '[%d/%d] %s ... ' "$((i+1))" "$total" "${GAMES_NAME[$i]}"
+        if output=$("$(native_backend)" asset-inventory "${GAMES_PATH[$i]}" 2>&1); then
+            line=$(printf '%s\n' "$output" | awk '/^ASSET_INVENTORY\|/ { row=$0; count++ } END { if (count == 1) print row }')
+            if [[ "$line" =~ ^ASSET_INVENTORY\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
+                completed=$((completed+1))
+                printf '%s\n' "$line"
+            else
+                errors=$((errors+1)); printf 'ERROR: invalid inventory response\n'
+            fi
+        else
+            errors=$((errors+1)); printf 'ERROR: %s\n' "${output//$'\n'/ }"
+        fi
+    done
+    printf 'ASSET_INVENTORY_SUMMARY|%d|%d|%d\n' "$total" "$completed" "$errors"
+    [ "$errors" -eq 0 ]
+}
+
+assets_verify_all_report() {
+    local i output line count before after
+    local total=${#GAMES_PATH[@]}
+    local completed=0 candidates=0 errors=0
+    printf 'Balanced transform-candidate scan for %d installed games. Read-only; may decode assets and take a long time.\n' "$total"
+    for i in "${!GAMES_PATH[@]}"; do
+        printf '[%d/%d] %s ... ' "$((i+1))" "$total" "${GAMES_NAME[$i]}"
+        if output=$("$(native_backend)" asset-plan balanced "${GAMES_PATH[$i]}" 2>&1); then
+            line=$(printf '%s\n' "$output" | awk -F'|' '/^ASSETS\|/ { row=$0; rows++; valid=(NF==17 && $2=="plan" && $3=="Balanced (1080p)"); for(i=4;i<=NF;i++) if($i !~ /^[0-9]+$/) valid=0 } END { if(rows==1 && valid) print row }')
+            if [ -n "$line" ]; then
+                IFS='|' read -r _ _ _ count before after _ <<< "$line"
+                completed=$((completed+1))
+                # PCK planners may report a recognized pack with no net gain.
+                # Count actual logical reductions, not merely recognized files.
+                if [ "$count" -gt 0 ] && [ "$before" -gt "$after" ]; then candidates=$((candidates+1)); fi
+                printf '%s\n' "$line"
+            else
+                errors=$((errors+1)); printf 'ERROR: invalid candidate response\n'
+            fi
+        else
+            errors=$((errors+1)); printf 'ERROR: %s\n' "${output//$'\n'/ }"
+        fi
+    done
+    printf 'ASSET_SCAN_SUMMARY|%d|%d|%d|%d\n' "$total" "$completed" "$candidates" "$errors"
+    printf 'Candidates are logical estimates, not runtime compatibility approval or measured disk savings.\n'
+    [ "$errors" -eq 0 ]
 }
 
 # Batch asset pass. The caller obtains one consent for the whole batch; each
@@ -4440,6 +4691,18 @@ load_config
 detect_platform
 require_dependencies
 
+if [ "$OPT_COMPACT_ALL" -eq 1 ]; then
+    command -v python3 >/dev/null || { printf 'python3 is required for library compaction.\n' >&2; exit 1; }
+    runner="$(dirname "$(readlink -f "$0")")/tools/resume-library-compaction.py"
+    if [ ! -f "$runner" ]; then
+        runner="$(dirname "$(readlink -f "$0")")/bgc-library-compaction.py"
+    fi
+    [ -f "$runner" ] || { printf 'Library compaction runner is missing.\n' >&2; exit 1; }
+    exec python3 "$runner" --repo "$(dirname "$(readlink -f "$0")")" \
+        --state-dir "${XDG_STATE_HOME:-$HOME/.local/state}/btrfs-game-compressor/compact-balanced" \
+        --apply-assets-no-backup
+fi
+
 if [ "$OPT_FMOD_EXPORT" -eq 1 ]; then
     cmd_export_fmod
     exit $?
@@ -4527,6 +4790,42 @@ fi
 if [ "$OPT_ASSETS" -eq 1 ]; then
     discover_data
     asset_workflow "$ASSET_QUERY" "$ASSET_ACTION"
+    exit $?
+fi
+
+if [ "$OPT_ASSET_INVENTORY" -eq 1 ]; then
+    discover_data
+    asset_inventory_report "$ASSET_QUERY"
+    exit $?
+fi
+
+if [ "$OPT_ASSET_CONTAINERS" -eq 1 ]; then
+    discover_data
+    asset_container_report "$ASSET_QUERY"
+    exit $?
+fi
+
+if [ "$OPT_AUDIT_GAME_PACKS" -eq 1 ]; then
+    discover_data
+    asset_pack_audit_report "$ASSET_QUERY"
+    exit $?
+fi
+
+if [ "$OPT_AUDIT_GAME_FMOD" -eq 1 ]; then
+    discover_data
+    asset_fmod_audit_report "$ASSET_QUERY"
+    exit $?
+fi
+
+if [ "$OPT_ASSETS_ALL" -eq 1 ]; then
+    discover_data
+    assets_all_report
+    exit $?
+fi
+
+if [ "$OPT_ASSETS_VERIFY_ALL" -eq 1 ]; then
+    discover_data
+    assets_verify_all_report
     exit $?
 fi
 

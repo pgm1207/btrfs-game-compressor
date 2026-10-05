@@ -10,6 +10,7 @@ use image::{
     AnimationDecoder, DynamicImage, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Limits,
 };
 use std::{
+    collections::BTreeMap,
     fs::{self, File, FileTimes, OpenOptions},
     io::{self, BufReader, Cursor, Read, Seek, SeekFrom, Write},
     os::{
@@ -819,6 +820,198 @@ fn resample_wav(path: &Path, p: &Profile) -> io::Result<Option<Vec<u8>>> {
     }
     Ok(Some(out))
 }
+
+/// Inventory report mode: walk regular files and container paths without
+/// decoding images/audio or rebuilding packed candidates. Counts are inventory,
+/// never claimed savings. This keeps whole-library opportunity scans bounded.
+pub fn inventory(root: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(root)?.file_type().is_dir() {
+        return Err(bad("game path is not a real directory"));
+    }
+    let mut files = 0u64;
+    let mut logical_bytes = 0u64;
+    let mut raster_files = 0u64;
+    let mut packed_media = 0u64;
+    let mut packed_bytes = 0u64;
+    let mut audio_files = 0u64;
+    let mut audio_bytes = 0u64;
+    let dev = fs::metadata(root)?.dev();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        super::cancelled()?;
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.file_name().is_some_and(|name| name == BACKUP) { continue; }
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.dev() != dev { continue; }
+            if meta.file_type().is_dir() { dirs.push(path); continue; }
+            if !meta.file_type().is_file() { continue; }
+            files += 1;
+            logical_bytes = logical_bytes.saturating_add(meta.len());
+            match path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase).as_deref() {
+                Some("dds" | "ktx" | "ktx2" | "astc" | "pvr" | "crn" | "vtex" | "tex" | "texture"
+                    | "assets" | "bundle" | "unity3d" | "pak" | "pck" | "wad" | "resource"
+                    | "resources" | "pkg" | "xnb" | "bik" | "bk2" | "mp4" | "webm" | "ogv") => {
+                        packed_media += 1; packed_bytes = packed_bytes.saturating_add(meta.len());
+                    }
+                Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tga" | "qoi" | "pnm") => raster_files += 1,
+                Some("wav" | "flac" | "ogg" | "mp3" | "m4a" | "aac" | "opus" | "wem" | "bank" | "bnk" | "fsb") => {
+                    audio_files += 1; audio_bytes = audio_bytes.saturating_add(meta.len());
+                }
+                _ => {}
+            }
+        }
+    }
+    println!("ASSET_INVENTORY|{files}|{logical_bytes}|{raster_files}|{packed_media}|{packed_bytes}|{audio_files}|{audio_bytes}");
+    Ok(())
+}
+
+/// Lossless inventory of bounded, standalone containers with relevant writers.
+/// This identifies validation targets; it does not claim an item is transformable.
+pub fn container_inventory(root: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(root)?.file_type().is_dir() {
+        return Err(bad("game path is not a real directory"));
+    }
+    let dev = fs::metadata(root)?.dev();
+    let mut dirs = vec![root.to_path_buf()];
+    let mut rows: BTreeMap<String, (u64, u64, PathBuf)> = BTreeMap::new();
+    while let Some(dir) = dirs.pop() {
+        super::cancelled()?;
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.file_name().is_some_and(|name| name == BACKUP) { continue; }
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.dev() != dev { continue; }
+            if meta.file_type().is_dir() { dirs.push(path); continue; }
+            if !meta.file_type().is_file() { continue; }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            let class = match ext.as_str() {
+                "pck" => {
+                    let mut f = open_read(&path)?;
+                    let mut magic = [0u8; 4];
+                    if f.read_exact(&mut magic).is_err() || &magic != b"GDPC" { continue; }
+                    "godot-pck"
+                }
+                "bank" | "fsb" => "fmod-audio",
+                "pkg" => "hades-pkg",
+                _ => continue,
+            };
+            let rel = path.strip_prefix(root).map_err(|_| bad("container escaped game directory"))?.to_owned();
+            let row = rows.entry(class.to_owned()).or_insert((0, 0, rel));
+            row.0 += 1;
+            row.1 = row.1.saturating_add(meta.len());
+        }
+    }
+    for (class, (count, bytes, example)) in rows {
+        println!("ASSET_CONTAINER|{class}|{count}|{bytes}|{}", example.display());
+    }
+    Ok(())
+}
+
+pub fn audit_standalone_fmod(root: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(root)?.file_type().is_dir() {
+        return Err(bad("game path is not a real directory"));
+    }
+    let dev = fs::metadata(root)?.dev();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        super::cancelled()?;
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.file_name().is_some_and(|name| name == BACKUP) { continue; }
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.dev() != dev { continue; }
+            if meta.file_type().is_dir() { dirs.push(path); continue; }
+            if !meta.file_type().is_file() || !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bank") || e.eq_ignore_ascii_case("fsb")) { continue; }
+            let rel = path.strip_prefix(root).map_err(|_| bad("FMOD path escaped game directory"))?;
+            match super::fmod::audit(&path) {
+                Ok(()) => println!("ASSET_FMOD_AUDIT|OK|{}|{}", meta.len(), rel.display()),
+                Err(e) => println!("ASSET_FMOD_AUDIT|REJECT|{}|{}|{}", meta.len(), rel.display(), e.to_string().replace('|', "/")),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Print bounded format metadata for the standalone PCKs in one game tree.
+pub fn audit_packs(root: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(root)?.file_type().is_dir() {
+        return Err(bad("game path is not a real directory"));
+    }
+    let dev = fs::metadata(root)?.dev();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        super::cancelled()?;
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.file_name().is_some_and(|name| name == BACKUP) { continue; }
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.dev() != dev { continue; }
+            if meta.file_type().is_dir() { dirs.push(path); continue; }
+            if !meta.file_type().is_file() || !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pck")) { continue; }
+            let mut f = open_read(&path)?;
+            let mut magic = [0u8; 4];
+            if f.read_exact(&mut magic).is_err() || &magic != b"GDPC" { continue; }
+            let rel = path.strip_prefix(root).map_err(|_| bad("PCK escaped game directory"))?;
+            let before = meta.len();
+            let mut header = [0u8; 20];
+            f.seek(SeekFrom::Start(0))?;
+            f.read_exact(&mut header)?;
+            let version = u32::from_le_bytes(header[4..8].try_into().unwrap());
+            let major = u32::from_le_bytes(header[8..12].try_into().unwrap());
+            let minor = u32::from_le_bytes(header[12..16].try_into().unwrap());
+            let patch = u32::from_le_bytes(header[16..20].try_into().unwrap());
+            let directory_offset = pck_directory_offset(&mut f, version)?;
+            let declared = pck_directory_count(&mut f, before, directory_offset)?;
+            let audit = super::containers::godot_audit(&path);
+            match audit {
+                Ok(()) => println!("ASSET_PACK_AUDIT|OK|{before}|{version}|{major}.{minor}.{patch}|{declared}|{}", rel.display()),
+                Err(e) => println!("ASSET_PACK_AUDIT|REJECT|{before}|{version}|{major}.{minor}.{patch}|{declared}|{}|{}", rel.display(), e.to_string().replace('|', "/")),
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn trial_apply_packs(root: &Path) -> io::Result<()> {
+    run("apply", "balanced", 1, root)
+}
+
+fn pck_directory_offset<R: Read + Seek>(file: &mut R, version: u32) -> io::Result<u64> {
+    match version {
+        1 => Ok(84),
+        2 => Ok(96),
+        3 | 4 => {
+            file.seek(SeekFrom::Start(32))?;
+            let mut field = [0u8; 8];
+            file.read_exact(&mut field)?;
+            Ok(u64::from_le_bytes(field))
+        }
+        _ => Err(bad("unsupported Godot PCK version")),
+    }
+}
+
+fn pck_directory_count<R: Read + Seek>(file: &mut R, length: u64, offset: u64) -> io::Result<u64> {
+    if offset.checked_add(4).filter(|end| *end <= length).is_none() {
+        return Err(bad("Godot PCK directory offset outside file"));
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut count = [0u8; 4];
+    file.read_exact(&mut count)?;
+    Ok(u64::from(u32::from_le_bytes(count)))
+}
+
+
+/// Apply the already implemented Balanced Godot texture writer to a disposable
+/// tree via its normal pipeline. Callers must explicitly provide a copy.
+pub fn apply_packs(root: &Path, level: u8) -> io::Result<()> {
+    run("apply", "balanced", level, root)
+}
+
 fn prepare(path: &Path, p: &Profile) -> io::Result<Option<Vec<u8>>> {
     if crate::texture_policy::atlas_hint(path) { return Ok(None); }
     let meta = fs::symlink_metadata(path)?;
@@ -942,9 +1135,17 @@ struct Inventory {
     packed_bytes: u64,
     audio_bytes: u64,
 }
+
+fn is_unity_tree_container(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(e.to_ascii_lowercase().as_str(), "assets" | "bundle" | "unity3d" | "resource" | "resources" | "ress")
+    })
+}
+
 fn collect(
     root: &Path,
     p: &Profile,
+    prepare_candidates: bool,
     mut visit: impl FnMut(PathBuf, Vec<u8>, AssetKind) -> io::Result<()>,
 ) -> io::Result<Inventory> {
     let dev = fs::metadata(root)?.dev();
@@ -953,6 +1154,7 @@ fn collect(
     let mut visited = 0u64;
     let mut last_progress = Instant::now();
     let show_progress = std::env::var_os("BGC_ASSET_PROGRESS").is_some();
+    let mut progress_entries = 0u64;
     while let Some(dir) = dirs.pop() {
         super::cancelled()?;
         for entry in fs::read_dir(&dir)? {
@@ -963,9 +1165,11 @@ fn collect(
             }
             let m = fs::symlink_metadata(&path)?;
             visited += 1;
-            if show_progress && last_progress.elapsed() >= Duration::from_secs(2) {
+            progress_entries += 1;
+            if show_progress && progress_entries >= 8192 && last_progress.elapsed() >= Duration::from_secs(2) {
                 eprintln!("Asset scan: visited {visited} entries; {} known loose image files, {} packed/media containers, {} audio files identified.", inventory.raster_files, inventory.packed_media, inventory.audio_files);
                 last_progress = Instant::now();
+                progress_entries = 0;
             }
             if m.dev() != dev {
                 continue;
@@ -1008,6 +1212,7 @@ fn collect(
             if root.join(BACKUP).join(rel).exists() {
                 continue;
             }
+            if !prepare_candidates || is_unity_tree_container(&path) { continue; }
             if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fsb") || e.eq_ignore_ascii_case("bank")) {
                 // Unlike embedded .resource slices, standalone FMOD banks can
                 // be rebuilt without touching Unity/Unreal serialized offsets.
@@ -1343,6 +1548,24 @@ pub fn prune_apply(root: &Path, rels: &[PathBuf], debug: bool) -> io::Result<()>
 }
 
 pub fn run(action: &str, target: &str, level: u8, root: &Path) -> io::Result<()> {
+    run_internal(action, target, level, root, true)
+}
+
+pub fn plan_inventory(target: &str, root: &Path) -> io::Result<()> {
+    run_internal("plan", target, 0, root, false)
+}
+
+pub fn run_inventory(target: &str, root: &Path) -> io::Result<()> {
+    run_internal("plan", target, 0, root, false)
+}
+
+pub fn plan_candidates(target: &str, root: &Path) -> io::Result<()> {
+    run_internal("plan", target, 0, root, true)
+}
+
+fn run_internal(action: &str, target: &str, level: u8, root: &Path, prepare_candidates: bool) -> io::Result<()> {
+    let retain_backup = action != "apply-no-backup";
+    let action = if retain_backup { action } else { "apply" };
     if !matches!(action, "plan" | "apply" | "restore" | "finalize") {
         return Err(bad("asset action must be plan, apply, restore, or finalize"));
     }
@@ -1369,6 +1592,9 @@ pub fn run(action: &str, target: &str, level: u8, root: &Path) -> io::Result<()>
     if action == "apply" && !(1..=15).contains(&level) {
         return Err(bad("ZSTD level must be 1..15"));
     }
+    if !retain_backup {
+        eprintln!("Applying assets without persistent restore copies. Runtime compatibility is unverified; recover original assets with Steam verification.");
+    }
     let tree = if action == "apply" {
         Some(super::Tree::new(root)?)
     } else {
@@ -1384,7 +1610,7 @@ pub fn run(action: &str, target: &str, level: u8, root: &Path) -> io::Result<()>
     let mut package_count = 0u64;
     // Consume each encoded asset immediately instead of retaining an entire
     // game's decoded outputs in RAM. Preview uses the same bounded-memory path.
-    let inventory = collect(root, &p, |path, bytes, kind| {
+    let inventory = collect(root, &p, prepare_candidates && (action == "plan" || action == "apply"), |path, bytes, kind| {
         super::cancelled()?;
         let rel = path
             .strip_prefix(root)
@@ -1414,8 +1640,11 @@ pub fn run(action: &str, target: &str, level: u8, root: &Path) -> io::Result<()>
             ));
         }
         let parent = rel.parent().unwrap_or(Path::new(""));
-        ensure_backup_dirs(root, parent)?;
-        clone_file(&path, &backup)?;
+        let original_len = fs::metadata(&path)?.len();
+        if retain_backup {
+            ensure_backup_dirs(root, parent)?;
+            clone_file(&path, &backup)?;
+        }
         let tmp = append_suffix(&path, &format!(".bgc-tmp-{}", std::process::id()));
         let mut tmp_created = false;
         let mut check_created = false;
@@ -1440,16 +1669,20 @@ pub fn run(action: &str, target: &str, level: u8, root: &Path) -> io::Result<()>
                 .ok_or_else(|| bad("Btrfs tree was not opened"))?
                 .open(rel_tmp, true)?;
             super::compress_file(&writable, rel_tmp, level)?;
-            let check = sidecar(&backup);
-            let mut c = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .custom_flags(NOFOLLOW)
-                .open(&check)?;
-            check_created = true;
-            write!(c, "{:016x}\n", hash(&bytes))?;
-            c.sync_all()?;
-            File::open(check.parent().ok_or_else(|| bad("invalid checksum path"))?)?.sync_all()?;
+            // No-backup mode still uses a new, synced file and atomic rename.
+            // The original remains live until the replacement is fully written.
+            if retain_backup {
+                let check = sidecar(&backup);
+                let mut c = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .custom_flags(NOFOLLOW)
+                    .open(&check)?;
+                check_created = true;
+                write!(c, "{:016x}\n", hash(&bytes))?;
+                c.sync_all()?;
+                File::open(check.parent().ok_or_else(|| bad("invalid checksum path"))?)?.sync_all()?;
+            }
             fs::rename(&tmp, &path)?;
             installed = true;
             File::open(path.parent().ok_or_else(|| bad("invalid image path"))?)?.sync_all()?;
@@ -1463,7 +1696,7 @@ pub fn run(action: &str, target: &str, level: u8, root: &Path) -> io::Result<()>
                 if check_created {
                     let _ = fs::remove_file(sidecar(&backup));
                 }
-                let _ = fs::remove_file(&backup);
+                if retain_backup { let _ = fs::remove_file(&backup); }
             }
             return Err(e);
         }
@@ -1474,10 +1707,10 @@ pub fn run(action: &str, target: &str, level: u8, root: &Path) -> io::Result<()>
             AssetKind::Audio => audio_count += 1,
             AssetKind::Package => package_count += 1,
         }
-        let original_len = fs::metadata(&backup)?.len();
+        let original_len = if retain_backup { fs::metadata(&backup)?.len() } else { original_len };
         before += original_len;
         after += bytes.len() as u64;
-        retained += original_len;
+        if retain_backup { retained += original_len; }
         if std::env::var_os("BGC_VERBOSE").is_some() {
             let kind_name = match kind {
                 AssetKind::Image => "image",
@@ -1486,8 +1719,9 @@ pub fn run(action: &str, target: &str, level: u8, root: &Path) -> io::Result<()>
                 AssetKind::Package => "lossless Hades LZ4 package",
             };
             eprintln!(
-                "Asset optimized ({kind_name}): {} — {} → {} bytes, {} logical bytes smaller; original retained for restore.",
-                path.display(), original_len, bytes.len(), original_len.saturating_sub(bytes.len() as u64)
+                "Asset optimized ({kind_name}): {} — {} → {} bytes, {} logical bytes smaller; {}.",
+                path.display(), original_len, bytes.len(), original_len.saturating_sub(bytes.len() as u64),
+                if retain_backup { "original retained for restore" } else { "no restore copy retained; Steam verification is required for recovery" }
             );
         }
         Ok(())
@@ -1496,7 +1730,7 @@ pub fn run(action: &str, target: &str, level: u8, root: &Path) -> io::Result<()>
     // too large to buffer as a Vec<u8>, and the Godot transforms rewrite the
     // whole container rather than one stream, so they cannot ride the streaming
     // image/audio callback above.
-    if action == "apply" || action == "plan" {
+    if action == "apply" || (action == "plan" && prepare_candidates) {
         let packed = packed_asset_pass(root, target, &p, action, level)?;
         count += packed.count;
         before += packed.before;
@@ -1679,6 +1913,25 @@ fn remove_empty_backup_dirs(base: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pck_report_reads_versioned_directory_offsets_and_bounds_counts() {
+        for version in 1..=4 {
+            let mut bytes = vec![0u8; 256];
+            let offset = match version { 1 => 84, 2 => 96, _ => 192 };
+            // Flags and file-base are not the directory pointer.
+            bytes[20..32].fill(255);
+            bytes[32..40].copy_from_slice(&(192u64).to_le_bytes());
+            bytes[offset..offset + 4].copy_from_slice(&17u32.to_le_bytes());
+            let mut file = std::io::Cursor::new(bytes);
+            let actual = super::pck_directory_offset(&mut file, version).unwrap();
+            assert_eq!(actual, offset as u64);
+            assert_eq!(super::pck_directory_count(&mut file, 256, actual).unwrap(), 17);
+            assert!(super::pck_directory_count(&mut file, 256, 253).is_err());
+            assert!(super::pck_directory_count(&mut file, 256, u64::MAX).is_err());
+        }
+        assert!(super::pck_directory_offset(&mut std::io::Cursor::new(vec![0; 39]), 3).is_err());
+        assert!(super::pck_directory_offset(&mut std::io::Cursor::new(vec![]), 5).is_err());
+    }
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1687,6 +1940,27 @@ mod tests {
         let root = std::env::temp_dir().join(format!("bgc-{label}-{stamp}"));
         fs::create_dir_all(root.join(BACKUP)).unwrap();
         root
+    }
+
+    #[test]
+    fn balanced_profile_caps_supported_loose_assets_at_1920_pixels() {
+        let root = fixture("balanced-1080p-real-image");
+        let path = root.join("wallpaper.png");
+        let image = image::ImageBuffer::from_fn(3840, 2160, |x, y| {
+            image::Rgb([
+                ((x.wrapping_mul(13) ^ y.wrapping_mul(7)) & 0xf8) as u8,
+                ((x.wrapping_mul(3) + y.wrapping_mul(17)) & 0xf8) as u8,
+                ((x.wrapping_mul(19) ^ y.wrapping_mul(23)) & 0xf8) as u8,
+            ])
+        });
+        image.save(&path).unwrap();
+        let target = profile("balanced").unwrap().unwrap();
+        let encoded = prepare(&path, &target).unwrap().expect("large loose image should produce a smaller candidate");
+        let decoded = ImageReader::new(Cursor::new(encoded))
+            .with_guessed_format().unwrap().decode().unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1920, 1080));
+        assert!(fs::metadata(&path).unwrap().len() > 0);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1712,7 +1986,7 @@ mod tests {
             let mut found = Vec::new();
             if let Some(p) = profile(name).unwrap() {
                 let expected = crate::fmod::prepare(&bank, p.audio_target).unwrap();
-                collect(&root, &p, |path, bytes, kind| {
+                collect(&root, &p, true, |path, bytes, kind| {
                     assert!(matches!(kind, AssetKind::Audio));
                     found.push((path, bytes));
                     Ok(())
@@ -1726,7 +2000,7 @@ mod tests {
                     // prevents cumulative lossy transcoding on subsequent runs.
                     fs::write(root.join(BACKUP).join("sound.FSB"), &original).unwrap();
                     fs::write(&bank, bytes).unwrap();
-                    collect(&root, &p, |_, _, _| panic!("{name}: backed-up audio was transcoded again")).unwrap();
+                    collect(&root, &p, true, |_, _, _| panic!("{name}: backed-up audio was transcoded again")).unwrap();
                 } else {
                     assert!(found.is_empty(), "{name}");
                 }
@@ -1976,7 +2250,7 @@ mod tests {
         }
         fs::write(root.join(BACKUP).join("old.pkg"), vec![0u8; 1000]).unwrap();
         let p = profile("ultra-performance").unwrap().unwrap();
-        let inventory = collect(&root, &p, |_, _, _| {
+        let inventory = collect(&root, &p, true, |_, _, _| {
             panic!("packed Hades files must not be converted")
         }).unwrap();
         assert_eq!(inventory.packed_media, 3);
@@ -1985,6 +2259,13 @@ mod tests {
         assert_eq!(inventory.audio_bytes, 222);
         assert_eq!(inventory.raster_files, 0);
         assert_eq!(inventory.logical_bytes, 660);
+        let fast = collect(&root, &p, false, |_, _, _| panic!("inventory mode must not decode candidates")).unwrap();
+        assert_eq!(fast.logical_bytes, inventory.logical_bytes);
+        let profile = profile("balanced").unwrap().unwrap();
+        let candidate_scan = collect(&root, &profile, true, |_, _, _| Ok(())).unwrap();
+        assert_eq!(candidate_scan.logical_bytes, inventory.logical_bytes);
+        assert!(is_unity_tree_container(Path::new("sharedassets0.resource")));
+        assert!(!is_unity_tree_container(Path::new("cover.png")));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2027,7 +2308,7 @@ mod tests {
         }
         let p = profile("ultra-performance").unwrap().unwrap();
         let mut visits = 0;
-        collect(&root, &p, |candidate, bytes, kind| {
+        collect(&root, &p, true, |candidate, bytes, kind| {
             assert_eq!(candidate, path);
             assert!(!bytes.is_empty());
             assert!(matches!(kind, AssetKind::Image));
@@ -2035,7 +2316,7 @@ mod tests {
             Ok(())
         }).unwrap();
         assert_eq!(visits, 1);
-        let err = collect(&root, &p, |_, _, _| {
+        let err = collect(&root, &p, true, |_, _, _| {
             Err(io::Error::new(io::ErrorKind::Interrupted, "stop"))
         }).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Interrupted);

@@ -4,6 +4,7 @@ mod assets;
 mod packages;
 mod fmod;
 mod variants;
+mod xnb;
 mod engines;
 mod unityfs;
 mod unity_serialized;
@@ -854,6 +855,36 @@ fn run() -> io::Result<()> {
     if command == "container-audit" && args.len() == 2 {
         return containers::audit(Path::new(&args[1]));
     }
+    if command == "unity-texture-coverage" && args.len() == 2 {
+        let (supported, total) = unity_serialized::texture_coverage(Path::new(&args[1]))?;
+        println!("UNITY_TEXTURE_COVERAGE|{supported}|{total}");
+        return Ok(());
+    }
+    if command == "asset-inventory" && args.len() == 2 {
+        return assets::inventory(Path::new(&args[1]));
+    }
+    if command == "asset-plan-inventory" && args.len() == 3 {
+        return assets::run_inventory(args[1].to_str().unwrap_or("balanced"), Path::new(&args[2]));
+    }
+    if command == "asset-plan" && args.len() == 3 {
+        return assets::plan_candidates(args[1].to_str().unwrap_or("balanced"), Path::new(&args[2]));
+    }
+    if command == "asset-container-inventory" && args.len() == 2 {
+        return assets::container_inventory(Path::new(&args[1]));
+    }
+    if command == "asset-audit-packs" && args.len() == 2 {
+        return assets::audit_packs(Path::new(&args[1]));
+    }
+    if command == "asset-audit-fmod" && args.len() == 2 {
+        return assets::audit_standalone_fmod(Path::new(&args[1]));
+    }
+    if command == "asset-apply-packs" && args.len() == 3 {
+        let level = args[1].to_str().unwrap_or("").parse::<u8>().map_err(|_| invalid("expected Zstd level"))?;
+        return assets::apply_packs(Path::new(&args[2]), level);
+    }
+    if command == "asset-trial-apply-packs" && args.len() == 2 {
+        return assets::trial_apply_packs(Path::new(&args[1]));
+    }
     if command == "godot-dedup-audit" && args.len() == 2 {
         return containers::godot_dedup(Path::new(&args[1]), None, 5.0);
     }
@@ -927,7 +958,7 @@ fn run() -> io::Result<()> {
         ("compress",3)=>(Path::new(&args[2]),args[1].to_str().and_then(|s|s.parse::<u8>().ok()).ok_or_else(||invalid("invalid level"))?),
         ("measure"|"measure-bytes"|"usage"|"balance",2)=>(Path::new(&args[1]),0),
         ("dedupe",3)=>(Path::new(&args[1]),0),
-        _=>return Err(invalid("usage: bgc-native compress LEVEL DIR | measure DIR | measure-bytes DIR | measure-file FILE | usage DIR | dedupe DIR SCRATCH_DIR | balance DIR | assets ACTION TARGET LEVEL DIR | assets-restore-file DIR RELATIVE_PATH | assets-physical-rejections DIR | prune-plan DIR [--debug] [REL...] | prune-apply DIR [--debug] [REL...] | fmod-reencode PROFILE INPUT OUTPUT | fmod-audit INPUT | package-audit INPUT | engine-scan DIR | container-audit FILE | unityfs-audit FILE | unityfs-recompress MIN_PCT INPUT OUTPUT | godot-audit FILE | godot-dedup-audit FILE | godot-dedup-export MIN_PCT INPUT OUTPUT | godot-texture-audit PROFILE FILE | godot-texture-export PROFILE MIN_PCT INPUT OUTPUT | godot3-audit PROFILE FILE | godot3-optimize PROFILE MIN_PCT INPUT OUTPUT | unreal-audit FILE | --licenses")),
+        _=>return Err(invalid("usage: bgc-native compress LEVEL DIR | measure DIR | measure-bytes DIR | measure-file FILE | usage DIR | dedupe DIR SCRATCH_DIR | balance DIR | assets ACTION TARGET LEVEL DIR | asset-inventory DIR | asset-plan-inventory PROFILE DIR | asset-plan PROFILE DIR | asset-container-inventory DIR | asset-audit-packs DIR | asset-audit-fmod DIR | assets-restore-file DIR RELATIVE_PATH | assets-physical-rejections DIR | prune-plan DIR [--debug] [REL...] | prune-apply DIR [--debug] [REL...] | fmod-reencode PROFILE INPUT OUTPUT | fmod-audit INPUT | package-audit INPUT | engine-scan DIR | container-audit FILE | unity-texture-coverage FILE | unityfs-audit FILE | unityfs-recompress MIN_PCT INPUT OUTPUT | godot-audit FILE | godot-dedup-audit FILE | godot-dedup-export MIN_PCT INPUT OUTPUT | godot-texture-audit PROFILE FILE | godot-texture-export PROFILE MIN_PCT INPUT OUTPUT | godot3-audit PROFILE FILE | godot3-optimize PROFILE MIN_PCT INPUT OUTPUT | unreal-audit FILE | --licenses")),
     };
     let tree = Tree::new(root)?;
     match command {

@@ -1,0 +1,92 @@
+[
+  {
+    "game": "Dungeons & Degenerate Gamblers",
+    "pck": "DnDG_linux.pck",
+    "before": 621545696,
+    "after": 621545696,
+    "copy_matches_source": true,
+    "audit_before_after": "passed",
+    "second_pass_identical": true,
+    "installed_source_unchanged": true
+  },
+  {
+    "game": "Confidential Killings",
+    "pck": "Confidential Killings.pck",
+    "before": 371494880,
+    "after": 346158064,
+    "copy_matches_source": true,
+    "audit_before_after": "passed",
+    "second_pass_identical": true,
+    "installed_source_unchanged": true
+  },
+  {
+    "game": "Click the Button",
+    "pck": "Click the Button.pck",
+    "before": 54558932,
+    "after": 54538596,
+    "copy_matches_source": true,
+    "audit_before_after": "passed",
+    "second_pass_identical": true,
+    "installed_source_unchanged": true
+  },
+  {
+    "game": "FEED THE QUEEN",
+    "pck": "feedthequeen.pck",
+    "before": 101220764,
+    "after": 94797116,
+    "copy_matches_source": true,
+    "audit_before_after": "passed",
+    "second_pass_identical": true,
+    "installed_source_unchanged": true
+  },
+  {
+    "game": "Idols of Ash",
+    "pck": "idols_of_ash.pck",
+    "before": 82096444,
+    "after": 82096444,
+    "copy_matches_source": true,
+    "audit_before_after": "passed",
+    "second_pass_identical": true,
+    "installed_source_unchanged": true
+  },
+  {
+    "game": "Lost Wiki: Kozlovka",
+    "pck": "Lost Wiki Kozlovka.pck",
+    "before": 46412992,
+    "after": 46412992,
+    "copy_matches_source": true,
+    "audit_before_after": "passed",
+    "second_pass_identical": true,
+    "installed_source_unchanged": true
+  },
+  {
+    "game": "Project P.I.T.T.",
+    "pck": "projectpitt.pck",
+    "before": 96487884,
+    "after": 96108924,
+    "copy_matches_source": true,
+    "audit_before_after": "passed",
+    "second_pass_identical": true,
+    "installed_source_unchanged": true
+  },
+  {
+    "game": "Skeleseller",
+    "pck": "skeleseller.pck",
+    "before": 114618620,
+    "after": 114618620,
+    "copy_matches_source": true,
+    "audit_before_after": "passed",
+    "second_pass_identical": true,
+    "installed_source_unchanged": true
+  },
+  {
+    "game": "Brotato",
+    "pck": "Brotato.pck",
+    "before": 147912168,
+    "after": 99789023,
+    "copy_matches_source": true,
+    "audit_before_after": "passed",
+    "second_pass_identical": true,
+    "installed_source_unchanged": true
+  }
+]

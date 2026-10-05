@@ -207,9 +207,133 @@ check_rc "--json without --status is rejected" 2 $rc
 out=$(run --help); rc=$?
 check_contains "--help documents --history" "--history" "$out"
 check_contains "--help documents --stats" "--stats" "$out"
+check_contains "--help documents savings by category" "savings by category" "$out"
+check_contains "--help documents fast asset inventory" "--asset-inventory" "$out"
+check_contains "--help documents supported container inventory" "--asset-containers" "$out"
+check_contains "--help documents game PCK audits" "--audit-game-packs" "$out"
+check_contains "--help documents standalone FMOD audits" "--audit-game-fmod" "$out"
+check_contains "--help documents library-wide asset candidate scan" "--assets-all" "$out"
+check_contains "--help distinguishes decoder-backed library scan" "--assets-verify-all" "$out"
 check_contains "--help documents deduplication" "--dedupe" "$out"
 check_contains "--help documents --benchmark" "--benchmark" "$out"
 
+functions_source=$(awk '/^asset_container_report\(\) \{$/{copy=1} /^asset_pack_audit_report\(\) \{$/{copy=1} /^asset_fmod_audit_report\(\) \{$/{copy=1} /^assets_all_report\(\) \{$/{copy=1} /^assets_verify_all_report\(\) \{$/{copy=1} copy{print} copy && /^}$/{copy=0}' "$PROG")
+eval "$functions_source"
+bytes_human() { printf '%sB' "$1"; }
+is_ignored() { return 1; }
+native_backend() { printf '%s\n' "$WORK/asset-container-inventory-shim"; }
+GAMES_PATH=("$WORK/Brotato")
+GAMES_NAME=(Brotato)
+
+cat > "$WORK/asset-container-inventory-shim" <<'SHIM'
+#!/bin/sh
+printf 'ASSET_CONTAINER|godot-pck|2|1200|game.pck\n'
+SHIM
+chmod +x "$WORK/asset-container-inventory-shim"
+out=$(
+    asset_container_report Brotato
+)
+check_contains "container inventory does not claim eligibility" "does not establish transform eligibility" "$out"
+check_contains "container inventory reports standalone PCK" "godot-pck" "$out"
+
+cat > "$WORK/asset-inventory-shim" <<'SHIM'
+#!/bin/sh
+printf 'ASSET_INVENTORY|4|4096|1|1|2048|1|1024\n'
+SHIM
+chmod +x "$WORK/asset-inventory-shim"
+native_backend() { printf '%s\n' "$WORK/asset-inventory-shim"; }
+out=$(assets_all_report)
+check_contains "library inventory mode is explicitly fast and read-only" "No decoders or transformations run" "$out"
+check_contains "library inventory summarizes every configured game" "ASSET_INVENTORY_SUMMARY|1|1|0" "$out"
+
+cat > "$WORK/asset-plan-shim" <<'SHIM'
+#!/bin/sh
+printf 'ASSETS|plan|Balanced (1080p)|2|200|100|0|1|1|0|0|1|0|4096|2048|1024|0\n'
+SHIM
+chmod +x "$WORK/asset-plan-shim"
+native_backend() { printf '%s\n' "$WORK/asset-plan-shim"; }
+out=$(assets_verify_all_report)
+check_contains "all-game planner invokes bounded read-only planning" "ASSET_SCAN_SUMMARY|1|1|1|0" "$out"
+check_contains "library candidates never certify runtime compatibility" "not runtime compatibility approval" "$out"
+cat > "$WORK/asset-plan-shim" <<'SHIM'
+#!/bin/sh
+printf 'ASSETS|plan|Balanced (1080p)|1|200|200|0|1|0|0|0|0|0|4096|2048|0|0\n'
+SHIM
+out=$(assets_verify_all_report); rc=$?
+check_rc "no-gain packed scan still completes" 0 "$rc"
+check_contains "recognized no-gain pack is not a reduction candidate" "ASSET_SCAN_SUMMARY|1|1|0|0" "$out"
+cat > "$WORK/asset-plan-shim" <<'SHIM'
+#!/bin/sh
+printf 'ASSETS|plan|Balanced (1080p)|invalid\n'
+SHIM
+out=$(assets_verify_all_report); rc=$?
+check_rc "malformed library plan fails closed" 1 "$rc"
+check_contains "malformed library plan is recorded as an error" "ASSET_SCAN_SUMMARY|1|0|0|1" "$out"
+cat > "$WORK/asset-plan-shim" <<'SHIM'
+#!/bin/sh
+echo 'decoder failed' >&2
+exit 1
+SHIM
+out=$(assets_verify_all_report); rc=$?
+check_rc "failed library decoder returns failure" 1 "$rc"
+check_contains "failed library decoder retains its diagnostic" "decoder failed" "$out"
+native_backend() { printf '%s\n' "$WORK/asset-inventory-shim"; }
+cat > "$WORK/asset-inventory-shim" <<'SHIM'
+#!/bin/sh
+echo 'unrelated diagnostic'
+SHIM
+out=$(assets_all_report); rc=$?
+check_rc "inventory does not accept arbitrary backend output" 1 "$rc"
+check_contains "invalid inventory is not counted as complete" "ASSET_INVENTORY_SUMMARY|1|0|1" "$out"
+cat > "$WORK/asset-inventory-shim" <<'SHIM'
+#!/bin/sh
+printf 'ASSET_INVENTORY|4|4096|1|1|2048|1|1024\n'
+printf 'ASSET_INVENTORY|4|4096|1|1|2048|1|1024\n'
+SHIM
+out=$(assets_all_report); rc=$?
+check_rc "ambiguous duplicate inventory rows are rejected" 1 "$rc"
+cat > "$WORK/asset-plan-shim" <<'SHIM'
+#!/bin/sh
+case "$3" in
+    */Bad) echo 'decoder failed' >&2; exit 1 ;;
+esac
+printf 'ASSETS|plan|Balanced (1080p)|2|200|100|0|1|1|0|0|1|0|4096|2048|1024|0\n'
+SHIM
+out=$(
+    GAMES_PATH=("$WORK/Bad" "$WORK/Good")
+    GAMES_NAME=(Bad Good)
+    native_backend() { printf '%s\n' "$WORK/asset-plan-shim"; }
+    assets_verify_all_report
+); rc=$?
+check_rc "partial library plan cannot report overall success" 1 "$rc"
+check_contains "library scan continues past a failed game" "ASSET_SCAN_SUMMARY|2|1|1|1" "$out"
+
+cat > "$WORK/asset-pack-audit-shim" <<'SHIM'
+#!/bin/sh
+printf 'ASSET_PACK_AUDIT|OK|4096|3|4.6.1|17|main.pck\n'
+SHIM
+chmod +x "$WORK/asset-pack-audit-shim"
+out=$(
+    GAMES_PATH=("$WORK/IdolsOfAsh")
+    GAMES_NAME=("Idols of Ash")
+    native_backend() { printf '%s\n' "$WORK/asset-pack-audit-shim"; }
+    asset_pack_audit_report 'Idols of Ash'
+)
+check_contains "PCK audit reports version and engine metadata" "PCK v3 / Godot 4.6.1" "$out"
+check_contains "PCK audit reports bounded directory entry count" "17 directory entries" "$out"
+
+cat > "$WORK/asset-fmod-audit-shim" <<'SHIM'
+#!/bin/sh
+printf 'ASSET_FMOD_AUDIT|OK|8192|Music.bank\n'
+SHIM
+chmod +x "$WORK/asset-fmod-audit-shim"
+out=$(
+    GAMES_PATH=("$WORK/Example")
+    GAMES_NAME=(Example)
+    native_backend() { printf '%s\n' "$WORK/asset-fmod-audit-shim"; }
+    asset_fmod_audit_report Example
+)
+check_contains "FMOD audit reports accepted banks without playback claims" "not a playback/compatibility guarantee" "$out"
 # --history and --stats read the state database. With an empty database they
 # must still exit cleanly rather than erroring on a missing file.
 out=$(run --history --no-color); rc=$?
@@ -219,6 +343,8 @@ check_contains "--history explains it has nothing yet" "No compression history" 
 out=$(run --stats --no-color); rc=$?
 check_rc "--stats exits 0 with no history" 0 $rc
 check_contains "--stats explains it has nothing yet" "No compressed games recorded" "$out"
+check_contains "--stats distinguishes untracked asset savings" "Asset optimization" "$out"
+check_contains "--stats distinguishes untracked language savings" "Language removal" "$out"
 
 out=$(run --benchmark --no-color); rc=$?
 check_rc "--benchmark exits 0 with no data" 0 $rc
@@ -830,6 +956,11 @@ stats_out=$("$PROG" --stats --no-color 2>/dev/null)
 check_contains "--stats counts the games" "Games compressed:" "$stats_out"
 # 50 MiB raw -> 25 MiB saved from GoodGame, plus 1 MiB from BadGame = 26 MiB.
 check_contains "--stats sums the space saved" "26" "$stats_out"
+check_contains "--stats displays a category breakdown" "SAVINGS BY CATEGORY" "$stats_out"
+check_contains "--stats reports ZSTD size and percentage" "ZSTD compression" "$stats_out"
+check_contains "--stats prints numeric ZSTD reduction percentage" "26.0%" "$stats_out"
+check_contains "--stats states that categories overlap" "do not add rows into a grand total" "$stats_out"
+check_contains "--stats renders unmeasured dedupe without inventing a percent" 'Deduplication             not measured        n/a' "$stats_out"
 check_not_contains "--history is read-only and writes no ANSI when asked" $'\033' "$hist_out"
 
 # --benchmark reports the same records, sorted best-first, and its summary must
@@ -1772,8 +1903,10 @@ check_rc "--history reads dedupe history without scanning libraries" 0 "$rc"
 check_contains "--history lists dedupe measurement separately" "DEDUPLICATION HISTORY" "$hist_out"
 check_contains "--history displays the dedupe delta" "200B" "$hist_out"
 stats_out=$(HOME="$DEDUP_HOME" "$PROG" --stats --no-color 2>&1)
-check_contains "--stats reports latest dedupe estimate separately" "Latest measured savings" "$stats_out"
-check_contains "--stats does not label dedupe as ZSTD savings" "200B" "$stats_out"
+check_contains "--stats includes dedupe as its own category" "Deduplication" "$stats_out"
+check_contains "--stats shows measured dedupe bytes" "200B" "$stats_out"
+check_contains "--stats qualifies the dedupe scope" "latest physical extent delta per directory" "$stats_out"
+check_contains "--stats sorts by percent when dedupe exceeds compression" 'Deduplication                     200B      33.3%' "$stats_out"
 
 out=$(HOME="$DEDUP_HOME" PATH="$DEDUP_BIN:$PATH" BTRFS_FAKE_COUNT="$DEDUP_COUNT" \
     DEDUPE_RUN_LOG="$DEDUP_LOG" DEDUPE_NO_MEASURE=1 "$PROG" --dedupe --no-color 2>&1)
@@ -1897,6 +2030,20 @@ check_rc "interrupted compression stops before dedupe or next game" 1 "$(wc -l <
 # ---------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
 group "Asset preview explains unsupported Hades containers"
+cat > "$WORK/asset-inventory-shim" <<'SHIM'
+#!/bin/sh
+printf 'ASSET_INVENTORY|12|1000|3|2|700|1|100\n'
+SHIM
+chmod +x "$WORK/asset-inventory-shim"
+out=$(
+    GAMES_PATH=("$WORK/Hades")
+    GAMES_NAME=(Hades)
+    native_backend() { printf '%s\n' "$WORK/asset-inventory-shim"; }
+    asset_inventory_report Hades
+)
+check_contains "asset inventory clearly disclaims savings" "not a savings estimate" "$out"
+check_contains "asset inventory reports packed files" "Packed/media-looking files: 2" "$out"
+
 cat > "$WORK/asset-preview-shim" <<'SHIM'
 #!/bin/sh
 printf 'GODOT_TEXTURE|100|100|1|0|1|0|0.0000|NO_GAIN\n'

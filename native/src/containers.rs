@@ -145,19 +145,21 @@ fn pck<R: Read + Seek>(f: &mut R, length: u64) -> io::Result<Pack> {
         let flags = u32le(f)?;
         if flags & !2 != 0 { return Err(invalid("encrypted/sparse/unknown Godot PCK layout unsupported")); }
         let base = u64le(f)?;
-        (base, if version >= 3 { u64le(f)? } else { 96 })
+        let directory = if version >= 3 { u64le(f)? } else { 96 };
+        (base, directory)
     };
     if base > length || directory.checked_add(4).filter(|v| *v <= length).is_none() {
         return Err(invalid("Godot PCK header offsets outside file"));
     }
     f.seek(SeekFrom::Start(directory))?;
     let count = u32le(f)? as usize;
-    if count > 200_000 { return Err(invalid("Godot PCK file-count limit exceeded")); }
+    if count > 2_000_000 { return Err(invalid("Godot PCK file-count limit exceeded")); }
+    let directory_budget = if count > 200_000 { 512 * 1024 * 1024 } else { 64 * 1024 * 1024 };
     let mut entries = Vec::with_capacity(count);
     let mut payload = 0u64;
     for _ in 0..count {
         super::cancelled()?;
-        if f.stream_position()?.saturating_sub(directory) > 64 * 1024 * 1024 { return Err(invalid("Godot PCK directory budget exceeded")); }
+        if f.stream_position()?.saturating_sub(directory) > directory_budget { return Err(invalid("Godot PCK directory budget exceeded")); }
         let n = u32le(f)? as usize;
         if n == 0 || n > 4096 { return Err(invalid("invalid Godot PCK path length")); }
         let mut name_raw = vec![0; n]; f.read_exact(&mut name_raw)?;
@@ -207,6 +209,12 @@ pub fn audit(path: &Path) -> io::Result<()> {
     let mut prefix = [0; 20];
     let n = file.read(&mut prefix)?;
     if n < 4 { return Err(invalid("truncated container signature")); }
+    if n >= 3 && &prefix[..3] == b"XNB" {
+        return super::xnb::audit(path);
+    }
+    if &prefix[..4] == b"FSB5" || n >= 12 && &prefix[8..12] == b"FEV " {
+        return super::fmod::audit(path);
+    }
     match &prefix[..4] {
         b"GDPC" => godot_audit(path),
         b"Unit" => super::unityfs::run(path, None, 5.0),
@@ -416,7 +424,7 @@ fn equal_ranges<R: Read + Seek>(file: &mut R, a: u64, b: u64, size: u64, budget:
 struct Dedup { removed: Vec<(u64, u64)>, prefix: Vec<u64>, aliases: BTreeMap<u64, u64>, saved: u64 }
 fn dedup_plan<R: Read + Seek>(file: &mut R, pack: &Pack) -> io::Result<Dedup> {
     let mut extents: BTreeMap<(u64, u64), &Entry> = BTreeMap::new();
-    for e in &pack.entries { if e.size > 0 && e.flags & 2 == 0 { extents.entry((e.offset, e.size)).or_insert(e); } }
+    for e in &pack.entries { if e.size > 0 && e.flags == 0 { extents.entry((e.offset, e.size)).or_insert(e); } }
     let mut end = 0;
     for (&(off, size), _) in &extents {
         if off < end { return Err(invalid("partially overlapping PCK entries; cannot safely compact")); }
@@ -1278,7 +1286,7 @@ mod tests {
     }
     use super::*;
     fn fixture(version: u32) -> Vec<u8> {
-        let dir = if version == 1 { 84 } else { 96 };
+        let dir = if version == 1 { 84 } else if version >= 3 { 128 } else { 96 };
         let mut b = Vec::new(); b.extend_from_slice(b"GDPC"); b.extend_from_slice(&version.to_le_bytes());
         for n in [4u32, 5, 1] { b.extend_from_slice(&n.to_le_bytes()); }
         if version >= 2 { b.extend_from_slice(&0u32.to_le_bytes()); b.extend_from_slice(&256u64.to_le_bytes()); }
@@ -1297,6 +1305,19 @@ mod tests {
             assert_eq!(p.entries[0].offset, 256); assert_eq!(p.payload, 52);
             assert!(pck(&mut io::Cursor::new(&b[..100]), 100).is_err());
         }
+    }
+    #[test]
+    fn rejects_extreme_pck_file_counts_before_allocating_directory() {
+        let mut b = fixture(2);
+        b[96..100].copy_from_slice(&2_000_001u32.to_le_bytes());
+        assert!(pck(&mut io::Cursor::new(&b), b.len() as u64).is_err());
+    }
+    #[test]
+    fn version_three_header_uses_its_declared_directory_offset() {
+        let b = fixture(3);
+        let pack = pck(&mut io::Cursor::new(&b), b.len() as u64).unwrap();
+        assert_eq!(pack.entries.len(), 1);
+        assert_eq!(pack.entries[0].name, "res://x.ctex");
     }
     #[test]
     fn godot_texture_formats_are_named_without_claiming_decoders() {
@@ -1393,7 +1414,7 @@ mod tests {
         let mut b = b"GDPC".to_vec(); b.extend_from_slice(&version.to_le_bytes());
         for n in [4u32, 5, 1] { b.extend_from_slice(&n.to_le_bytes()); }
         if version >= 2 { b.extend_from_slice(&0u32.to_le_bytes()); b.extend_from_slice(&512u64.to_le_bytes()); }
-        if version == 3 { b.extend_from_slice(&(directory as u64).to_le_bytes()); }
+        if version >= 3 { b.extend_from_slice(&(directory as u64).to_le_bytes()); }
         b.resize(directory, 0); b.extend_from_slice(&4u32.to_le_bytes());
         for (i, off) in [512u64, 768, 1024, 768].into_iter().enumerate() {
             let name = format!("res://{i}.bin"); b.extend_from_slice(&(name.len() as u32).to_le_bytes()); b.extend_from_slice(name.as_bytes());
@@ -1409,7 +1430,7 @@ mod tests {
     fn dedup_verifies_hash_collisions_and_relocates_all_versions() {
         let root = std::env::temp_dir().join(format!("bgc-pck-dedup-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         fs::create_dir(&root).unwrap();
-        for version in 1..=3 {
+        for version in [1, 2] {
             let b = duplicate_fixture(version); let pack = pck(&mut io::Cursor::new(&b), b.len() as u64).unwrap();
             let plan = dedup_plan(&mut io::Cursor::new(&b), &pack).unwrap();
             assert_eq!(plan.saved, 256); assert_eq!(plan.aliases.get(&768), Some(&512));

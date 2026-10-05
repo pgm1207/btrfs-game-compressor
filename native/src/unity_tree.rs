@@ -143,6 +143,37 @@ pub struct Texture {
     pub width: u32, pub height: u32, pub format: u32, pub mips: u32,
     pub inline_bytes: usize, pub stream_offset: u64, pub stream_size: u64, pub stream_path: String,
 }
+
+/// Names only stable Unity TextureFormat enum values; unknown values remain
+/// explicitly unknown rather than being inferred from payload shape.
+pub fn format_name(format: u32) -> &'static str {
+    match format {
+        1 => "Alpha8", 2 => "ARGB4444", 3 => "RGB24", 4 => "RGBA32",
+        5 => "ARGB32", 6 => "ARGBFloat", 7 => "RGB565", 8 => "BGR24",
+        9 => "R16", 10 => "DXT1", 11 => "DXT3", 12 => "DXT5",
+        13 => "RGBA4444", 14 => "BGRA32", 15 => "RHalf", 16 => "RGHalf",
+        17 => "RGBAHalf", 18 => "RFloat", 19 => "RGFloat", 20 => "RGBAFloat",
+        21 => "YUY2", 22 => "RGB9e5Float", 23 => "RGBFloat", 24 => "BC6H",
+        25 => "BC7", 26 => "BC4", 27 => "BC5", 28 => "DXT1Crunched",
+        29 => "DXT5Crunched", 30 => "PVRTC_RGB2", 31 => "PVRTC_RGBA2",
+        32 => "PVRTC_RGB4", 33 => "PVRTC_RGBA4", 34 => "ETC_RGB4",
+        35 => "ATC_RGB4", 36 => "ATC_RGBA8", 41 => "EAC_R",
+        42 => "EAC_R_SIGNED", 43 => "EAC_RG", 44 => "EAC_RG_SIGNED",
+        45 => "ETC2_RGB", 46 => "ETC2_RGBA1", 47 => "ETC2_RGBA8",
+        48 => "ASTC_RGB_4x4", 49 => "ASTC_RGB_5x5", 50 => "ASTC_RGB_6x6",
+        51 => "ASTC_RGB_8x8", 52 => "ASTC_RGB_10x10", 53 => "ASTC_RGB_12x12",
+        54 => "ASTC_RGBA_4x4", 55 => "ASTC_RGBA_5x5", 56 => "ASTC_RGBA_6x6",
+        57 => "ASTC_RGBA_8x8", 58 => "ASTC_RGBA_10x10", 59 => "ASTC_RGBA_12x12",
+        60 => "ETC_RGB4_3DS", 61 => "ETC_RGBA8_3DS", 62 => "RG16", 63 => "R8",
+        64 => "ETC_RGB4Crunched", 65 => "ETC2_RGBA8Crunched", 66 => "ASTC_HDR_4x4",
+        67 => "ASTC_HDR_5x5", 68 => "ASTC_HDR_6x6", 69 => "ASTC_HDR_8x8",
+        70 => "ASTC_HDR_10x10", 71 => "ASTC_HDR_12x12", 72 => "RG32",
+        73 => "RGB48", 74 => "RGBA64", 75 => "R8_SIGNED", 76 => "RG16_SIGNED",
+        77 => "RGB24_SIGNED", 78 => "RGBA32_SIGNED", 79 => "R16_SIGNED",
+        80 => "RG32_SIGNED", 81 => "RGB48_SIGNED", 82 => "RGBA64_SIGNED",
+        _ => "Unknown",
+    }
+}
 pub fn inspect_texture(nodes: &[Node], bytes: &[u8], big: bool) -> io::Result<Texture> {
     if nodes.is_empty() || nodes[0].kind != "Texture2D" { return Err(bad("missing Texture2D tree")); }
     for field in ["m_Width", "m_Height", "m_TextureFormat", "m_MipCount"] {
@@ -239,6 +270,13 @@ pub(crate) mod tests {
         tree[1].kind = "future_type".to_owned(); assert!(inspect_texture(&tree, &bytes, false).is_err());
         assert_eq!(string_at(&[], 0x80000000 | 874).unwrap(), "Texture2D");
         assert!(string_at(&[], 0x80000000 | 123456).is_err());
+    }
+    #[test]
+    fn texture_format_names_are_bounded_and_unknown_values_stay_unknown() {
+        assert_eq!(format_name(10), "DXT1");
+        assert_eq!(format_name(25), "BC7");
+        assert_eq!(format_name(54), "ASTC_RGBA_4x4");
+        assert_eq!(format_name(u32::MAX), "Unknown");
     }
     #[test]
     fn byte_array_image_data_is_skipped_without_allocating_an_element_per_pixel() {

@@ -38,6 +38,7 @@ fn class_of(name: &str) -> Option<&'static str> {
         "assets" => "unity-assets",
         "ress" => "unity-stream",
         "resource" => "unity-resource",
+        "xnb" => "xnb",
         "vtc2" => "amplify-vtc2",
         "bank" | "fsb" => "fmod-audio",
         "wem" | "bnk" => "wwise-audio",
@@ -84,6 +85,12 @@ fn survey(dir: &Path, dev: u64, rel: &str, out: &mut Survey, budget: &mut u64) -
                     if source.read_exact(&mut magic).is_ok() {
                         class = match &magic { b"GDPC" => { out.godot = true; "godot-pck" }, b"AKPK" => "wwise-pck", _ => "unknown-pck" };
                     } else { class = "unknown-pck"; }
+                } else if class == "xnb" {
+                    let mut header = [0; 10];
+                    let mut source = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(entry.path())?;
+                    if source.read_exact(&mut header).is_err() || !super::xnb::plausible(&header, meta.len()) {
+                        continue;
+                    }
                 } else if class == "unknown-hash-file" || class == "unity-resource" || class == "unity-bundle" {
                     let mut magic = [0; 8];
                     let mut source = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(entry.path())?;
@@ -245,6 +252,7 @@ mod tests {
         assert_eq!(class_of("Game.bnk"), Some("wwise-audio"));
         assert_eq!(class_of("Game.fsb"), Some("fmod-audio"));
         assert_eq!(class_of("Game.awb"), Some("cri-audio"));
+        assert_eq!(class_of("page000.xnb"), Some("xnb"));
         assert_eq!(class_of("voice.wem"), Some("wwise-audio"));
         assert_eq!(class_of("notes.txt"), None);
     }
@@ -261,6 +269,22 @@ mod tests {
         survey(&root, meta.dev(), "", &mut out, &mut budget).unwrap();
         assert!(detect(&out).iter().any(|(name, _)| *name == "unity"));
         assert!(out.containers.contains_key("unity-bundle")); assert!(out.containers.contains_key("fmod-audio"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn xnb_content_is_inventoried_without_guessing_an_engine() {
+        let root = fixture("xnb");
+        let mut valid = b"XNBd\x05\0".to_vec();
+        valid.extend(10u32.to_le_bytes());
+        fs::write(root.join("page000.xnb"), &valid).unwrap();
+        fs::write(root.join("fake.xnb"), b"not an xnb").unwrap();
+        let meta = fs::metadata(&root).unwrap();
+        let mut out = Survey::default();
+        let mut budget = MAX_FILES;
+        survey(&root, meta.dev(), "", &mut out, &mut budget).unwrap();
+        assert_eq!(out.containers["xnb"].0, 1);
+        assert!(detect(&out).iter().all(|(engine, _)| *engine != "xna"));
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -212,13 +212,45 @@ pub fn audit(path: &Path) -> io::Result<()> {
         println!("UNITY_CLASS|{class}|{kind}|{count}|{bytes}");
     }
     for (id, t) in &details {
-        println!("UNITY_TEXTURE|{id}|{}|{}|{}|{}|{}|{}|{}|{}", t.width, t.height, t.format,
+        println!("UNITY_TEXTURE|{id}|{}|{}|{}|{}|{}|{}|{}|{}|{}", t.width, t.height, t.format,
+            crate::unity_tree::format_name(t.format),
             t.mips, t.inline_bytes, t.stream_offset, t.stream_size, t.stream_path);
     }
     let total = v.classes.get(&28).map_or(0, |(count, _)| *count);
     println!("UNITY_TEXTURE_AUDIT|{}|{}", details.len(), total - details.len() as u64);
     eprintln!("Read-only Unity: bounded type-tree Texture2D fields are reported when supported; absent/unknown trees leave payloads opaque. External stream paths are metadata, not resolved files or verified extents. No texture/audio writer is implemented.");
     Ok(())
+}
+
+/// Return the number of readable type-tree Texture2D objects without decoding
+/// or following streamed content. Used only by the dry-run coverage inventory.
+pub fn texture_coverage(path: &Path) -> io::Result<(u64, u64)> {
+    let mut file = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() { return Err(bad("Unity coverage requires a regular file")); }
+    let mut prefix = [0u8; 48];
+    let n = file.read(&mut prefix)?;
+    let h = header(&prefix[..n], meta.len())?;
+    let mut bytes = vec![0; h.metadata as usize];
+    file.seek(SeekFrom::Start(h.start))?;
+    file.read_exact(&mut bytes)?;
+    let inventory = inventory(&bytes, &h)?;
+    let total = inventory.classes.get(&28).map_or(0, |(count, _)| *count);
+    let mut readable = 0u64;
+    let mut budget = 64u64 * 1024 * 1024;
+    for object in &inventory.texture_objects {
+        super::cancelled()?;
+        let Some(tree) = &object.tree else { continue; };
+        if object.size > 8 * 1024 * 1024 || object.size > budget { continue; }
+        budget -= object.size;
+        let mut object_bytes = vec![0; object.size as usize];
+        file.seek(SeekFrom::Start(object.start))?;
+        file.read_exact(&mut object_bytes)?;
+        if crate::unity_tree::inspect_texture(tree, &object_bytes, h.big).is_ok() {
+            readable += 1;
+        }
+    }
+    Ok((readable, total))
 }
 
 #[cfg(test)]
