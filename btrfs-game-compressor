@@ -130,6 +130,8 @@ OPT_FMOD_EXPORT=0
 FMOD_QUALITY="" FMOD_SOURCE="" FMOD_OUTPUT=""
 OPT_TEXTURE_COMPRESS=0
 TEXTURE_MAX_DIM="" TEXTURE_SOURCE="" TEXTURE_OUTPUT=""
+OPT_TEXTURE_COMPRESS_TREE=0
+TEXTURE_TREE_DIM="" TEXTURE_TREE_INPUT="" TEXTURE_TREE_OUTPUT=""
 OPT_CONTAINER=0
 CONTAINER_ACTION="" CONTAINER_SOURCE="" CONTAINER_OUTPUT="" CONTAINER_PROFILE=""
 ASSET_QUERY=""
@@ -263,6 +265,10 @@ OPTIONS
                           experimental DDS downscale export (2D BC1/2/3/4/5/7 and
                           BGRA/RGBA); preserves the codec and rebuilds mips;
                           writes a new file only; never replaces game assets
+        --texture-compress-tree MAX_DIM DIR OUTPUT_DIR
+                          experimental export-only pass: mirror every DDS under
+                          DIR into OUTPUT_DIR, downscaling each; DIR is never
+                          modified
     -l, --library DIR     add DIR as a game library, then exit
                            (accepts the library root or its steamapps/common)
         --pending         with --status/--dry-run, only show pending games
@@ -364,6 +370,12 @@ parse_args() {
                     echo "$PROGNAME: --texture-compress requires MAX_DIM FILE OUTPUT" >&2; exit 2;
                 }
                 OPT_TEXTURE_COMPRESS=1; TEXTURE_MAX_DIM="$2"; TEXTURE_SOURCE="$3"; TEXTURE_OUTPUT="$4"
+                shift 3 ;;
+            --texture-compress-tree)
+                [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] || {
+                    echo "$PROGNAME: --texture-compress-tree requires MAX_DIM DIR OUTPUT_DIR" >&2; exit 2;
+                }
+                OPT_TEXTURE_COMPRESS_TREE=1; TEXTURE_TREE_DIM="$2"; TEXTURE_TREE_INPUT="$3"; TEXTURE_TREE_OUTPUT="$4"
                 shift 3 ;;
             --audit-container)
                 [ "$OPT_CONTAINER" -eq 0 ] || { echo "$PROGNAME: container modes cannot be combined" >&2; exit 2; }
@@ -538,6 +550,7 @@ parse_args() {
         "OPT_ENGINES:--engines:0"
         "OPT_FMOD_EXPORT:--export-fmod:0"
         "OPT_TEXTURE_COMPRESS:--texture-compress:0"
+        "OPT_TEXTURE_COMPRESS_TREE:--texture-compress-tree:0"
         "OPT_CONTAINER:--audit-container/--audit-godot-textures/--audit-godot3-audio/--export-unityfs/--export-godot/--export-godot-textures/--export-godot3-audio:0"
         "OPT_BALANCE:--balance:0"
         "OPT_NOTIFY:--notify:0"
@@ -3036,6 +3049,19 @@ cmd_texture_compress() {
     printf 'Source unchanged and its codec is preserved; the exported payload is lossy and unverified in-game. This is not net disk savings and no installed game is modified.\n'
 }
 
+cmd_texture_compress_tree() {
+    local result summary tag exported before after skipped failed
+    result=$("$(native_backend)" texture-compress-tree "$TEXTURE_TREE_DIM" "$TEXTURE_TREE_INPUT" "$TEXTURE_TREE_OUTPUT") || return $?
+    summary=$(printf '%s\n' "$result" | grep '^TEXTURE_COMPRESS_TOTAL|' | tail -n 1)
+    [ -n "$summary" ] || { printf 'Invalid texture tree backend response.\n' >&2; return 1; }
+    IFS='|' read -r tag exported before after skipped failed <<< "$summary"
+    printf '[EXPERIMENTAL] Exported DDS under %s → %s\n' "$TEXTURE_TREE_INPUT" "$TEXTURE_TREE_OUTPUT"
+    printf '%s file(s): logical bytes %s → %s; skipped %s; failed %s.\n' \
+        "$exported" "$(bytes_human "$before")" "$(bytes_human "$after")" "$skipped" "$failed"
+    printf 'Source tree untouched; codec preserved; exported payloads are lossy and unverified in-game. This is export-only and not net disk savings.\n'
+    [ "$failed" = 0 ]
+}
+
 # Container transforms are intentionally not part of automatic installed apply.
 # Their write gate uses savings/output bytes, not total game size. Audit stays
 # read-only; successful export retains the source and therefore is not net savings.
@@ -4735,6 +4761,11 @@ fi
 
 if [ "$OPT_TEXTURE_COMPRESS" -eq 1 ]; then
     cmd_texture_compress
+    exit $?
+fi
+
+if [ "$OPT_TEXTURE_COMPRESS_TREE" -eq 1 ]; then
+    cmd_texture_compress_tree
     exit $?
 fi
 

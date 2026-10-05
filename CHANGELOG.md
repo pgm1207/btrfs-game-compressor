@@ -10,7 +10,10 @@
   R8G8B8A8/B8G8R8A8. Cubemaps, arrays, volumes, BC6H and float formats are
   refused. Never writes in place; the source is untouched and the output is a new
   file. The payload is lossy and unverified in-game, and this is not main-pipeline
-  apply or net savings.
+  apply or net savings. `--texture-compress-tree MAX_DIM DIR OUTPUT_DIR` (native
+  `texture-compress-tree`) mirrors a whole tree, exporting only textures that
+  actually shrink and reporting skipped/failed counts; the source tree is never
+  modified.
 - Unity read-only audit now resolves declared Texture2D stream paths against the
   audited file's own directory and bounds-checks `offset .. offset+size` without
   reading payload bytes. Absolute paths, `..` traversal, symlinks and

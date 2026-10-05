@@ -256,12 +256,27 @@ fn scale_to(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
     )
 }
 
-/// Downscale a DDS texture to `max_dim` and export it to `output`. The source is
-/// only read; the codec is preserved and the mip chain is regenerated.
-pub fn compress(max_dim: u32, input: &Path, output: &Path) -> io::Result<()> {
-    if !(16..=16384).contains(&max_dim) {
-        return Err(bad("texture maximum dimension must be 16..=16384"));
-    }
+struct Outcome {
+    before: u64,
+    after: u64,
+    width: u32,
+    height: u32,
+    new_width: u32,
+    new_height: u32,
+    format: ImageFormat,
+    mipmaps: u32,
+    downscaled: bool,
+}
+
+struct Prepared {
+    outcome: Outcome,
+    bytes: Vec<u8>,
+}
+
+/// Decode, downscale and re-encode one DDS texture in memory, then verify the
+/// container. The source is only read; the codec is preserved and the mip chain
+/// is regenerated. Nothing is written here.
+fn prepare(max_dim: u32, input: &Path) -> io::Result<Prepared> {
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -324,31 +339,136 @@ pub fn compress(max_dim: u32, input: &Path, output: &Path) -> io::Result<()> {
     if decoded_base.dimensions() != (encoded.width, encoded.height) {
         return Err(bad("exported texture base mip does not match its header"));
     }
+    Ok(Prepared {
+        outcome: Outcome {
+            before: before.len(),
+            after: output_bytes.len() as u64,
+            width,
+            height,
+            new_width: encoded.width,
+            new_height: encoded.height,
+            format: encoded.image_format,
+            mipmaps: encoded.mipmaps,
+            downscaled: encoded.width < width || encoded.height < height,
+        },
+        bytes: output_bytes,
+    })
+}
+
+/// Write an export to a new file. An existing destination is refused.
+fn write_output(output: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut destination = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(output)?;
-    destination.write_all(&output_bytes)?;
+    destination.write_all(bytes)?;
     destination.sync_all()?;
+    Ok(())
+}
+
+/// Downscale a DDS texture to `max_dim` and export it to `output`, printing one
+/// machine-readable summary line. The source is only read.
+pub fn compress(max_dim: u32, input: &Path, output: &Path) -> io::Result<()> {
+    if !(16..=16384).contains(&max_dim) {
+        return Err(bad("texture maximum dimension must be 16..=16384"));
+    }
+    let prepared = prepare(max_dim, input)?;
+    write_output(output, &prepared.bytes)?;
+    let outcome = prepared.outcome;
     println!(
         "TEXTURE_COMPRESS|{}|{}|{}|{}|{}|{}|{:?}|{}|{}",
-        before.len(),
-        output_bytes.len(),
-        width,
-        height,
-        encoded.width,
-        encoded.height,
-        encoded.image_format,
-        encoded.mipmaps,
-        if resized_is_smaller(width, height, encoded.width, encoded.height) { "downscaled" } else { "reencoded" },
+        outcome.before,
+        outcome.after,
+        outcome.width,
+        outcome.height,
+        outcome.new_width,
+        outcome.new_height,
+        outcome.format,
+        outcome.mipmaps,
+        if outcome.downscaled { "downscaled" } else { "reencoded" },
     );
     eprintln!("Exported a downscaled DDS copy. The codec is preserved, the payload is lossy and unverified in-game, and the source file is never modified.");
     Ok(())
 }
 
-fn resized_is_smaller(w: u32, h: u32, nw: u32, nh: u32) -> bool {
-    nw < w || nh < h
+/// Export-only tree pass: mirror every DDS under `input` into `output`,
+/// downscaling each to `max_dim`. Unsupported or refused textures are skipped and
+/// other failures are counted; the source tree is never modified.
+pub fn compress_tree(max_dim: u32, input: &Path, output: &Path) -> io::Result<()> {
+    if !(16..=16384).contains(&max_dim) {
+        return Err(bad("texture maximum dimension must be 16..=16384"));
+    }
+    if !fs::symlink_metadata(input)?.file_type().is_dir() {
+        return Err(bad("texture-compress-tree expects a real directory"));
+    }
+    let mut directories = vec![input.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)? {
+            super::cancelled()?;
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if kind.is_dir() {
+                directories.push(path);
+            } else if kind.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("dds"))
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let (mut exported, mut skipped, mut failed) = (0u64, 0u64, 0u64);
+    let (mut before_bytes, mut after_bytes) = (0u64, 0u64);
+    for path in files {
+        super::cancelled()?;
+        let Ok(relative) = path.strip_prefix(input) else { continue };
+        let destination = output.join(relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match prepare(max_dim, &path) {
+            Ok(prepared) => {
+                // Export only when the rebuilt texture is actually smaller. Adding
+                // a mip chain to an already-small single-mip texture would grow it.
+                if prepared.outcome.after >= prepared.outcome.before {
+                    skipped += 1;
+                    println!("TEXTURE_COMPRESS_FILE|{}|skipped_no_gain", relative.display());
+                } else if write_output(&destination, &prepared.bytes).is_err() {
+                    failed += 1;
+                    println!("TEXTURE_COMPRESS_FILE|{}|failed", relative.display());
+                } else {
+                    exported += 1;
+                    before_bytes = before_bytes.saturating_add(prepared.outcome.before);
+                    after_bytes = after_bytes.saturating_add(prepared.outcome.after);
+                    println!("TEXTURE_COMPRESS_FILE|{}|{}|{}|exported", relative.display(), prepared.outcome.before, prepared.outcome.after);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                skipped += 1;
+                println!("TEXTURE_COMPRESS_FILE|{}|skipped_unsupported", relative.display());
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                skipped += 1;
+                println!("TEXTURE_COMPRESS_FILE|{}|skipped_existing", relative.display());
+            }
+            Err(_) => {
+                failed += 1;
+                println!("TEXTURE_COMPRESS_FILE|{}|failed", relative.display());
+            }
+        }
+    }
+    println!("TEXTURE_COMPRESS_TOTAL|{exported}|{before_bytes}|{after_bytes}|{skipped}|{failed}");
+    eprintln!("Export-only tree pass: {exported} DDS file(s) downscaled into a new tree; the source tree is untouched, {skipped} unsupported/refused and {failed} failed. Payloads are lossy and unverified in-game.");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -458,5 +578,29 @@ mod tests {
         assert_eq!(scale_to(64, 32, 1920), (64, 32));
         assert_eq!(scale_to(3840, 2160, 1920), (1920, 1080));
         assert_eq!(scale_to(1, 4096, 64), (1, 64));
+    }
+
+    #[test]
+    fn tree_pass_mirrors_supported_dds_and_skips_the_rest() {
+        let root = std::env::temp_dir().join(format!("bgc-texture-tree-{}", stamp()));
+        let input = root.join("in");
+        let output = root.join("out");
+        fs::create_dir_all(input.join("nested")).unwrap();
+        let dxt5 = encoded_source(64, 64, ImageFormat::BC3RgbaUnorm);
+        fs::write(input.join("a.dds"), &dxt5).unwrap();
+        fs::write(input.join("nested/b.dds"), &dxt5).unwrap();
+        fs::write(input.join("nested/ignore.txt"), b"not a texture").unwrap();
+        fs::write(input.join("broken.dds"), b"not a dds").unwrap();
+        compress_tree(16, &input, &output).unwrap();
+        assert!(output.join("a.dds").exists());
+        assert!(output.join("nested/b.dds").exists());
+        assert!(!output.join("nested/ignore.txt").exists());
+        assert!(!output.join("broken.dds").exists());
+        assert_eq!(fs::read(input.join("a.dds")).unwrap(), dxt5, "source tree must be untouched");
+        // A second pass must not overwrite existing exports.
+        let first = fs::read(output.join("a.dds")).unwrap();
+        compress_tree(16, &input, &output).unwrap();
+        assert_eq!(fs::read(output.join("a.dds")).unwrap(), first, "existing export must not be overwritten");
+        fs::remove_dir_all(root).unwrap();
     }
 }

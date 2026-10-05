@@ -102,6 +102,13 @@ rejected. The exported payload is lossy, the container is verified by
 re\-parsing and re\-decoding, and the result is not validated in\-game and is not
 applied to installed games.
 .TP
+.BI \-\-texture\-compress\-tree " MAX_DIM DIR OUTPUT_DIR"
+Export\-only pass over a directory tree. Mirrors every `.dds` under DIR into
+OUTPUT_DIR at the same relative path, downscaling each to MAX_DIM with the same
+codec and a rebuilt mip chain. DIR is never modified; unsupported or existing
+files are skipped and reported. Like \-\-texture\-compress, the payloads are
+lossy, unverified in\-game, and never applied to installed games.
+.TP
 .BI \-\-apply\-assets " GAME"
 Apply beta asset optimization to a stopped game, retaining originals in a
 local restore copy. Visual media may lose detail; supported WAV files may be

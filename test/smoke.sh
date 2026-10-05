@@ -2209,6 +2209,27 @@ out=$(
 )
 check_contains "texture-compress reports the downscale" "1920x1080 → 1024x576" "$out"
 check_contains "texture-compress warns the export is unverified" "Source unchanged and its codec is preserved" "$out"
+out=$(run --texture-compress-tree 2>&1); rc=$?
+check_rc "texture tree requires dimension, input dir and output dir" 2 "$rc"
+check_contains "missing texture tree arguments explain usage" "requires MAX_DIM DIR OUTPUT_DIR" "$out"
+out=$(run --texture-compress-tree 1024 in out --status 2>&1); rc=$?
+check_rc "texture tree cannot combine with status" 2 "$rc"
+out=$(run --help)
+check_contains "help documents export-only DDS tree downscaling" "--texture-compress-tree MAX_DIM DIR OUTPUT_DIR" "$out"
+cat > "$WORK/texture-tree-shim" <<'SHIM'
+#!/bin/sh
+printf 'TEXTURE_COMPRESS_FILE|a.dds|4096|1024|exported\n'
+printf 'TEXTURE_COMPRESS_FILE|b.dds|skipped_unsupported\n'
+printf 'TEXTURE_COMPRESS_TOTAL|1|4096|1024|1|0\n'
+SHIM
+chmod +x "$WORK/texture-tree-shim"
+out=$(
+    native_backend() { printf '%s\n' "$WORK/texture-tree-shim"; }
+    TEXTURE_TREE_DIM=1024 TEXTURE_TREE_INPUT=in TEXTURE_TREE_OUTPUT=out
+    cmd_texture_compress_tree
+)
+check_contains "texture tree reports the totals" "1 file(s): logical bytes" "$out"
+check_contains "texture tree warns the export is unverified" "Source tree untouched; codec preserved" "$out"
 
 group "Unused-content pruning CLI"
 out=$(run --prune-assets 2>&1); rc=$?

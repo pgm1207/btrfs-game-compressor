@@ -891,6 +891,11 @@ fn run() -> io::Result<()> {
             .parse::<u32>().map_err(|_| invalid("expected maximum texture dimension"))?;
         return texture::compress(max_dim, Path::new(&args[2]), Path::new(&args[3]));
     }
+    if command == "texture-compress-tree" && args.len() == 4 {
+        let max_dim = args[1].to_str().ok_or_else(|| invalid("invalid maximum texture dimension"))?
+            .parse::<u32>().map_err(|_| invalid("expected maximum texture dimension"))?;
+        return texture::compress_tree(max_dim, Path::new(&args[2]), Path::new(&args[3]));
+    }
     if command == "godot-dedup-audit" && args.len() == 2 {
         return containers::godot_dedup(Path::new(&args[1]), None, 5.0);
     }
@@ -964,7 +969,7 @@ fn run() -> io::Result<()> {
         ("compress",3)=>(Path::new(&args[2]),args[1].to_str().and_then(|s|s.parse::<u8>().ok()).ok_or_else(||invalid("invalid level"))?),
         ("measure"|"measure-bytes"|"usage"|"balance",2)=>(Path::new(&args[1]),0),
         ("dedupe",3)=>(Path::new(&args[1]),0),
-        _=>return Err(invalid("usage: bgc-native compress LEVEL DIR | measure DIR | measure-bytes DIR | measure-file FILE | usage DIR | dedupe DIR SCRATCH_DIR | balance DIR | assets ACTION TARGET LEVEL DIR | asset-inventory DIR | asset-plan-inventory PROFILE DIR | asset-plan PROFILE DIR | asset-container-inventory DIR | asset-audit-packs DIR | asset-audit-fmod DIR | assets-restore-file DIR RELATIVE_PATH | assets-physical-rejections DIR | prune-plan DIR [--debug] [REL...] | prune-apply DIR [--debug] [REL...] | fmod-reencode PROFILE INPUT OUTPUT | fmod-audit INPUT | package-audit INPUT | engine-scan DIR | container-audit FILE | unity-texture-coverage FILE | unityfs-audit FILE | unityfs-recompress MIN_PCT INPUT OUTPUT | texture-compress MAX_DIM INPUT OUTPUT | godot-audit FILE | godot-dedup-audit FILE | godot-dedup-export MIN_PCT INPUT OUTPUT | godot-texture-audit PROFILE FILE | godot-texture-export PROFILE MIN_PCT INPUT OUTPUT | godot3-audit PROFILE FILE | godot3-optimize PROFILE MIN_PCT INPUT OUTPUT | unreal-audit FILE | --licenses")),
+        _=>return Err(invalid("usage: bgc-native compress LEVEL DIR | measure DIR | measure-bytes DIR | measure-file FILE | usage DIR | dedupe DIR SCRATCH_DIR | balance DIR | assets ACTION TARGET LEVEL DIR | asset-inventory DIR | asset-plan-inventory PROFILE DIR | asset-plan PROFILE DIR | asset-container-inventory DIR | asset-audit-packs DIR | asset-audit-fmod DIR | assets-restore-file DIR RELATIVE_PATH | assets-physical-rejections DIR | prune-plan DIR [--debug] [REL...] | prune-apply DIR [--debug] [REL...] | fmod-reencode PROFILE INPUT OUTPUT | fmod-audit INPUT | package-audit INPUT | engine-scan DIR | container-audit FILE | unity-texture-coverage FILE | unityfs-audit FILE | unityfs-recompress MIN_PCT INPUT OUTPUT | texture-compress MAX_DIM INPUT OUTPUT | texture-compress-tree MAX_DIM INDIR OUTDIR | godot-audit FILE | godot-dedup-audit FILE | godot-dedup-export MIN_PCT INPUT OUTPUT | godot-texture-audit PROFILE FILE | godot-texture-export PROFILE MIN_PCT INPUT OUTPUT | godot3-audit PROFILE FILE | godot3-optimize PROFILE MIN_PCT INPUT OUTPUT | unreal-audit FILE | --licenses")),
     };
     let tree = Tree::new(root)?;
     match command {

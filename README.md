@@ -89,6 +89,8 @@ new file while preserving the source codec; the source is never modified. It
 supports legacy BC1/2/3 and 32-bit BGRA/RGBA plus DX10 BC1/2/3/4/5/7 and
 R8G8B8A8/B8G8R8A8, and refuses cubemaps/arrays/volumes/BC6H. The output is lossy
 and unverified in-game, and this is not applied to installed games.
+`--texture-compress-tree MAX_DIM DIR OUTPUT_DIR` does the same for every DDS in a
+directory tree, writing only the ones that actually shrink.
 
 For recovery after a lost lossy-run journal, the optional Python helper
 `tools/resume-library-compaction.py --state-dir ~/.local/state/bgc-live-1080p-recovery`
