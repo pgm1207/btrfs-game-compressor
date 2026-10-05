@@ -9,10 +9,11 @@ titles can save much more than games built from compressed assets.**
 [![Platform](https://img.shields.io/badge/platform-any%20Linux%20with%20Btrfs-informational)](#requirements)
 [![Shell](https://img.shields.io/badge/shell-bash%204%2B-4EAA25)](#requirements)
 
-**Engine coverage and future work:** [support chart and roadmap](ROADMAP.md).
-The current `0.2.0` development version is unreleased; detection, export and
-beta asset apply are listed separately. Native filesystem compression works
-independently of the engine; Unity/Unreal packed texture writers are not implemented.
+**Engine coverage and future work:** [support matrix](SUPPORT.md) (what is
+tested, beta, audit-only or unsupported) and [roadmap](ROADMAP.md). Native
+filesystem compression is stable and engine-independent; engine asset writers are
+**beta** and unverified at runtime; Unity/Unreal packed texture writers are not
+implemented and are documented as gaps rather than promised.
 
 If you game on Linux with a Btrfs filesystem — a Steam Deck, an Arch/CachyOS box, a
 Fedora or Ubuntu desktop, a Bazzite handheld — there is a good chance a large part of
@@ -67,6 +68,28 @@ libraries: 1   games: 225   pending: 12   compacted: 209   compressed only: 4   
 
 ## What it does
 
+Run `./btrfs-game-compressor --compact-all-no-backup` for a checkpointed installed-library
+Balanced asset → Zstd → dedupe pipeline. Python 3 is required. This is irreversible:
+no new asset backups are retained. Results and `stats.md` are stored under
+`${XDG_STATE_HOME:-~/.local/state}/btrfs-game-compressor/compact-balanced`.
+An interrupted asset stage is flagged for manual recovery, never blindly repeated.
+Unsupported formats remain unchanged; completion is not full asset coverage or
+proof of game compatibility. The command returns nonzero for failed/skipped games.
+
+**Explicit irreversible backend mode:** `bgc-native assets apply-no-backup balanced 1 GAME_DIR`
+applies supported Balanced (1080p) assets without creating persistent restore
+copies. It still writes and syncs a temporary replacement before atomic rename.
+Existing recovery files are not deleted or overwritten. This mode is not runtime
+validation: Steam verification/downloads may be required to restore originals,
+and unsupported formats stay untouched. Do not use it on a running game.
+
+For recovery after a lost lossy-run journal, the optional Python helper
+`tools/resume-library-compaction.py --state-dir ~/.local/state/bgc-live-1080p-recovery`
+checkpoints lossless Zstd/dedupe stages and writes `stats.md` plus per-game logs.
+It never reapplies uncertain lossy changes, skips running games and existing
+recovery data, and resumes completed stages without repeating them. Its
+allocated-reference figures are not net physical savings or playback validation.
+
 - **Finds** Steam libraries on Btrfs, from `libraryfolders.vdf` and Flatpak layouts,
   plus any roots you register.
 - **Compresses** games through the Btrfs ZSTD defragmentation ioctl, mirroring
@@ -78,6 +101,10 @@ libraries: 1   games: 225   pending: 12   compacted: 209   compressed only: 4   
 - Tracks `COMPRESSED` and `COMPACTED` separately. `COMPACTED` means compression
   is current and a successful dedupe pass has run since; the batch action dedupes
   compressed-only games without recompressing them.
+- `--assets-all` provides a fast, read-only extension/format inventory for every
+  installed game. `--assets-verify-all` runs the real Balanced transform-candidate
+  planner for all games without writing assets; it decodes candidates and may
+  take substantially longer.
 - **Never touches a running game**, **stops on failure**, and is **safe to interrupt**
   at any time.
 - Shows one concise progress line by default. Pass `--verbose` to list each file.
@@ -321,7 +348,8 @@ These checks catch severe damage and timing shifts; they do **not** certify
 perceptual transparency. Listen to representative dialogue, music and effects.
 All these checks run offline, adding no new processing stage during gameplay.
 
-`bgc-native fmod-audit FILE` runs a bounded offline decoder microbenchmark on
+`bgc-native fmod-audit FILE` (also routed by `container-audit` for recognized
+FSB5 and RIFF/FEV signatures) runs a bounded offline decoder microbenchmark on
 up to eight evenly spaced streams (five seconds per stream, five repetitions).
 It reports sampled frames, decoded audio seconds and best decoder wall time
 summed across the streams. Compare an original with its export using the same
@@ -442,8 +470,12 @@ enabled for automatic installed-file replacement**:
   reports supported Texture2D dimensions, numeric format ID, mip count, inline
   bytes and declared external path/offset/size. Unknown trees or stripped schemas
   remain opaque; paths are not followed and external extents are not verified.
-  Texture payload decoding and writing are not implemented. Large objects/work
-  budgets are skipped explicitly in the inspected/opaque texture summary.
+   Texture payload decoding and writing are not implemented. Large objects/work
+   budgets are skipped explicitly in the inspected/opaque texture summary.
+- **XNB v4–6:** `--audit-container FILE` recognizes a bounded XNB header, reports
+  target/version/flags/file size and known LZX/LZ4 flag state, and never inspects
+  reader IDs or payloads. Directory scans inventory signature-validated `.xnb`
+  files but do not infer an XNA/MonoGame/FNA engine from them.
 - **Godot standalone PCK v1–4 (plain packs):** share byte-identical resource payloads using
   directory offsets. Stored MD5 values are grouping hints only; candidates are
   compared byte-for-byte and every exported resource is verified against the
@@ -477,6 +509,40 @@ enabled for automatic installed-file replacement**:
   not runtime-compatible. This exposed and fixed large-scene atlas scanning and
   BC block-padding repeat drift. Physical savings remain unverified; see
   [the trial record](test/engine-results/pathogenic-ultra-2026-10-02.md).
+- **Carrion read-only/temporary-export trial:** verified XNB headers, inventoried
+  FMOD banks and safely tested a disposable `Sounds.bank` export. No installed
+  content was changed and no in-game compatibility is claimed; see
+  [the Carrion trial record](test/engine-results/carrion-steam-trial-2026-10-03.md).
+- **Steam-library Godot Balanced (1080p) copy trial:** exercised the actual
+  `assets apply balanced` pipeline on ten disposable installed-game copies
+  across Godot PCK v1/v2/v3/v4. Nine were accepted and audited; eligible packs
+  shrank and second passes were byte-identical no-ops. PCK v2 remains read-only.
+  No installed games changed and no playability claim is made; see the
+  [trial record](test/engine-results/godot-balanced-steam-copies-2026-10-03.md).
+- `Balanced (1080p)` is a per-format asset profile, not a universal resolution
+  switch or engine compatibility promise. It caps supported texture/image edges
+  at 1,920 pixels and applies format-specific audio settings; unsupported
+  containers, stripped Unity texture schemas and unsupported PCK layouts remain
+  untouched. `--asset-inventory GAME` and `--assets-all` are fast, read-only
+  extension/format inventories. `--assets GAME` computes decoder-backed
+  candidates for one game; `--assets-verify-all` runs that read-only planner for
+  the full installed library and may take much longer.
+- `--asset-containers GAME` lists standalone PCK/FM0D/Hades-package candidates;
+  `--audit-game-packs GAME` performs a read-only PCK structure audit. Neither
+  command predicts savings or proves in-game loading.
+- The standalone FMOD audit on 2026-10-04 covered 1,444 banks in 59 installs;
+  889 matched the strict supported structural parser. Rejections are not rewrite
+  candidates; embedded/unknown layouts stay untouched. The regular reversible
+  asset pipeline was also tested on disposable copies of eight FMOD-heavy games.
+  See the
+  [audit record](test/engine-results/fmod-installed-audit-2026-10-04.md).
+- PCK read-only audit bounds now accommodate Until Then's 211,483-entry pack;
+  unsupported encrypted/sparse PCK layouts are still rejected.
+- The 310-install inventory and format-coverage caveats are in the
+  [2026-10-04 coverage report](test/engine-results/steam-library-asset-coverage-2026-10-04.md).
+- The library-wide coverage snapshot records candidate-scan limits and
+  unsupported Unity/Unreal/audio/video formats in
+  [the 2026-10-04 report](test/engine-results/steam-library-asset-coverage-2026-10-04.md).
 - **Godot PCK textures (lossy, asset apply or export):** `--export-godot-textures PROFILE`
    supports Godot 3 `.stex` (GDST, PCK v1) and Godot 4 `.ctex` (GST2, PCK v3/v4).
    It downscales supported textures to the profile's longest edge
@@ -937,7 +1003,7 @@ btrfs-game-compressor --status --no-color | column -t
 # JSON for scripts
 btrfs-game-compressor --status --json
 
-# ZSTD compression savings recorded so far
+# Savings by category: ZSTD, dedupe, and tracking status
 btrfs-game-compressor --stats
 
 # every recorded compression, newest first

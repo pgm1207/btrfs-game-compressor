@@ -1,8 +1,59 @@
 # Changelog
 
-## 0.2.0 — Unreleased — Native backend and compatibility-first assets
+## 0.2.0 — 2026-10-05 — Native backend and compatibility-first assets
 
-### Latest development improvements
+First stable 0.2.0 release. The filesystem layer (Zstd compression, byte-verified
+deduplication, discovery, state and safety guards) is stable and tested. Engine
+asset support is **beta** and unverified at runtime; [SUPPORT.md](SUPPORT.md)
+records exactly which formats are tested, audit-only or unsupported, and every
+writer remains opt-in.
+
+### Release highlights
+
+- Publish [SUPPORT.md](SUPPORT.md): an evidence-based support matrix with stable,
+  beta, audit-only and unsupported tiers, plus the explicit list of coverage gaps
+  (Unity/Unreal packed writers, Wwise/CRI, video, encrypted packs).
+- Add `--compact-all-no-backup`: a checkpointed installed-library Balanced asset
+  → Zstd → dedupe pipeline that resumes across restarts, never re-applies an
+  uncertain asset stage, and writes a savings chart.
+- Add explicit `apply-no-backup` native asset mode using synced temporary files
+  and atomic replacement, without persistent recovery copies. Existing backups
+  remain untouched; Steam verification is the recovery path. Cover no-backup
+  resizing on opt-in real Btrfs fixtures.
+
+### Development improvements
+
+- Validate library-wide inventory/planner rows and return failure on incomplete
+  scans. Count only actual logical reductions as candidates, not recognized
+  no-gain packs; explicitly distinguish estimates from runtime approval.
+
+- Fix PCK v3/v4 audit-report directory pointers: read the offset at byte 32,
+  not the flags/file-base fields at byte 20. Bound count reads against file size
+  and test all four versions, truncated pointers, and overflow.
+
+- Expand `--stats` into a measured savings-by-category breakdown, sorted by
+  reduction percentage. Show bytes and each category's own baseline, keep dedupe
+  scope separate to avoid double counting, and explicitly mark language/asset
+  history as untracked until durable accounting is added.
+- Run the complete Balanced (1080p) asset pipeline on seven disposable Steam
+  copies spanning Godot PCK v1/v2/v3/v4. Six were accepted and audited; rewrites
+  were idempotent on repeat. No installed game was modified.
+- Add read-only installed-game asset inventories, standalone-container inventory
+  and Godot PCK structure-audit reports; add copy-only PCK trial coverage. These
+  distinguish detected containers from rewrite eligibility and preserve the
+  explicit warning that structural audits do not establish game loading.
+- Bound and scale Godot PCK audits for large installs (including 211k-entry
+  Until Then), report correct version-specific directory counts, and reject
+  extreme declared counts before allocation. Preserve duplicate exact extents
+  because PCK deduplication legitimately emits shared ranges.
+- Add a read-only XNB v4–6 header audit and signature-validated XNB container
+  inventory. Do not infer XNA/MonoGame/FNA from XNB files or parse their payloads.
+- Route recognized FSB5 and FMOD RIFF/FEV banks through the existing bounded
+  FMOD audit in `container-audit`, rather than misclassifying them as Unreal Pak.
+
+- Name recognized Unity TextureFormat IDs in the read-only Texture2D inventory,
+  while retaining the numeric value and reporting unrecognized IDs as `Unknown`.
+  This is enum metadata only; it does not validate payload bytes or enable writing.
 
 - Use bounded streaming atlas metadata inspection for large Godot scenes;
   preserve cross-chunk resource paths and fail closed on scan/path budgets.

@@ -1,6 +1,7 @@
 # Engine support and roadmap 
 
-Status: **2026-10-02**, development branch **0.2.0 (unreleased)**.
+Status: **2026-10-05**, release **0.2.0**. Engine asset writers remain beta and
+are expanded engine by engine; see [SUPPORT.md](SUPPORT.md) for what is tested.
 This is a quick market/format survey, not an exhaustive catalogue of every engine,
 fork, middleware or private studio tool. Scope is shipped PC/Steam game content;
 mobile/web-first tools are included where their formats could reach a PC build.
@@ -43,7 +44,7 @@ of compatible rewriting across an entire engine family.
 | **Ren'Py 6–8 / Pygame** | None | G only | None | RPA versioned indexes/segments; preserve script/save IDs and logical image sizes; avoid unsafe pickle evaluation; P2 |
 | **Source 1 / GoldSrc** | None | G only; VTF/WAD untouched | None | VPK/WAD archives, VTF mip/face/format parsing and material references; P2 |
 | **Source 2** | None | G only | None | VPK plus compiled resource blocks, VTEX_C texture/bulk layouts and sound metadata; separate from Source 1; P2 |
-| **XNA / MonoGame / FNA** | Container inventory where recognized; no engine detector | G only; XNB payloads untouched | None | XNB reader IDs/version/compression, texture surface/mips and SoundEffect data; P2 |
+| **XNA / MonoGame / FNA** | XNB signature/header inventory; no engine detector | G only; XNB payloads untouched | None | XNB reader IDs/payload compression, texture surface/mips and SoundEffect data; P2 |
 | **Hades custom pipeline** | PKG/Bink/FMOD inventory; not a general engine detector | G only; XNB/atlas payloads unchanged | Hades v7 LZ4 PKG lossless apply; supported standalone FMOD beta apply/export | Texture/atlas-aware XNB rewrite; embedded audio still untouched; P1 |
 | **Frostbite** | None | G only | None | CAS/CAT/bundle layouts, content hashes, texture streaming and platform versions; P3 |
 | **RE Engine** | `re_chunk_*` markers; `.pak` inventory, not Unreal parsing | G only; TEX untouched | None | RE archive indexes, TEX mip/streamed companions, per-format versions; P3 |
@@ -179,8 +180,9 @@ rules**. Never launch or kill games automatically or edit installed games as tes
 
 ## Versioning and incremental GitHub publication
 
-- Only `v0.1.0` and `v0.1.1` are tagged at this survey. Script/backend/manpage
-  currently say `0.2.0`; it is **unreleased**, not an existing public 0.2.0 release.
+- `v0.1.0` and `v0.1.1` were tagged previously. `0.2.0` is now the current
+  **release**: script, native Cargo package/lock and manpage all say `0.2.0`.
+  Engine asset writers inside it are beta; see [SUPPORT.md](SUPPORT.md).
 - Keep a shared SemVer number in the script, native Cargo package/lock and manpage.
   Update them together at a release boundary, with a changelog and package checks.
   Use commit hashes to identify individual development improvements; not every

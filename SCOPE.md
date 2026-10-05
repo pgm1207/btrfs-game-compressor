@@ -1,9 +1,10 @@
 # Scope
 
 This document records the project's current scope and goals. The initial 0.1.0
-finish line is retained below. Current development is 0.2.0 (unreleased), adding
+finish line is retained below. Current release is 0.2.0, adding
 native extent deduplication and opt-in format-aware asset optimization. See
-[ROADMAP.md](ROADMAP.md) for the engine support chart and delivery/versioning plan.
+[SUPPORT.md](SUPPORT.md) for tested coverage and [ROADMAP.md](ROADMAP.md) for the
+engine support chart and delivery/versioning plan.
 
 The short version: **a terminal tool that finds Steam games wasting space on a
 Btrfs filesystem, compresses them, and remembers what it has already done.**

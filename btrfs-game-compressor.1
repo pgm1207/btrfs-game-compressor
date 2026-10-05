@@ -55,6 +55,29 @@ profile. Supported media include loose images, simple legacy DDS textures, and
 simple mono/stereo PCM or 32-bit-float WAV. Non-native profiles emit integer
 PCM. GAME is an exact name or full install path.
 .TP
+.B \-\-assets\-all
+Fast read\-only extension/format inventory for every installed game. Reports
+candidate containers and understood formats without decoding and changes
+nothing.
+.TP
+.B \-\-assets\-verify\-all
+Read\-only Balanced transform\-candidate scan for every installed game. It
+decodes candidates to estimate logical reductions but writes nothing. Engine
+asset rewriting is beta; an empty candidate row is a coverage gap, not a
+failure.
+.TP
+.B \-\-compact\-all\-no\-backup
+Checkpointed library pass: apply supported Balanced assets, then Zstd
+compression, then dedupe, for every installed game. Python 3 is required.
+This is \fBirreversible\fR: no asset restore copy is retained, and an
+interrupted asset stage is flagged for manual recovery rather than repeated;
+recover original assets with Steam verification. Running games and games with
+existing recovery data are skipped. Results and a savings chart are written
+under \fI$XDG_STATE_HOME/btrfs\-game\-compressor/compact\-balanced\fR. Unsupported
+formats are left byte\-for\-byte untouched, and completion is not full asset
+coverage or proof of in\-game compatibility. Exits nonzero if any game fails or
+is skipped.
+.TP
 .BI \-\-export\-fmod " QUALITY FILE OUTPUT"
 Experimental native lossy FMOD Vorbis export (quality 0.0 through 0.4).
 Named profiles conservative and balanced use quality 0.3 and 0.2, require 5%
