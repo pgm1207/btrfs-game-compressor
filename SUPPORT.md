@@ -53,7 +53,7 @@ restore copy and is irreversible except through Steam verification.
 
 | Target | What is inspected | Evidence |
 | --- | --- | --- |
-| Unity SerializedFile v17–22 | Header, type tree, class counts, supported Texture2D fields | `test/engine-results/unity-texture-audit-2026-10-03.md` |
+| Unity SerializedFile v17–22 | Header, type tree, class counts, supported Texture2D fields, and read-only bounds-checked resolution of declared streamed extents (same-directory only) | `test/engine-results/unity-texture-audit-2026-10-03.md` |
 | UnityFS v6–8 | Container structure; same-codec LZ4/HC is **export only** | `test/engine-results/unityfs-initial-audit.json` |
 | Unreal Pak v1–11 | Footer, bounded index SHA1, entry classification | `test/engine-results/modern-pak-index-2026-10-02.md` |
 | Unreal IoStore `.utoc` v1–8 | Header/counts/security/minimum extents only | `test/engine-results/iostore-headers-2026-10-02.md` |

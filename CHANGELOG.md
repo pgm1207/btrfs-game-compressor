@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Unity read-only audit now resolves declared Texture2D stream paths against the
+  audited file's own directory and bounds-checks `offset .. offset+size` without
+  reading payload bytes. Absolute paths, `..` traversal, symlinks and
+  non-regular files are refused, and shared streams are grouped per stream file.
+  This is groundwork for a streamed-texture writer and enables no writer by
+  itself.
+
 ## 0.2.1 — 2026-10-05 — Correct open flags on aarch64; release fix
 
 - Use `libc::O_NOFOLLOW`, `libc::O_NONBLOCK` and `libc::O_DIRECTORY` instead of

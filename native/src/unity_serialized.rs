@@ -3,7 +3,7 @@
 //! Format references: UnityDataTools playerbuild-format.md and AssetStudio's
 //! SerializedFile.cs. Independent bounded reader; no runtime SDK dependency.
 use std::{collections::{BTreeMap, BTreeSet}, fs, io::{self, Read, Seek, SeekFrom},
-    os::unix::fs::{MetadataExt, OpenOptionsExt}, path::Path};
+    os::unix::fs::{MetadataExt, OpenOptionsExt}, path::{Path, PathBuf}};
 
 const MAX_METADATA: u64 = 32 * 1024 * 1024;
 const MAX_ITEMS: usize = 1_000_000;
@@ -178,6 +178,66 @@ fn inventory(bytes: &[u8], h: &Header) -> io::Result<Inventory> {
     Ok(Inventory { engine, platform, trees, types: ntypes, objects, classes, external, texture_objects })
 }
 
+/// Resolve a metadata-declared Unity stream path against the audited file's own
+/// directory, read-only. Absolute paths, parent traversal, symlinks and
+/// non-regular files are refused rather than followed. Returns the containing
+/// file's length so the declared `offset..offset+size` extent can be
+/// bounds-checked without reading or decoding any payload bytes.
+fn resolve_stream(parent: &Path, stream_path: &str) -> io::Result<Option<u64>> {
+    let declared = Path::new(stream_path);
+    if stream_path.is_empty() || declared.is_absolute() { return Ok(None); }
+    let mut relative = PathBuf::new();
+    for component in declared.components() {
+        match component {
+            std::path::Component::Normal(part) => relative.push(part),
+            std::path::Component::CurDir => {}
+            _ => return Ok(None),
+        }
+    }
+    if relative.as_os_str().is_empty() { return Ok(None); }
+    let metadata = match fs::symlink_metadata(parent.join(&relative)) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() { return Ok(None); }
+    Ok(Some(metadata.len()))
+}
+
+struct StreamSummary {
+    resolved: u64,
+    unresolved: u64,
+    bytes: u64,
+    status: Vec<(u64, String)>,
+    files: BTreeMap<String, (u64, u64)>,
+}
+
+/// Summarize declared streamed extents for a set of inspected textures. Only
+/// same-tree siblings are resolved and only the declared range is bounds-checked;
+/// no payload byte is read. Textures that declare no stream are skipped.
+fn summarize_streams(parent: &Path, details: &[(u64, crate::unity_tree::Texture)]) -> StreamSummary {
+    let mut summary = StreamSummary {
+        resolved: 0, unresolved: 0, bytes: 0, status: Vec::new(), files: BTreeMap::new(),
+    };
+    for (id, texture) in details {
+        if texture.stream_size == 0 { continue; }
+        let status = match resolve_stream(parent, &texture.stream_path) {
+            Ok(Some(len)) if texture.stream_offset.checked_add(texture.stream_size).is_some_and(|end| end <= len) => {
+                summary.resolved += 1;
+                summary.bytes = summary.bytes.saturating_add(texture.stream_size);
+                let entry = summary.files.entry(texture.stream_path.clone()).or_insert((0, 0));
+                entry.0 += 1; entry.1 = entry.1.saturating_add(texture.stream_size);
+                format!("RESOLVED|{len}")
+            }
+            Ok(Some(_)) => { summary.unresolved += 1; "OUT_OF_RANGE".to_string() }
+            Ok(None) => { summary.unresolved += 1; "MISSING".to_string() }
+            Err(_) => { summary.unresolved += 1; "UNREADABLE".to_string() }
+        };
+        summary.status.push((*id, status));
+    }
+    summary
+}
+
 pub fn audit(path: &Path) -> io::Result<()> {
     let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let meta = file.metadata()?;
@@ -216,9 +276,19 @@ pub fn audit(path: &Path) -> io::Result<()> {
             crate::unity_tree::format_name(t.format),
             t.mips, t.inline_bytes, t.stream_offset, t.stream_size, t.stream_path);
     }
+    // Resolve declared streamed extents read-only. This only locates a same-tree
+    // sibling and bounds-checks the declared range; it never reads payload bytes,
+    // rewrites a stream, or treats metadata as a verified texture.
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let streams = summarize_streams(parent, &details);
+    for (id, status) in &streams.status { println!("UNITY_STREAM|{id}|{status}"); }
+    for (stream_path, (count, bytes)) in &streams.files {
+        println!("UNITY_STREAM_FILE|{stream_path}|{count}|{bytes}");
+    }
+    println!("UNITY_STREAM_TOTAL|{}|{}|{}", streams.resolved, streams.unresolved, streams.bytes);
     let total = v.classes.get(&28).map_or(0, |(count, _)| *count);
     println!("UNITY_TEXTURE_AUDIT|{}|{}", details.len(), total - details.len() as u64);
-    eprintln!("Read-only Unity: bounded type-tree Texture2D fields are reported when supported; absent/unknown trees leave payloads opaque. External stream paths are metadata, not resolved files or verified extents. No texture/audio writer is implemented.");
+    eprintln!("Read-only Unity: bounded type-tree Texture2D fields are reported when supported; absent/unknown trees leave payloads opaque. Declared stream paths are resolved read-only against the same directory only to bounds-check their extent; no payload is read and no texture/audio writer is implemented.");
     Ok(())
 }
 
@@ -350,9 +420,67 @@ mod tests {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let root = std::env::temp_dir().join(format!("bgc-typed-texture-{stamp}")); fs::create_dir(&root).unwrap();
         let path = root.join("player.assets"); fs::write(&path, &bytes).unwrap();
-        // The declared companion intentionally does not exist. No path lookup
-        // is attempted or falsely claimed by the read-only metadata inspector.
+        // The declared companion is absent, so the read-only resolver reports the
+        // extent as unresolved. It never reads payload bytes or alters the source.
         audit(&path).unwrap(); assert_eq!(fs::read(&path).unwrap(), bytes);
+        // A same-directory companion large enough for the declared extent is
+        // resolved read-only: only the declared range is bounds-checked and no
+        // payload byte is read. This exercises the RESOLVED branch end to end.
+        let companion = root.join("shared.assets.resSxx");
+        fs::File::create(&companion).unwrap()
+            .set_len(texture.stream_offset + texture.stream_size).unwrap();
+        audit(&path).unwrap(); assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::metadata(&companion).unwrap().len(), texture.stream_offset + texture.stream_size);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn stream_resolution_refuses_traversal_absolute_and_symlinks() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("bgc-stream-{stamp}"));
+        fs::create_dir(&root).unwrap();
+        let stream = root.join("shared.assets.resS");
+        fs::File::create(&stream).unwrap().set_len(4096).unwrap();
+        assert_eq!(resolve_stream(&root, "shared.assets.resS").unwrap(), Some(4096));
+        assert_eq!(resolve_stream(&root, "./shared.assets.resS").unwrap(), Some(4096));
+        assert_eq!(resolve_stream(&root, "missing.resS").unwrap(), None);
+        assert_eq!(resolve_stream(&root, "").unwrap(), None);
+        assert_eq!(resolve_stream(&root, "/etc/passwd").unwrap(), None);
+        assert_eq!(resolve_stream(&root, "../escape.resS").unwrap(), None);
+        assert_eq!(resolve_stream(&root, "sub/../../escape.resS").unwrap(), None);
+        assert_eq!(resolve_stream(&root, ".").unwrap(), None);
+        // A symlink is refused even when it points at a regular file.
+        let link = root.join("linked.resS");
+        std::os::unix::fs::symlink(&stream, &link).unwrap();
+        assert_eq!(resolve_stream(&root, "linked.resS").unwrap(), None);
+        // A directory is not a stream.
+        fs::create_dir(root.join("dir.resS")).unwrap();
+        assert_eq!(resolve_stream(&root, "dir.resS").unwrap(), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+    fn texture(path: &str, offset: u64, size: u64) -> crate::unity_tree::Texture {
+        crate::unity_tree::Texture { width: 4, height: 4, format: 1, mips: 1,
+            inline_bytes: 0, stream_offset: offset, stream_size: size, stream_path: path.to_string() }
+    }
+    #[test]
+    fn stream_summary_groups_shared_streams_and_flags_bad_extents() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("bgc-stream-sum-{stamp}"));
+        fs::create_dir(&root).unwrap();
+        fs::File::create(root.join("shared.resS")).unwrap().set_len(1000).unwrap();
+        let details = vec![
+            (1u64, texture("shared.resS", 0, 400)),    // resolved
+            (2u64, texture("shared.resS", 600, 400)),  // resolved, same file
+            (3u64, texture("shared.resS", 900, 400)),  // out of range
+            (4u64, texture("absent.resS", 0, 10)),     // missing
+            (5u64, texture("shared.resS", 0, 0)),      // inline: skipped
+        ];
+        let s = summarize_streams(&root, &details);
+        assert_eq!((s.resolved, s.unresolved, s.bytes), (2, 2, 800));
+        assert_eq!(s.files.get("shared.resS"), Some(&(2, 800)));
+        assert_eq!(s.status.len(), 4);
+        assert_eq!(s.status[0].1, "RESOLVED|1000");
+        assert_eq!(s.status[2].1, "OUT_OF_RANGE");
+        assert_eq!(s.status[3].1, "MISSING");
         fs::remove_dir_all(root).unwrap();
     }
 }
