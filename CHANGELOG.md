@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 — 2026-10-05 — Portable symlink refusal on the audit/export path
+
+- Refuse symlinked UnityFS and FMOD sources with an explicit
+  `symlink_metadata` check instead of relying only on the hardcoded
+  `O_NOFOLLOW` open flag. The 0.2.0 release build failed on the aarch64
+  runner because that platform followed the link and produced a candidate;
+  failing closed is now deterministic on every architecture. 0.2.0 did not
+  publish a release artifact.
+
 ## 0.2.0 — 2026-10-05 — Native backend and compatibility-first assets
 
 First stable 0.2.0 release. The filesystem layer (Zstd compression, byte-verified

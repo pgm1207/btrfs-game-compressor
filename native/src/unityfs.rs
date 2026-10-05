@@ -175,6 +175,12 @@ fn rebuild(b: &[u8]) -> io::Result<(Vec<u8>, usize, Bundle)> {
 }
 
 fn read_source(path: &Path) -> io::Result<Vec<u8>> {
+    // Fail closed on symlinks explicitly instead of relying only on the
+    // hardcoded O_NOFOLLOW flag below. An aarch64 release runner followed the
+    // link and produced a candidate, so the portable check is mandatory.
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(invalid("UnityFS source must not be a symlink"));
+    }
     let mut f = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(path)?;
     let before = f.metadata()?;
     if !before.is_file() || before.len() > MAX_FILE { return Err(invalid("UnityFS expects a regular file up to 512 MiB")); }

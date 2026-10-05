@@ -32,7 +32,7 @@ touches a game that is running, and knows when re-compressing is not worth your 
 ```console
 $ btrfs-game-compressor --status
 ================================================================================
-  BTRFS GAME COMPRESSOR v0.2.0   225 game(s) across 1 library(ies)
+  BTRFS GAME COMPRESSOR v0.2.1   225 game(s) across 1 library(ies)
   [########################....] 92% compacted
 ================================================================================
 GAME                                     STATUS               SIZE EXPECTED GAIN

@@ -357,6 +357,11 @@ fn rebuild(b: &[u8], policy: Policy) -> io::Result<(Vec<u8>,usize,usize)> {
     Ok((output,changed,skipped))
 }
 fn read_source(input: &Path) -> io::Result<Vec<u8>> {
+    // Explicit symlink refusal: do not depend on O_NOFOLLOW alone. An aarch64
+    // release runner followed a symlink and produced a candidate bundle.
+    if fs::symlink_metadata(input)?.file_type().is_symlink() {
+        return Err(bad("FMOD input must not be a symlink"));
+    }
     let mut source = fs::OpenOptions::new().read(true).custom_flags(0x20000 | 0x800).open(input)?;
     let meta = source.metadata()?;
     if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_FILE { return Err(bad("FMOD input must be a single-link regular file of at most 1 GiB")); }

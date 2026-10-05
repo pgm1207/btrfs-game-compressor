@@ -147,7 +147,10 @@ group "CLI surface"
 out=$(run --version); rc=$?
 check_rc "--version exits 0" 0 $rc
 check_contains "--version prints name" "btrfs-game-compressor" "$out"
-check_contains "--version prints a version" "0.2.0" "$out"
+# Derive the expected version from the script so a version bump cannot leave the
+# suite asserting a stale string.
+expected_version=$(sed -n 's/^VERSION="\(.*\)"/\1/p' "$PROG")
+check_contains "--version prints the current version" "$expected_version" "$out"
 check_not_contains "--version emits no ANSI escapes" $'\033' "$out"
 
 out=$(run --help); rc=$?
