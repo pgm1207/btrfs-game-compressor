@@ -267,8 +267,8 @@ OPTIONS
                           writes a new file only; never replaces game assets
         --texture-compress-tree MAX_DIM DIR OUTPUT_DIR
                           experimental export-only pass: mirror every DDS under
-                          DIR into OUTPUT_DIR, downscaling each; DIR is never
-                          modified
+                          DIR into OUTPUT_DIR, writing only files that shrink;
+                          DIR is never modified
     -l, --library DIR     add DIR as a game library, then exit
                            (accepts the library root or its steamapps/common)
         --pending         with --status/--dry-run, only show pending games

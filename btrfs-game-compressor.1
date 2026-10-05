@@ -105,9 +105,10 @@ applied to installed games.
 .BI \-\-texture\-compress\-tree " MAX_DIM DIR OUTPUT_DIR"
 Export\-only pass over a directory tree. Mirrors every `.dds` under DIR into
 OUTPUT_DIR at the same relative path, downscaling each to MAX_DIM with the same
-codec and a rebuilt mip chain. DIR is never modified; unsupported or existing
-files are skipped and reported. Like \-\-texture\-compress, the payloads are
-lossy, unverified in\-game, and never applied to installed games.
+codec and a rebuilt mip chain, and writes only files that actually shrink. DIR is
+never modified; unsupported or existing files are skipped and reported. Like
+\-\-texture\-compress, the payloads are lossy, unverified in\-game, and never
+applied to installed games.
 .TP
 .BI \-\-apply\-assets " GAME"
 Apply beta asset optimization to a stopped game, retaining originals in a
