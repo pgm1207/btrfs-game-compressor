@@ -14,6 +14,13 @@
   `texture-compress-tree`) mirrors a whole tree, exporting only textures that
   actually shrink and reporting skipped/failed counts; the source tree is never
   modified.
+- Route `.dds` in the asset planner/apply path through the same richer decoder
+  and encoder, so multi-mip, DX10 (BC1/2/3/4/5/7) and uncompressed 32-bit
+  BGRA/RGBA textures are now in-place candidates under the existing profile,
+  atlas/small/thin guards and restore or no-backup modes. Replacement is still
+  gated on a strict byte reduction. Validated on disposable copies: a 1920x1080
+  BC3 and a 1920x1080 BGRA DDS each shrank ~85% in place, while a small texture
+  and a non-texture file were left untouched.
 - Unity read-only audit now resolves declared Texture2D stream paths against the
   audited file's own directory and bounds-checks `offset .. offset+size` without
   reading payload bytes. Absolute paths, `..` traversal, symlinks and

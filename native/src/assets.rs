@@ -1037,6 +1037,22 @@ fn prepare(path: &Path, p: &Profile) -> io::Result<Option<Vec<u8>>> {
     if detected_format.is_some_and(|detected| detected != format) {
         return Ok(None);
     }
+    // Route DDS through the richer decoder/encoder: it handles legacy BC1/2/3
+    // and 32-bit BGRA/RGBA plus DX10 BC1-7/RGBA/BGRA, rebuilds a complete mip
+    // chain, and returns output only when it is strictly smaller. The generic
+    // image decoder cannot read DX10/BC7 DDS.
+    if format == ImageFormat::Dds {
+        if crate::texture_policy::atlas_hint(path) {
+            return Ok(None);
+        }
+        // `texture::prepare_asset` validates the DDS layout itself (legacy or
+        // DX10, including multi-mip), so the legacy-only ancillary check and the
+        // generic image decoder are both bypassed here.
+        return match crate::texture::prepare_asset(p.max_edge, path)? {
+            Some((bytes, width, height)) if !crate::texture_policy::small_or_thin(width, height) => Ok(Some(bytes)),
+            _ => Ok(None),
+        };
+    }
     if !matches!(
         format,
         ImageFormat::Png
@@ -2503,6 +2519,44 @@ mod tests {
         dds[108..112].copy_from_slice(&0x1000u32.to_le_bytes());
         fs::write(&path, dds).unwrap();
         assert!(dds_header(&path).unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uncompressed_and_multi_mip_dds_are_now_pipeline_candidates() {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("bgc-dds-rich-unit-{stamp}"));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("sheet.dds");
+        let (w, h) = (1024u32, 1024u32);
+        let mut dds = vec![0u8; 128 + (w * h * 4) as usize];
+        dds[..4].copy_from_slice(b"DDS ");
+        dds[4..8].copy_from_slice(&124u32.to_le_bytes());
+        dds[12..16].copy_from_slice(&h.to_le_bytes());
+        dds[16..20].copy_from_slice(&w.to_le_bytes());
+        dds[20..24].copy_from_slice(&(w * 4).to_le_bytes());
+        dds[28..32].copy_from_slice(&1u32.to_le_bytes());
+        dds[76..80].copy_from_slice(&32u32.to_le_bytes());
+        dds[80..84].copy_from_slice(&0x41u32.to_le_bytes());
+        dds[88..92].copy_from_slice(&32u32.to_le_bytes());
+        dds[92..96].copy_from_slice(&0x00ff0000u32.to_le_bytes());
+        dds[96..100].copy_from_slice(&0x0000ff00u32.to_le_bytes());
+        dds[100..104].copy_from_slice(&0x000000ffu32.to_le_bytes());
+        dds[104..108].copy_from_slice(&0xff000000u32.to_le_bytes());
+        dds[108..112].copy_from_slice(&0x1000u32.to_le_bytes());
+        for (i, pixel) in dds[128..].chunks_mut(4).enumerate() {
+            let v = (i as u32).wrapping_mul(2_654_435_761);
+            pixel.copy_from_slice(&[(v & 255) as u8, ((v >> 8) & 255) as u8, ((v >> 16) & 255) as u8, 255]);
+        }
+        fs::write(&path, &dds).unwrap();
+        // The legacy helper still rejects it, but the pipeline no longer uses it
+        // for DDS, so the texture is now a real candidate.
+        assert!(dds_header(&path).unwrap().is_none());
+        let p = profile("ultra-performance").unwrap().unwrap();
+        let out = prepare(&path, &p).unwrap().expect("uncompressed DDS should be a candidate");
+        assert!(out.len() < dds.len());
+        assert_eq!(&out[..4], b"DDS ");
+        assert_eq!(fs::read(&path).unwrap(), dds, "planning must not modify the source");
         fs::remove_dir_all(root).unwrap();
     }
 }

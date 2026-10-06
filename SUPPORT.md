@@ -38,7 +38,7 @@ built from already-compressed or encrypted assets may gain little or nothing.
 | Format / engine | Supported subset | Evidence |
 | --- | --- | --- |
 | Loose raster images | PNG/JPEG/WebP/BMP/TGA/GIF/QOI resize under the active profile | `test/engine-results/`, `native/tests/filesystem.rs` |
-| Loose DDS | Export-only `--texture-compress` downscale with mip rebuild: legacy BC1/2/3 and 32-bit BGRA/RGBA, DX10 BC1/2/3/4/5/7 and R8G8B8A8/B8G8R8A8; `--texture-compress-tree` mirrors a tree, exporting only real reductions | `native/src/texture.rs` unit tests, `native/tests/filesystem.rs` |
+| Loose DDS | In-place beta apply now uses the rich decoder/encoder: legacy BC1/2/3 and 32-bit BGRA/RGBA plus DX10 BC1/2/3/4/5/7 and R8G8B8A8/B8G8R8A8 with mip rebuild, gated on strict reduction; export-only `--texture-compress` and `--texture-compress-tree` | `native/src/texture.rs` unit tests, `native/src/assets.rs` unit tests, `native/tests/filesystem.rs` |
 | Legacy DDS | BC1/BC2/BC3 only; simple layouts, complete mip chains required | `test/engine-results/texture-directory-readers-2026-10-02.md` |
 | WAV audio | Simple mono/stereo PCM and float; profile ceilings | `test/engine-results/brotato-wav-v2.md`, `audio-main-pipeline-2026-10-02.md` |
 | Godot 3 PCK | GDST `.stex` textures (supported codecs), MP3→Vorbis with import metadata | `test/engine-results/godot-balanced-steam-copies-2026-10-03.md` |

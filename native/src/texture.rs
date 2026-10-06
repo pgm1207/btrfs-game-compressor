@@ -367,6 +367,24 @@ fn write_output(output: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Asset-pipeline entry point: downscale a supported DDS to `max_edge` and
+/// return the re-encoded bytes plus the source dimensions only when the result
+/// is strictly smaller. The source is never modified. Unsupported layouts return
+/// `Ok(None)` rather than an error so a library scan can continue.
+pub fn prepare_asset(max_edge: u32, path: &Path) -> io::Result<Option<(Vec<u8>, u32, u32)>> {
+    if !(16..=16384).contains(&max_edge) {
+        return Ok(None);
+    }
+    match prepare(max_edge, path) {
+        Ok(prepared) if prepared.outcome.after < prepared.outcome.before => {
+            Ok(Some((prepared.bytes, prepared.outcome.width, prepared.outcome.height)))
+        }
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Downscale a DDS texture to `max_dim` and export it to `output`, printing one
 /// machine-readable summary line. The source is only read.
 pub fn compress(max_dim: u32, input: &Path, output: &Path) -> io::Result<()> {
@@ -581,8 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_pass_mirrors_supported_dds_and_skips_the_rest() {
-        let root = std::env::temp_dir().join(format!("bgc-texture-tree-{}", stamp()));
+    fn tree_pass_mirrors_supported_dds_and_skips_the_rest() {        let root = std::env::temp_dir().join(format!("bgc-texture-tree-{}", stamp()));
         let input = root.join("in");
         let output = root.join("out");
         fs::create_dir_all(input.join("nested")).unwrap();
@@ -601,6 +618,29 @@ mod tests {
         let first = fs::read(output.join("a.dds")).unwrap();
         compress_tree(16, &input, &output).unwrap();
         assert_eq!(fs::read(output.join("a.dds")).unwrap(), first, "existing export must not be overwritten");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepare_asset_gates_on_real_reduction_for_dx10_and_legacy() {
+        let root = std::env::temp_dir().join(format!("bgc-texture-asset-{}", stamp()));
+        fs::create_dir(&root).unwrap();
+        // A large DX10 BC7 source is rewritten smaller when downscaled.
+        let big = root.join("big.dds");
+        fs::write(&big, encoded_source(1024, 1024, ImageFormat::BC7RgbaUnorm)).unwrap();
+        let got = prepare_asset(256, &big).unwrap();
+        assert!(got.is_some(), "a large DX10 BC7 texture should be a candidate");
+        let (bytes, width, height) = got.unwrap();
+        assert_eq!((width, height), (1024, 1024));
+        assert_eq!(parse(&bytes).unwrap().format, ImageFormat::BC7RgbaUnorm);
+        // A small legacy texture must not grow just to gain a mip chain.
+        let small = root.join("small.dds");
+        fs::write(&small, encoded_source(64, 64, ImageFormat::BC3RgbaUnorm)).unwrap();
+        assert!(prepare_asset(512, &small).unwrap().is_none());
+        // Non-DDS and unsupported inputs are simply not candidates.
+        let other = root.join("other.bin");
+        fs::write(&other, b"not a texture").unwrap();
+        assert!(prepare_asset(512, &other).unwrap().is_none());
         fs::remove_dir_all(root).unwrap();
     }
 }

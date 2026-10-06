@@ -90,7 +90,11 @@ supports legacy BC1/2/3 and 32-bit BGRA/RGBA plus DX10 BC1/2/3/4/5/7 and
 R8G8B8A8/B8G8R8A8, and refuses cubemaps/arrays/volumes/BC6H. The output is lossy
 and unverified in-game, and this is not applied to installed games.
 `--texture-compress-tree MAX_DIM DIR OUTPUT_DIR` does the same for every DDS in a
-directory tree, writing only the ones that actually shrink.
+directory tree, writing only the ones that actually shrink. The same decoder and
+encoder now also back the in-place `.dds` path of the beta asset apply, so
+multi-mip, DX10 (BC1/2/3/4/5/7) and uncompressed 32-bit BGRA/RGBA textures are
+in-place candidates under the active profile; replacement still happens only when
+the rebuilt texture is smaller.
 
 For recovery after a lost lossy-run journal, the optional Python helper
 `tools/resume-library-compaction.py --state-dir ~/.local/state/bgc-live-1080p-recovery`
