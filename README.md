@@ -47,6 +47,7 @@ libraries: 1   games: 225   pending: 12   compacted: 209   compressed only: 4   
 ## Table of contents
 
 - [What it does](#what-it-does)
+- [Texture compression](#texture-compression)
 - [Quick start](#quick-start)
 - [The problem this solves](#the-problem-this-solves)
 - [Measured results](#measured-results)
@@ -83,18 +84,9 @@ Existing recovery files are not deleted or overwritten. This mode is not runtime
 validation: Steam verification/downloads may be required to restore originals,
 and unsupported formats stay untouched. Do not use it on a running game.
 
-**Export-only DDS downscale MVP:** `--texture-compress MAX_DIM FILE OUTPUT`
-downscales a bounded 2D DDS to `MAX_DIM`, rebuilds its mip chain, and writes a
-new file while preserving the source codec; the source is never modified. It
-supports legacy BC1/2/3 and 32-bit BGRA/RGBA plus DX10 BC1/2/3/4/5/7 and
-R8G8B8A8/B8G8R8A8, and refuses cubemaps/arrays/volumes/BC6H. The output is lossy
-and unverified in-game, and this is not applied to installed games.
-`--texture-compress-tree MAX_DIM DIR OUTPUT_DIR` does the same for every DDS in a
-directory tree, writing only the ones that actually shrink. The same decoder and
-encoder now also back the in-place `.dds` path of the beta asset apply, so
-multi-mip, DX10 (BC1/2/3/4/5/7) and uncompressed 32-bit BGRA/RGBA textures are
-in-place candidates under the active profile; replacement still happens only when
-the rebuilt texture is smaller.
+**Texture compression is experimental.** See
+[Texture compression](#texture-compression) for the commands, supported formats
+and honest limits.
 
 For recovery after a lost lossy-run journal, the optional Python helper
 `tools/resume-library-compaction.py --state-dir ~/.local/state/bgc-live-1080p-recovery`
@@ -118,6 +110,9 @@ allocated-reference figures are not net physical savings or playback validation.
   installed game. `--assets-verify-all` runs the real Balanced transform-candidate
   planner for all games without writing assets; it decodes candidates and may
   take substantially longer.
+- **Optionally downscales textures** (experimental, opt-in) for loose images and
+  DDS plus Godot 3/4 packed textures, preserving the codec and rebuilding mips.
+  See [Texture compression](#texture-compression).
 - **Never touches a running game**, **stops on failure**, and is **safe to interrupt**
   at any time.
 - Shows one concise progress line by default. Pass `--verbose` to list each file.
@@ -173,6 +168,55 @@ writes can affect how much storage Btrfs can release.
 The Helldivers 2 size reduction is motivation, not a promised result. Savings
 depend on each game's actual duplicate data; filesystem deduplication cannot
 restructure game assets as a developer can.
+
+## Texture compression
+
+The asset stage can downscale textures. It preserves the source codec and
+rebuilds a complete mip chain, and it only replaces a file when the rebuilt
+texture is **strictly smaller** than the original. This is experimental: the
+output is lossy and has not been validated in-game.
+
+**Export one texture (never touches the source):**
+
+```sh
+./btrfs-game-compressor --texture-compress 1920 texture.dds out/texture.dds
+```
+
+**Export a whole tree, writing only files that actually shrink:**
+
+```sh
+./btrfs-game-compressor --texture-compress-tree 1920 assets/ out/assets/
+```
+
+**Apply to an installed game (beta, opt-in):**
+
+```sh
+./btrfs-game-compressor --apply-assets "GAME"   # keeps a restorable backup
+```
+
+`--compact-all-no-backup` runs the same asset stage over the whole library with
+no restore copies. The active profile sets the resolution cap (`balanced` is
+1080p, `performance` 720p, `ultra-performance` 480p).
+
+| Format | Support |
+| --- | --- |
+| Loose images | PNG / JPEG / WebP / BMP / TGA / GIF / QOI resize |
+| Loose DDS | Legacy BC1/2/3, 32-bit BGRA/RGBA, DX10 BC1/2/3/4/5/7, R8G8B8A8/B8G8R8A8, with mip rebuild |
+| Godot 3 `.stex` | Single-level PNG / WebP |
+| Godot 4 `.ctex` | GST2 BC1/2/3/7 and raw RGBA8 / RGB8 / L8 / LA8 |
+| Refused | Cubemaps, arrays, 3D volumes, BC6H, float/HDR, and small or thin textures |
+
+Unity and Unreal packed textures have **no writer yet**. Bundled UnityFS content
+can be inventoried read-only (`--audit-container` and the native
+`unityfs-inventory`), and real Addressables bundles retain type trees, but no
+Unity texture is rewritten. Encrypted/signed packs and proprietary codecs are
+skipped.
+
+**Honest limits:** savings are logical file bytes, not measured physical Btrfs
+savings, and a game may depend on exact texture dimensions for UI or data.
+Validate one game before applying to a library. Where the big texture bytes are
+in practice is documented in `test/engine-results/`
+(`godot-texture-opportunity-2026-10-07.md`, `dds-apply-hohokum-2026-10-07.md`).
 
 ## Quick start
 
