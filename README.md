@@ -1,8 +1,10 @@
 # btrfs-game-compressor
 
-**Reduce the disk footprint of Steam games on Btrfs while keeping their files
-byte for byte intact. Actual savings depend on the game; unusually compressible
-titles can save much more than games built from compressed assets.**
+**Reduce the disk footprint of Steam games on Btrfs.** Compression and
+deduplication keep game files byte for byte intact; an optional, experimental
+texture stage can additionally downscale loose and Godot textures, which is lossy
+and not verified in-game. Actual savings depend on the game — unusually
+compressible titles can save much more than games built from compressed assets.
 
 [![CI](https://github.com/pgm1207/btrfs-game-compressor/actions/workflows/ci.yml/badge.svg)](https://github.com/pgm1207/btrfs-game-compressor/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -88,12 +90,12 @@ and unsupported formats stay untouched. Do not use it on a running game.
 [Texture compression](#texture-compression) for the commands, supported formats
 and honest limits.
 
-For recovery after a lost lossy-run journal, the optional Python helper
-`tools/resume-library-compaction.py --state-dir ~/.local/state/bgc-live-1080p-recovery`
-checkpoints lossless Zstd/dedupe stages and writes `stats.md` plus per-game logs.
-It never reapplies uncertain lossy changes, skips running games and existing
-recovery data, and resumes completed stages without repeating them. Its
-allocated-reference figures are not net physical savings or playback validation.
+The checkpointed library pass is implemented by the optional Python helper
+`tools/resume-library-compaction.py`, which `--compact-all-no-backup` invokes. It
+checkpoints every stage and game to `<state>/results.json`, writes `stats.md`
+plus per-game logs, skips running games and existing recovery data, and never
+repeats a completed stage. Its allocated-reference figures are not net physical
+savings or playback validation.
 
 - **Finds** Steam libraries on Btrfs, from `libraryfolders.vdf` and Flatpak layouts,
   plus any roots you register.
