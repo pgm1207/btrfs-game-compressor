@@ -643,4 +643,20 @@ mod tests {
         assert!(prepare_asset(512, &other).unwrap().is_none());
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn re_preparing_an_already_processed_texture_is_a_no_op() {
+        let root = std::env::temp_dir().join(format!("bgc-texture-idem-{}", stamp()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.dds");
+        fs::write(&source, encoded_source(1024, 1024, ImageFormat::BC7RgbaUnorm)).unwrap();
+        let (bytes, _, _) = prepare_asset(256, &source).unwrap().expect("large texture is a candidate");
+        let processed = root.join("processed.dds");
+        fs::write(&processed, &bytes).unwrap();
+        // A second pass at the same or a larger cap must not shrink it again.
+        assert!(prepare_asset(256, &processed).unwrap().is_none(), "second pass at the same cap must be a no-op");
+        assert!(prepare_asset(1024, &processed).unwrap().is_none(), "a larger cap must not upscale or re-shorten");
+        assert_eq!(fs::read(&processed).unwrap(), bytes, "the processed file must be unchanged");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
