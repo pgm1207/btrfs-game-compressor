@@ -30,7 +30,7 @@ impl<'a> Cursor<'a> {
 #[derive(Clone)]
 struct Block { decoded: usize, encoded: usize, flags: u16, offset: usize, size_field: usize }
 #[derive(Clone)]
-struct Node { offset: u64, size: u64, path: Vec<u8> }
+struct Node { offset: u64, size: u64, flags: u32, path: Vec<u8> }
 struct Bundle {
     version: u32, fields: usize, header_end: usize, flags: u32,
     info: Vec<u8>, blocks: Vec<Block>, nodes: Vec<Node>, decoded: u64,
@@ -115,12 +115,12 @@ fn parse(b: &[u8]) -> io::Result<Bundle> {
     for _ in 0..node_count {
         let off = i.u64()?;
         let size = i.u64()?;
-        i.u32()?; // Resource flags are preserved verbatim, not interpreted.
+        let node_flags = i.u32()?; // Retained as data; not interpreted as writer permission.
         let path = i.string()?;
         if path.len() <= 1 || off.checked_add(size).filter(|end| *end <= decoded).is_none() {
             return Err(invalid("invalid UnityFS resource extent/name"));
         }
-        nodes.push(Node { offset: off, size, path: path[..path.len() - 1].to_vec() });
+        nodes.push(Node { offset: off, size, flags: node_flags, path: path[..path.len() - 1].to_vec() });
     }
     if i.pos != info.len() { return Err(invalid("unexpected trailing UnityFS metadata")); }
     Ok(Bundle { version, fields, header_end, flags, info, blocks, nodes, decoded })
@@ -233,10 +233,12 @@ pub fn inventory(path: &Path) -> io::Result<()> {
                         summary.audio
                     );
                 }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
                 Err(_) => println!("UNITYFS_NODE|{name}|{}|opaque", node.size),
             }
         }
     }
+    super::cancelled()?;
     println!(
         "UNITYFS_TOTAL|{}|{}|{}|{}",
         bundle.nodes.len(),
@@ -249,6 +251,11 @@ pub fn inventory(path: &Path) -> io::Result<()> {
 }
 
 fn read_source(path: &Path) -> io::Result<Vec<u8>> {
+    read_source_limit(path, MAX_FILE)
+}
+
+fn read_source_limit(path: &Path, max_file: u64) -> io::Result<Vec<u8>> {
+    super::cancelled()?;
     // Belt-and-suspenders symlink refusal. The flags here used to be the
     // hardcoded 0x20000, which is O_NOFOLLOW on x86_64 but not on aarch64, so
     // an aarch64 release runner followed the link and produced a candidate.
@@ -259,14 +266,345 @@ fn read_source(path: &Path) -> io::Result<Vec<u8>> {
     }
     let mut f = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let before = f.metadata()?;
-    if !before.is_file() || before.len() > MAX_FILE { return Err(invalid("UnityFS expects a regular file up to 512 MiB")); }
-    let mut b = Vec::new(); Read::by_ref(&mut f).take(MAX_FILE + 1).read_to_end(&mut b)?;
+    if !before.is_file() || before.len() > max_file { return Err(invalid("UnityFS source exceeds its regular-file/size limit")); }
+    let mut b = Vec::new();
+    b.try_reserve_exact(before.len() as usize + 1)
+        .map_err(|_| invalid("UnityFS source allocation limit exceeded"))?;
+    let mut chunk = [0u8; 65536];
+    while b.len() as u64 <= max_file {
+        super::cancelled()?;
+        let capacity = (max_file + 1 - b.len() as u64).min(chunk.len() as u64) as usize;
+        let n = match f.read(&mut chunk[..capacity]) {
+            Ok(n) => n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => { super::cancelled()?; continue; }
+            Err(error) => return Err(error),
+        };
+        if n == 0 { break; }
+        b.try_reserve(n).map_err(|_| invalid("UnityFS source allocation limit exceeded"))?;
+        b.extend_from_slice(&chunk[..n]);
+    }
+    super::cancelled()?;
     let after = f.metadata()?;
     if b.len() as u64 != before.len() || before.len() != after.len() || before.mtime() != after.mtime()
         || before.mtime_nsec() != after.mtime_nsec() || before.ctime() != after.ctime() || before.ctime_nsec() != after.ctime_nsec() {
         return Err(invalid("UnityFS source changed during read"));
     }
     Ok(b)
+}
+
+const MAX_TEXTURE_BUNDLE: u64 = 128 * 1024 * 1024;
+const MAX_TEXTURE_NODES: usize = 4096;
+const MAX_TEXTURE_REPORT: u64 = 8 * 1024 * 1024;
+
+fn texture_bytes(t: &crate::unity_tree::Texture) -> io::Result<Option<u64>> {
+    use crate::audit_io::Layout;
+    let layout = match t.format {
+        4 | 14 => Layout::pixels(4), // RGBA32 / BGRA32
+        10 | 26 => Layout::bc(8), // DXT1 / BC4
+        12 => Layout::bc(16),
+        25 | 27 => Layout::bc(16), // BC7 / BC5
+        _ => return Ok(None),
+    };
+    let mut total = 0u64;
+    for level in 0..t.mips {
+        total = total.checked_add(layout.bytes((t.width >> level).max(1), (t.height >> level).max(1))?)
+            .ok_or_else(|| invalid("Unity texture payload size overflow"))?;
+    }
+    Ok(Some(total))
+}
+
+/// Resolve only exact same-bundle names and one explicitly constrained archive
+/// namespace. Never strip a basename, consult the host filesystem or infer that
+/// a missing companion belongs to a different bundle/player directory.
+fn stream_node<'a>(serialized: &[u8], path: &'a str) -> Option<&'a [u8]> {
+    let name = if let Some(tail) = path.strip_prefix("archive:/") {
+        let (archive, name) = tail.split_once('/')?;
+        if archive.as_bytes() != serialized { return None; }
+        name
+    } else {
+        path
+    };
+    if name.is_empty() || name.starts_with('/') || name.chars().any(|c| matches!(c, '\\' | ':'))
+        || name.split('/').any(|part| matches!(part, "" | "." | "..")) {
+        return None;
+    }
+    Some(name.as_bytes())
+}
+
+struct TextureNodeInventory {
+    node: usize,
+    inventory: crate::unity_serialized::BundleTextureInventory,
+}
+struct TextureStream {
+    node: usize,
+    id: u64,
+    target: Option<usize>,
+    offset: u64,
+    size: u64,
+    status: &'static str,
+    shape_status: &'static str,
+    expected: Option<u64>,
+    actual: u64,
+}
+
+/// Cache only the most recently decoded block. Node offsets live in the decoded
+/// bundle address space; their compressed-file offsets cannot be used directly.
+/// Budgets charge repeated decoding/copying too, not only unique payload bytes.
+struct NodeDecoder<'a> {
+    source: &'a [u8], bundle: &'a Bundle, starts: Vec<u64>,
+    cached: Option<(usize, Vec<u8>)>, decode_budget: u64, copy_budget: u64,
+}
+impl<'a> NodeDecoder<'a> {
+    fn new(source: &'a [u8], bundle: &'a Bundle) -> Self {
+        let mut starts = Vec::with_capacity(bundle.blocks.len());
+        let mut offset = 0u64;
+        for block in &bundle.blocks { starts.push(offset); offset += block.decoded as u64; }
+        Self { source, bundle, starts, cached: None,
+            decode_budget: MAX_TEXTURE_BUNDLE, copy_budget: 64 * 1024 * 1024 }
+    }
+    fn read(&mut self, start: u64, size: u64) -> io::Result<Vec<u8>> {
+        super::cancelled()?;
+        if start.checked_add(size).is_none_or(|end| end > self.bundle.decoded) {
+            return Err(invalid("Unity selected-node range exceeds decoded bundle"));
+        }
+        self.copy_budget = self.copy_budget.checked_sub(size)
+            .ok_or_else(|| crate::audit_io::budget_error("Unity selected-node aggregate copy budget exceeded"))?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(size as usize).map_err(|_| invalid("Unity selected-node allocation failed"))?;
+        if size == 0 { return Ok(out); }
+        let mut index = self.starts.partition_point(|offset| *offset <= start) - 1;
+        let mut position = start;
+        while out.len() < size as usize {
+            super::cancelled()?;
+            let block = self.bundle.blocks.get(index).ok_or_else(|| invalid("Unity selected node lacks a decoded block"))?;
+            if self.cached.as_ref().is_none_or(|(cached, _)| *cached != index) {
+                self.decode_budget = self.decode_budget.checked_sub(block.decoded as u64)
+                    .ok_or_else(|| crate::audit_io::budget_error("Unity selected-node block decode budget exceeded"))?;
+                // Drop the old buffer before requesting another up-to-64 MiB block.
+                self.cached = None;
+                let encoded = self.source.get(block.offset..block.offset + block.encoded)
+                    .ok_or_else(|| invalid("UnityFS selected block exceeds source"))?;
+                let bytes = decode(encoded, block.decoded, (block.flags & 0x3f) as u32)?;
+                self.cached = Some((index, bytes));
+            }
+            let bytes = &self.cached.as_ref().unwrap().1;
+            let local = (position - self.starts[index]) as usize;
+            let available = bytes.get(local..).ok_or_else(|| invalid("Unity selected-node block offset is invalid"))?;
+            let length = available.len().min(size as usize - out.len());
+            if length == 0 { return Err(invalid("Unity selected-node read made no progress")); }
+            out.extend_from_slice(&available[..length]);
+            position += length as u64;
+            index += 1;
+        }
+        Ok(out)
+    }
+}
+
+/// Development-only detailed bundle Texture2D storage inventory. This is a
+/// separate command from both the original node summary and recompression audit;
+/// no original output contract or installed asset writer is replaced.
+pub fn texture_inventory(path: &Path) -> io::Result<()> {
+    use std::collections::BTreeMap;
+    use crate::audit_io::field;
+    let bytes = read_source_limit(path, MAX_TEXTURE_BUNDLE)?;
+    let bundle = parse(&bytes)?;
+    if bundle.decoded > MAX_TEXTURE_BUNDLE || bundle.nodes.len() > MAX_TEXTURE_NODES {
+        return Err(invalid("Unity texture inventory exceeds its 128 MiB/4096-node work limit"));
+    }
+    let mut names = BTreeMap::<Vec<u8>, usize>::new();
+    let mut node_extents = Vec::new();
+    for (index, node) in bundle.nodes.iter().enumerate() {
+        if names.insert(node.path.clone(), index).is_some() {
+            return Err(invalid("Unity texture inventory refuses ambiguous duplicate node names"));
+        }
+        if node.size != 0 { node_extents.push((node.offset, node.offset + node.size)); }
+    }
+    node_extents.sort_unstable();
+    if node_extents.windows(2).any(|p| p[0].1 > p[1].0) {
+        return Err(invalid("Unity texture inventory refuses aliased/overlapping bundle nodes"));
+    }
+    let mut decoder = NodeDecoder::new(&bytes, &bundle);
+    let mut metadata_budget = 32u64 * 1024 * 1024;
+    let mut object_budget = 64u64 * 1024 * 1024;
+    let mut report_budget = 10000u64;
+    let mut nodes = Vec::new();
+    let mut opaque_nodes = Vec::new();
+    let mut streams = Vec::new();
+    let mut ranges = BTreeMap::<usize, Vec<(u64, u64)>>::new();
+    let (mut total_textures, mut inspected, mut inline_bytes, mut declared_stream_bytes) = (0u64, 0u64, 0u64, 0u64);
+    for (index, node) in bundle.nodes.iter().enumerate() {
+        super::cancelled()?;
+        // Directory flag 4 (1 << 2) designates SerializedFiles in this subset.
+        // Names alone never turn a resource stream into a serialized object.
+        if node.flags != 4 {
+            opaque_nodes.push((index, if node.flags == 0 { "RESOURCE_PAYLOAD_NOT_SELECTED" }
+                else { "UNKNOWN_DIRECTORY_OR_DELETED_NODE_FLAGS" }));
+            continue;
+        }
+        if node.size > 64 * 1024 * 1024 {
+            opaque_nodes.push((index, "SERIALIZED_NODE_COPY_BUDGET_SKIPPED"));
+            continue;
+        }
+        let slice = match decoder.read(node.offset, node.size) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+            Err(error) if crate::audit_io::is_budget_error(&error) => {
+                opaque_nodes.push((index, "NODE_DECODE_OR_COPY_BUDGET_SKIPPED")); continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if !crate::unity_serialized::plausible(&slice) {
+            opaque_nodes.push((index, "UNSUPPORTED_SERIALIZED_HEADER")); continue;
+        }
+        let inventory = match crate::unity_serialized::bundle_texture_inventory(&slice,
+            &mut metadata_budget, &mut object_budget, &mut report_budget) {
+            Ok(v) => v,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+            Err(error) => {
+                let status = if crate::audit_io::is_budget_error(&error) { "METADATA_BUDGET_SKIPPED" }
+                    else if error.kind() == io::ErrorKind::Unsupported { "UNSUPPORTED_METADATA_SCHEMA" }
+                    else { "INVALID_OR_UNSUPPORTED_METADATA" };
+                opaque_nodes.push((index, status)); continue;
+            }
+        };
+        total_textures = total_textures.saturating_add(inventory.textures);
+        inspected += inventory.details.len() as u64;
+        for (id, fields) in &inventory.details {
+            let texture = &fields.texture;
+            inline_bytes = inline_bytes.saturating_add(texture.inline_bytes as u64);
+            declared_stream_bytes = declared_stream_bytes.saturating_add(texture.stream_size);
+            // Mip byte formulas only describe one ordinary 2D image. Cube/array/
+            // volume or absent dimension/image-count metadata must remain opaque.
+            let shape_known = fields.image_count == Some(1) && fields.dimension == Some(2);
+            let expected = if shape_known { texture_bytes(texture)? } else { None };
+            let actual = if texture.stream_size != 0 { texture.stream_size } else { texture.inline_bytes as u64 };
+            let mut stream = TextureStream { node: index, id: *id, target: None,
+                offset: texture.stream_offset, size: texture.stream_size, status: "INLINE_METADATA_ONLY",
+                shape_status: if !shape_known { "IMAGE_DIMENSION_UNPROVEN" }
+                    else if expected.is_none() { "CODEC_LAYOUT_UNKNOWN" }
+                    else if expected == Some(actual) { "DECLARED_LENGTH_MATCHES_KNOWN_MIP_SHAPE" }
+                    else { "DECLARED_LENGTH_DIFFERS_FROM_KNOWN_MIP_SHAPE" },
+                expected, actual };
+            if texture.stream_size != 0 {
+                stream.status = "UNSUPPORTED_STREAM_NAMESPACE";
+                if let Some(name) = stream_node(&node.path, &texture.stream_path) {
+                    stream.status = "MISSING_SAME_BUNDLE_NODE";
+                    if let Some(&target) = names.get(name) {
+                        stream.target = Some(target);
+                        let target_node = &bundle.nodes[target];
+                        let end = texture.stream_offset.checked_add(texture.stream_size)
+                            .ok_or_else(|| invalid("Unity stream extent overflow"))?;
+                        if target_node.flags != 0 {
+                            stream.status = "TARGET_NODE_KIND_UNSUPPORTED";
+                        } else if end > target_node.size {
+                            stream.status = "OUT_OF_RANGE";
+                        } else {
+                            stream.status = "BOUNDS_ONLY_OWNERSHIP_UNPROVEN";
+                            ranges.entry(target).or_default().push((texture.stream_offset, end));
+                        }
+                    }
+                }
+            }
+            streams.push(stream);
+        }
+        nodes.push(TextureNodeInventory { node: index, inventory });
+    }
+    // Long node names repeat in object/field records. A row-count cap alone
+    // would permit hundreds of MiB of terminal output. This conservative upper
+    // bound charges escaped text and a numeric/record allowance before emitting
+    // anything; it is a report budget, not a claim about peak process memory.
+    let mut report_size = 4096u64;
+    let mut charge = |name: &[u8], text: usize, count: usize| -> io::Result<()> {
+        let row = (name.len() as u64).saturating_add(text as u64).saturating_mul(3).saturating_add(256);
+        report_size = report_size.saturating_add(row.saturating_mul(count as u64));
+        if report_size > MAX_TEXTURE_REPORT {
+            return Err(crate::audit_io::budget_error("Unity texture inventory report exceeds 8 MiB budget"));
+        }
+        Ok(())
+    };
+    for node in &bundle.nodes { charge(&node.path, 0, 1)?; }
+    for (index, _) in &opaque_nodes { charge(&bundle.nodes[*index].path, 0, 1)?; }
+    for item in &nodes {
+        let name = &bundle.nodes[item.node].path;
+        charge(name, 0, 3 + item.inventory.object_records.len() + item.inventory.opaque.len())?;
+        for reference in &item.inventory.external_records {
+            charge(name, reference.asset_path.len() + reference.path.len(), 1)?;
+        }
+        for (_, fields) in &item.inventory.details {
+            charge(name, fields.texture.stream_path.len(), 2)?;
+            for path in fields.spans.keys() { charge(name, path.len(), 1)?; }
+        }
+    }
+    for stream in &streams {
+        let target_length = stream.target.map(|i| bundle.nodes[i].path.len()).unwrap_or(0);
+        charge(&bundle.nodes[stream.node].path, target_length, 2)?;
+    }
+    for index in ranges.keys() { charge(&bundle.nodes[*index].path, 0, 1)?; }
+    let mut range_reports = Vec::new();
+    let mut unique_stream_bytes = 0u64;
+    for (index, extents) in &mut ranges {
+        let summary = crate::audit_io::summarize_ranges(extents)?;
+        unique_stream_bytes = unique_stream_bytes.checked_add(summary.union)
+            .ok_or_else(|| invalid("Unity bundle stream-union total overflow"))?;
+        range_reports.push((*index, extents.len(), summary));
+    }
+    super::cancelled()?;
+    println!("UNITY_BUNDLE_TEXTURE_HEADER|{}|{}|{}|{}", bundle.version, bundle.nodes.len(), nodes.len(), bundle.decoded);
+    for (index, node) in bundle.nodes.iter().enumerate() {
+        println!("UNITY_BUNDLE_NODE|{index}|{}|{}|{}|{}", field(&node.path), node.offset, node.size, node.flags);
+    }
+    for (index, status) in &opaque_nodes {
+        println!("UNITY_BUNDLE_OPAQUE_NODE|{}|{status}", field(&bundle.nodes[*index].path));
+    }
+    for item in &nodes {
+        let name = field(&bundle.nodes[item.node].path);
+        let v = &item.inventory;
+        println!("UNITY_BUNDLE_TEXTURE_NODE|{name}|{}|{}|{}|{}|{}|{}|{}", v.version,
+            u8::from(v.trees), v.textures, v.details.len(), v.opaque.len(), v.unretained, v.external);
+        println!("UNITY_BUNDLE_REFERENCE_RISK|{name}|{}|{}|{}|REFERENCES_NOT_RESOLVED", v.sprites, v.atlases, v.external);
+        println!("UNITY_BUNDLE_OBJECT_ENDIAN|{name}|{}", if v.big { "big" } else { "little" });
+        for reference in &v.external_records {
+            let guid: String = reference.guid.iter().map(|b| format!("{b:02X}")).collect();
+            println!("UNITY_BUNDLE_EXTERNAL|{name}|{}|{}|{}|{}|{}|UNRESOLVED", reference.index,
+                field(reference.asset_path.as_bytes()), guid, reference.kind, field(reference.path.as_bytes()));
+        }
+        for object in &v.object_records {
+            println!("UNITY_BUNDLE_OBJECT_SPAN|{name}|{}|{}|{}|{}|{}|{}", object.id,
+                object.type_index, object.start, object.size, object.table_start, object.table_end);
+        }
+        for (id, fields) in &v.details {
+            let t = &fields.texture;
+            println!("UNITY_BUNDLE_TEXTURE|{name}|{id}|{}|{}|{}|{}|{}|{}|{}|{}|{}", t.width,
+                t.height, t.format, crate::unity_tree::format_name(t.format), t.mips,
+                t.inline_bytes, t.stream_offset, t.stream_size, field(t.stream_path.as_bytes()));
+            println!("UNITY_BUNDLE_TEXTURE_SHAPE|{name}|{id}|{}|{}|METADATA_ONLY",
+                fields.image_count.map(|n| n.to_string()).unwrap_or_default(),
+                fields.dimension.map(|n| n.to_string()).unwrap_or_default());
+            for (path, span) in &fields.spans {
+                let (payload_offset, payload_size) = span.payload.map(|(o, n)| (o.to_string(), n.to_string()))
+                    .unwrap_or_default();
+                println!("UNITY_BUNDLE_FIELD_SPAN|{name}|{id}|{}|{}|{}|{}|{payload_offset}|{payload_size}|OBJECT_RELATIVE",
+                    field(path.as_bytes()), span.start, span.end, span.kind);
+            }
+        }
+        for (id, status) in &v.opaque { println!("UNITY_BUNDLE_OPAQUE_TEXTURE|{name}|{id}|{status}"); }
+    }
+    for stream in &streams {
+        let target = stream.target.map(|i| field(&bundle.nodes[i].path)).unwrap_or_default();
+        println!("UNITY_BUNDLE_STREAM|{}|{}|{}|{}|{}|{}", field(&bundle.nodes[stream.node].path),
+            stream.id, stream.status, target, stream.offset, stream.size);
+        println!("UNITY_BUNDLE_MIP_SHAPE|{}|{}|{}|{}|{}|PIXELS_UNDECODED", field(&bundle.nodes[stream.node].path),
+            stream.id, stream.shape_status, stream.expected.map(|n| n.to_string()).unwrap_or_default(), stream.actual);
+    }
+    for (index, count, summary) in &range_reports {
+        println!("UNITY_BUNDLE_STREAM_RANGES|{}|{}|{}|{}|{}|OWNERSHIP_UNPROVEN", field(&bundle.nodes[*index].path),
+            count, summary.union, summary.aliases, summary.overlap_groups);
+    }
+    println!("UNITY_BUNDLE_TEXTURE_TOTAL|{total_textures}|{inspected}|{inline_bytes}|{declared_stream_bytes}|{unique_stream_bytes}|METADATA_ONLY");
+    println!("UNITY_BUNDLE_TEXTURE_WORK|{}|{}|SELECTED_SERIALIZED_NODES_ONLY",
+        MAX_TEXTURE_BUNDLE - decoder.decode_budget, 64 * 1024 * 1024 - decoder.copy_budget);
+    eprintln!("Development read-only Unity bundle texture inventory: known field/mip shapes and same-bundle stream bounds only. Pixel bytes are not decoded, Sprite/mesh/external ownership is unproven, and no writer or savings claim is enabled.");
+    Ok(())
 }
 
 /// Audit performs all compression/verification in RAM, writing nothing.
@@ -385,6 +723,37 @@ mod tests {
         inventory(&input).unwrap();
         assert_eq!(fs::read(&input).unwrap(), b, "inventory must not modify the bundle");
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn selected_node_decoder_checks_bounds_and_charges_work() {
+        let bytes = fixture(8, 0x242, 2);
+        let bundle = parse(&bytes).unwrap();
+        let block = &bundle.blocks[0];
+        let expected = decode(&bytes[block.offset..block.offset + block.encoded],
+            block.decoded, (block.flags & 0x3f) as u32).unwrap();
+        let mut decoder = NodeDecoder::new(&bytes, &bundle);
+        assert_eq!(decoder.read(0, 16).unwrap(), expected[..16]);
+        assert_eq!(decoder.read(bundle.decoded - 2, 2).unwrap(), expected[expected.len() - 2..]);
+        assert!(decoder.read(bundle.decoded - 1, 2).is_err());
+        decoder.copy_budget = 1;
+        assert!(crate::audit_io::is_budget_error(&decoder.read(0, 2).unwrap_err()));
+        let mut decoder = NodeDecoder::new(&bytes, &bundle);
+        decoder.decode_budget = 0;
+        assert!(crate::audit_io::is_budget_error(&decoder.read(0, 1).unwrap_err()));
+    }
+    #[test]
+    fn known_unity_texture_formats_have_bounded_mip_shapes() {
+        for (format, expected) in [(4, 320), (14, 320), (10, 40), (12, 80),
+                                   (25, 80), (26, 40), (27, 80)] {
+            let texture = crate::unity_tree::Texture { width: 8, height: 8,
+                format, mips: 2, inline_bytes: 0, stream_offset: 0, stream_size: 0,
+                stream_path: String::new() };
+            assert_eq!(texture_bytes(&texture).unwrap(), Some(expected), "format {format}");
+        }
+        let unknown = crate::unity_tree::Texture { width: 8, height: 8,
+            format: 28, mips: 2, inline_bytes: 0, stream_offset: 0, stream_size: 0,
+            stream_path: String::new() };
+        assert_eq!(texture_bytes(&unknown).unwrap(), None); // Crunch is not ordinary BC1 data.
     }
     #[test]
     fn beneficial_export_preserves_source_and_refuses_symlinks() {

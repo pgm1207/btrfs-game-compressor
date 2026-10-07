@@ -8,6 +8,17 @@ This is a quick market/format survey, not an exhaustive catalogue of every engin
 fork, middleware or private studio tool. Scope is shipped PC/Steam game content;
 mobile/web-first tools are included where their formats could reach a PC build.
 
+The [next compatibility design](docs/ENGINE_COMPATIBILITY_NEXT.md) records the
+2026-10-07 source investigation and concrete Unity, XNB, Godot audio, Source VTF,
+GameMaker, IoStore and Ren'Py prerequisites. It is research, not additional
+validated support; initial local build and shared-I/O fixture checks are recorded
+in the development status, with format-specific validation still pending.
+Subsequent native-only reader drafts and their limits are tracked in
+[ENGINE_DEVELOPMENT_STATUS.md](docs/ENGINE_DEVELOPMENT_STATUS.md). Unchecked
+milestones below are still pending even where draft code now exists.
+Preliminary [BA2/Wwise/Defold follow-up research](docs/ENGINE_FOLLOWUP_CANDIDATES.md)
+records additional archive, reference and integrity requirements, not new support.
+
 ## What “support” means
 
 1. **Filesystem:** Native Zstd and byte-verified Btrfs dedupe are engine-independent.
@@ -19,9 +30,10 @@ mobile/web-first tools are included where their formats could reach a PC build.
 4. **Asset apply (beta):** opt-in lossy/savings-gated transforms in the main pipeline.
    Native/Lossless never degrade assets. Unknown layouts remain unchanged.
 
-**G = generic loose formats only:** supported raster images, simple legacy
-BC1/BC2/BC3 DDS and simple mono/stereo PCM/float WAV, with shared texture/audio
-policy and backups. Supported standalone FMOD FSB5 Vorbis banks are also available
+**G = generic loose formats only:** supported raster images, bounded legacy and
+DX10 DDS subsets listed in [SUPPORT.md](SUPPORT.md), and simple mono/stereo
+PCM/float WAV, with shared texture/audio policy and backups. Supported standalone
+FMOD FSB5 Vorbis banks are also available
 regardless of engine. G does **not** mean an engine's packed assets are supported.
 Loose resizing cannot always preserve implicit pixel-coordinate assumptions in
 scripts; even G needs manual visual testing. Archives are not recursively treated
@@ -78,7 +90,7 @@ codec, container layout and operation (audit/export/apply).
 
 | Format / middleware | Current | Next work |
 | --- | --- | --- |
-| Loose raster / DDS | Shared guarded beta apply (legacy BC1/2/3 only in place); export-only `--texture-compress` downscales and rebuilds mips for legacy BC1/2/3, 32-bit BGRA/RGBA, DX10 BC1/2/3/4/5/7 and R8G8B8A8/B8G8R8A8 | Wire the DX10/BC7 + mip path into the in-place apply after export validation; arrays/cubes/HDR/normal maps require explicit handling |
+| Loose raster / DDS | Shared guarded beta apply; in-place DDS and export-only `--texture-compress` use legacy BC1/2/3, 32-bit BGRA/RGBA, DX10 BC1/2/3/4/5/7 and R8G8B8A8/B8G8R8A8 with mip rebuilding | Independent format verification and runtime coverage; arrays/cubes/HDR/normal maps require explicit handling |
 | Godot BC1/2/3/7, PNG/WebP/raw | Supported subsets with original/logical size and mip rebuilding | Basis/ETC/ASTC/half-float and compressed metadata remain unsupported |
 | PCM / float WAV | Supported simple mono/stereo files, profile ceilings | Metadata-rich/looped/multichannel WAV must preserve timing/chunks before enabling |
 | FMOD FSB5 Vorbis / RIFF FEV banks | Bounded standalone beta apply/export; codebook, savings and waveform gates | Broader seek/playback fixtures, embedded stream references, other codecs; manual listening |
@@ -113,18 +125,24 @@ high-value families; **P3** deferred investigations, not scheduled commitments.
   player builds. Unknown or stripped versions never trigger trial-and-error writes.
   Note: read-only `unityfs-inventory` on real Addressables bundles found type trees
   **present** (e.g. 92 Texture2D objects in one Cocoon bundle), so bundle content
-  does not need the stripped-schema fallback; the remaining blocker for bundles is
-  container rebuild, not schema. See
+  with supported trees can proceed without a stripped-schema fallback. This is
+  sample evidence, not universal coverage: `DisableWriteTypeTree` can strip bundle
+  schemas too. Metadata tree presence does not prove field-walker compatibility.
+  Storage/reference resolution and container rebuild remain prerequisites. See
   `test/engine-results/unity-bundle-inventory-2026-10-07.md`.
 - [x] Bounded type-tree-guided Texture2D field inspection for supported node
-  layouts: dimensions, numeric format ID, mip count, inline bytes and declared
-  stream path/offset/size. Unknown trees remain opaque. Paths are never followed.
+   layouts: dimensions, numeric format ID, mip count, inline bytes and declared
+   stream path/offset/size. Unknown trees remain opaque. No stream payload is read;
+   separate path metadata checks only establish declared extent bounds.
 - [ ] Texture2D codec/dimensions/mips/stream-offset inventory, including atlases
   and shared streams. Build fixtures before enabling a writer.
   (Dimensions/format/mips/inline-vs-streamed extents, shared-stream grouping and
   same-directory bounds-checked stream resolution are inspected read-only, with
   per-format byte totals and a file-level atlas/UI risk flag;
   full SpriteAtlas reference resolution and any writer remain pending.)
+- [ ] Bundle-namespace stream ownership/alias inventory, retained external PPtr
+  references and field/object-table spans. Harden standalone stream containment
+  against intermediate symlinks before reading payloads; see the next design.
 - [ ] Export-first inline BC1/BC3/RGBA subset, complete mip chains and metadata;
   preserve alpha/color space and skip normal/data textures unless understood.
 - [ ] `.resS` relocation and all referencing objects updated together. Multi-file
@@ -173,6 +191,12 @@ high-value families; **P3** deferred investigations, not scheduled commitments.
 ### M3 — Broaden proven formats (later 0.x minors)
 
 - [ ] Godot 4 audio and missing Godot formats; broaden FMOD playback fixtures.
+- [x] Bounded uncompressed XNB v5 reader-table/root Texture2D audit and a detached
+  development export for single-mip BC textures; v4 surface IDs, compressed
+  payloads, SpriteFont/custom readers and runtime validation remain separate
+  gates. No arbitrary reader assembly execution.
+- [ ] Versioned Godot 4 AudioStreamWAV resource/loop inventory and loose PC VTF
+  resource/mip inventory. Neither reuses loose WAV/DDS container layouts blindly.
 - [ ] GameMaker texture pages, XNB, Ren'Py, RPG Maker and Source/Creation archives,
   ranked by measurable eligible bytes and format tractability, not engine hype.
 - [ ] Only then selectively investigate proprietary families. An unsupported

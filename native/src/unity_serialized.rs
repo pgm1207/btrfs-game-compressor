@@ -112,10 +112,23 @@ struct Inventory {
     engine: String, platform: i32, trees: bool, types: usize, objects: usize,
     classes: BTreeMap<i32, (u64, u64)>, external: usize,
     texture_objects: Vec<TextureObject>,
+    external_records: Vec<ExternalReference>,
 }
 #[derive(Debug)]
-struct TextureObject { id: u64, start: u64, size: u64, tree: Option<std::sync::Arc<Vec<crate::unity_tree::Node>>> }
+struct TextureObject {
+    id: u64, start: u64, size: u64, tree: Option<std::sync::Arc<Vec<crate::unity_tree::Node>>>,
+    table_start: u64, table_end: u64, type_index: usize,
+    tree_status: &'static str,
+}
+#[derive(Debug)]
+pub struct ExternalReference {
+    pub index: usize, pub asset_path: String, pub guid: [u8; 16],
+    pub kind: i32, pub path: String,
+}
 fn inventory(bytes: &[u8], h: &Header) -> io::Result<Inventory> {
+    inventory_with_references(bytes, h, false)
+}
+fn inventory_with_references(bytes: &[u8], h: &Header, retain: bool) -> io::Result<Inventory> {
     let mut c = Cursor { bytes, pos: 0, big: h.big };
     let engine = c.string(128)?;
     let platform = c.i32()?;
@@ -123,6 +136,7 @@ fn inventory(bytes: &[u8], h: &Header) -> io::Result<Inventory> {
     let ntypes = c.count()?;
     let mut types = Vec::with_capacity(ntypes.min(4096));
     let mut texture_trees = BTreeMap::new();
+    let mut tree_statuses = BTreeMap::new();
     let mut tree_nodes = 0usize;
     for i in 0..ntypes {
         let start = c.pos;
@@ -134,10 +148,20 @@ fn inventory(bytes: &[u8], h: &Header) -> io::Result<Inventory> {
             let nodes = record.count()?; let strings = record.count()?;
             let stride = if h.version >= 19 { 32 } else { 24 };
             let raw = record.take(nodes * stride)?; let text = record.take(strings)?;
-            if let Ok(tree) = crate::unity_tree::parse(raw, text, stride, h.big) {
-                if tree_nodes + tree.len() <= 32768 {
+            let status = match crate::unity_tree::parse(raw, text, stride, h.big) {
+                Ok(tree) if tree_nodes + tree.len() <= 32768 => {
                     tree_nodes += tree.len(); texture_trees.insert(i, std::sync::Arc::new(tree));
+                    "TREE_RETAINED"
                 }
+                Ok(_) => "TREE_NODE_BUDGET_SKIPPED",
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => "UNSUPPORTED_TREE_SCHEMA",
+                Err(error) if crate::audit_io::is_budget_error(&error) => "TREE_BUDGET_SKIPPED",
+                Err(_) => "INVALID_OR_UNSUPPORTED_TREE",
+            };
+            // Status retention is for the draft report only, bounded independently
+            // of a possibly large type table. Existing summaries stay unchanged.
+            if retain && tree_statuses.len() < 4096 {
+                tree_statuses.insert(i, status);
             }
         }
         types.push(class); super::cancelled()?;
@@ -148,6 +172,7 @@ fn inventory(bytes: &[u8], h: &Header) -> io::Result<Inventory> {
     let mut texture_objects = Vec::new();
     for _ in 0..objects {
         super::cancelled()?; c.align()?;
+        let table_start = h.start + c.pos as u64;
         let id = c.u64()?;
         if !ids.insert(id) { return Err(bad("duplicate Unity object path ID")); }
         let offset = if h.version == 22 { c.u64()? } else { c.u32()? as u64 };
@@ -160,7 +185,10 @@ fn inventory(bytes: &[u8], h: &Header) -> io::Result<Inventory> {
         if size > 0 { ranges.push((start, end)); }
         let totals = classes.entry(class).or_default(); totals.0 += 1; totals.1 += size;
         if class == 28 && texture_objects.len() < 10000 {
-            texture_objects.push(TextureObject { id, start, size, tree: texture_trees.get(&type_id).cloned() });
+            texture_objects.push(TextureObject { id, start, size, tree: texture_trees.get(&type_id).cloned(),
+                table_start, table_end: h.start + c.pos as u64, type_index: type_id,
+                tree_status: if !trees { "ABSENT_TYPE_TREE" }
+                    else { tree_statuses.get(&type_id).copied().unwrap_or("TREE_NOT_RETAINED_WITHIN_BUDGET") } });
         }
     }
     ranges.sort_unstable();
@@ -168,14 +196,31 @@ fn inventory(bytes: &[u8], h: &Header) -> io::Result<Inventory> {
     let scripts = c.count()?;
     for _ in 0..scripts { c.i32()?; c.align()?; c.u64()?; }
     let external = c.count()?;
-    for _ in 0..external { c.string(4096)?; c.take(16)?; c.i32()?; c.string(4096)?; }
+    let mut external_records = Vec::new();
+    let mut reference_text_budget = 1024 * 1024usize;
+    for index in 0..external {
+        super::cancelled()?;
+        let asset_path = c.string(4096)?;
+        let guid = c.take(16)?.try_into().unwrap();
+        let kind = c.i32()?;
+        let path = c.string(4096)?;
+        if retain {
+            if index >= 4096 {
+                return Err(crate::audit_io::budget_error("Unity external-reference count exceeds draft budget"));
+            }
+            reference_text_budget = reference_text_budget.checked_sub(asset_path.len() + path.len())
+                .ok_or_else(|| crate::audit_io::budget_error("Unity external-reference text exceeds draft budget"))?;
+            external_records.push(ExternalReference { index: index + 1, asset_path, guid, kind, path });
+        }
+    }
     if h.version >= 20 {
         let references = c.count()?;
         for _ in 0..references { serialized_type(&mut c, h.version, trees, true)?; super::cancelled()?; }
     }
     c.string(4096)?; // user information
     if c.bytes[c.pos..].iter().any(|b| *b != 0) { return Err(bad("unknown Unity metadata trailer")); }
-    Ok(Inventory { engine, platform, trees, types: ntypes, objects, classes, external, texture_objects })
+    Ok(Inventory { engine, platform, trees, types: ntypes, objects, classes, external,
+        texture_objects, external_records })
 }
 
 /// Resolve a metadata-declared Unity stream path against the audited file's own
@@ -195,13 +240,21 @@ fn resolve_stream(parent: &Path, stream_path: &str) -> io::Result<Option<u64>> {
         }
     }
     if relative.as_os_str().is_empty() { return Ok(None); }
-    let metadata = match fs::symlink_metadata(parent.join(&relative)) {
-        Ok(metadata) => metadata,
+    let root = match fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_DIRECTORY).open(parent) {
+        Ok(root) => root,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)) => return Ok(None),
         Err(error) => return Err(error),
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() { return Ok(None); }
-    Ok(Some(metadata.len()))
+    let companion = match crate::audit_io::open_beneath(&root, &relative) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)) => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(companion.metadata()?.len()))
 }
 
 struct StreamSummary {
@@ -274,10 +327,13 @@ pub fn audit(path: &Path) -> io::Result<()> {
         budget -= object.size;
         let mut bytes = vec![0; object.size as usize];
         file.seek(SeekFrom::Start(object.start))?; file.read_exact(&mut bytes)?;
-        if let Ok(texture) = crate::unity_tree::inspect_texture(tree, &bytes, h.big) {
-            details.push((object.id, texture));
+        match crate::unity_tree::inspect_texture(tree, &bytes, h.big) {
+            Ok(texture) => details.push((object.id, texture)),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+            Err(_) => (),
         }
     }
+    super::cancelled()?;
     let after = file.metadata()?;
     if meta.len() != after.len() || meta.mtime() != after.mtime() || meta.mtime_nsec() != after.mtime_nsec()
         || meta.ctime() != after.ctime() || meta.ctime_nsec() != after.ctime_nsec() {
@@ -297,8 +353,9 @@ pub fn audit(path: &Path) -> io::Result<()> {
     // Resolve declared streamed extents read-only. This only locates a same-tree
     // sibling and bounds-checks the declared range; it never reads payload bytes,
     // rewrites a stream, or treats metadata as a verified texture.
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     let streams = summarize_streams(parent, &details);
+    super::cancelled()?;
     for (id, status) in &streams.status { println!("UNITY_STREAM|{id}|{status}"); }
     for (stream_path, (count, bytes)) in &streams.files {
         println!("UNITY_STREAM_FILE|{stream_path}|{count}|{bytes}");
@@ -316,6 +373,7 @@ pub fn audit(path: &Path) -> io::Result<()> {
         println!("UNITY_ATLAS_RISK|{atlas}|{sprites}");
     }
     let total = v.classes.get(&28).map_or(0, |(count, _)| *count);
+    super::cancelled()?;
     println!("UNITY_TEXTURE_AUDIT|{}|{}", details.len(), total - details.len() as u64);
     eprintln!("Read-only Unity: bounded type-tree Texture2D fields are reported when supported; absent/unknown trees leave payloads opaque. Declared stream paths are resolved read-only against the same directory only to bounds-check their extent; no payload is read and no texture/audio writer is implemented.");
     Ok(())
@@ -345,9 +403,17 @@ pub fn texture_coverage(path: &Path) -> io::Result<(u64, u64)> {
         let mut object_bytes = vec![0; object.size as usize];
         file.seek(SeekFrom::Start(object.start))?;
         file.read_exact(&mut object_bytes)?;
-        if crate::unity_tree::inspect_texture(tree, &object_bytes, h.big).is_ok() {
-            readable += 1;
+        match crate::unity_tree::inspect_texture(tree, &object_bytes, h.big) {
+            Ok(_) => readable += 1,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+            Err(_) => (),
         }
+    }
+    super::cancelled()?;
+    let after = file.metadata()?;
+    if meta.len() != after.len() || meta.mtime() != after.mtime() || meta.mtime_nsec() != after.mtime_nsec()
+        || meta.ctime() != after.ctime() || meta.ctime_nsec() != after.ctime_nsec() {
+        return Err(bad("Unity source changed during coverage inventory"));
     }
     Ok((readable, total))
 }
@@ -388,6 +454,77 @@ pub fn bundle_summary(bytes: &[u8]) -> io::Result<BundleSummary> {
         sprites: sprites.0,
         audio: audio.0,
     })
+}
+
+/// Development-only object metadata inventory for a bundle node. Shared budgets
+/// apply across all nodes in a bundle, including skipped/unsupported objects.
+/// This API never resolves a host path or reads/decodes external pixel streams.
+pub struct BundleTextureInventory {
+    pub version: u32,
+    pub trees: bool,
+    pub textures: u64,
+    pub sprites: u64,
+    pub atlases: u64,
+    pub external: u64,
+    pub details: Vec<(u64, crate::unity_tree::TextureFields)>,
+    pub external_records: Vec<ExternalReference>,
+    pub object_records: Vec<TextureObjectRecord>,
+    pub big: bool,
+    pub opaque: Vec<(u64, &'static str)>,
+    pub unretained: u64,
+}
+pub struct TextureObjectRecord {
+    pub id: u64, pub start: u64, pub size: u64,
+    pub table_start: u64, pub table_end: u64, pub type_index: usize,
+}
+
+pub fn bundle_texture_inventory(bytes: &[u8], metadata_budget: &mut u64,
+    object_budget: &mut u64, report_budget: &mut u64) -> io::Result<BundleTextureInventory> {
+    let prefix = &bytes[..bytes.len().min(48)];
+    let h = header(prefix, bytes.len() as u64)?;
+    *metadata_budget = metadata_budget.checked_sub(h.metadata)
+        .ok_or_else(|| crate::audit_io::budget_error("Unity bundle aggregate metadata budget exceeded"))?;
+    let start = h.start as usize;
+    let end = start.checked_add(h.metadata as usize).ok_or_else(|| bad("Unity metadata overflow"))?;
+    let metadata = bytes.get(start..end).ok_or_else(|| bad("truncated Unity serialized node"))?;
+    let v = inventory_with_references(metadata, &h, true)?;
+    let textures = v.classes.get(&28).map_or(0, |(n, _)| *n);
+    let mut result = BundleTextureInventory { version: h.version, trees: v.trees, textures,
+        sprites: v.classes.get(&213).map_or(0, |(n, _)| *n),
+        atlases: v.classes.get(&687078895).map_or(0, |(n, _)| *n), external: v.external as u64,
+        details: Vec::new(), opaque: Vec::new(), big: h.big,
+        external_records: v.external_records, object_records: Vec::new(),
+        unretained: textures.saturating_sub(v.texture_objects.len() as u64) };
+    for object in &v.texture_objects {
+        super::cancelled()?;
+        if *report_budget == 0 { result.unretained += 1; continue; }
+        *report_budget -= 1;
+        result.object_records.push(TextureObjectRecord { id: object.id, start: object.start, size: object.size,
+            table_start: object.table_start, table_end: object.table_end, type_index: object.type_index });
+        let Some(tree) = &object.tree else {
+            result.opaque.push((object.id, object.tree_status));
+            continue;
+        };
+        if object.size > 8 * 1024 * 1024 || object.size > *object_budget {
+            result.opaque.push((object.id, "OBJECT_BUDGET_SKIPPED"));
+            continue;
+        }
+        *object_budget -= object.size;
+        let start = object.start as usize;
+        let end = start.checked_add(object.size as usize).ok_or_else(|| bad("Unity object extent overflow"))?;
+        let bytes = bytes.get(start..end).ok_or_else(|| bad("Unity object outside bundle node"))?;
+        match crate::unity_tree::inspect_texture_fields(tree, bytes, h.big) {
+            Ok(texture) => result.details.push((object.id, texture)),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+            Err(error) => {
+                let status = if crate::audit_io::is_budget_error(&error) { "OBJECT_BUDGET_SKIPPED" }
+                    else if error.kind() == io::ErrorKind::Unsupported { "UNSUPPORTED_OBJECT_SCHEMA" }
+                    else { "INVALID_OR_INCOMPLETE_OBJECT" };
+                result.opaque.push((object.id, status));
+            }
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

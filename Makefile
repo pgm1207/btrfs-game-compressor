@@ -18,7 +18,7 @@ SYSTEMDDIR  := systemd
 # referring to it earlier would silently yield an empty string and drop the
 # manpage from the release tarball.
 FILES       := $(PROG) $(MANPAGE) README.md LICENSE THIRD_PARTY.md CHANGELOG.md CONTRIBUTING.md \
-               install.sh Makefile GAMES.md SUPPORT.md ratios tools native/Cargo.toml native/Cargo.lock native/src native/vendor
+               install.sh Makefile GAMES.md SUPPORT.md ROADMAP.md SCOPE.md docs ratios tools native/Cargo.toml native/Cargo.lock native/src native/vendor
 
 .PHONY: all check test lint syntax install uninstall service service-off package \
         ratios-doc ratios-merge clean help native native-test python-test
@@ -159,7 +159,7 @@ service-off:
 package: native
 	@rm -rf dist/$(PROG)-$(VERSION)
 	@mkdir -p dist/$(PROG)-$(VERSION)
-	@cp -R $(PROG) $(MANPAGE) README.md LICENSE THIRD_PARTY.md CHANGELOG.md CONTRIBUTING.md ROADMAP.md SCOPE.md install.sh Makefile GAMES.md ratios $(TESTDIR) $(SYSTEMDDIR) $(NATIVE) dist/$(PROG)-$(VERSION)/
+	@cp -R $(PROG) $(MANPAGE) README.md LICENSE THIRD_PARTY.md CHANGELOG.md CONTRIBUTING.md SUPPORT.md ROADMAP.md SCOPE.md docs install.sh Makefile GAMES.md ratios $(TESTDIR) $(SYSTEMDDIR) $(NATIVE) dist/$(PROG)-$(VERSION)/
 	@mkdir -p dist/$(PROG)-$(VERSION)/native
 	@cp -R tools dist/$(PROG)-$(VERSION)/
 	@cp -R native/Cargo.toml native/Cargo.lock native/src native/tests native/vendor dist/$(PROG)-$(VERSION)/native/

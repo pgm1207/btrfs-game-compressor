@@ -1,10 +1,19 @@
-//! Linux Btrfs backend. No subprocesses and no third-party crates.
+//! Linux Btrfs backend and bounded asset adapters. No subprocesses; asset codecs
+//! use the dependencies listed in Cargo.toml and THIRD_PARTY.md.
 //! UAPI layouts: linux/{btrfs,fiemap,fs}.h. Only 64-bit Linux is supported.
 mod assets;
 mod packages;
 mod fmod;
 mod variants;
 mod xnb;
+mod audit_io;
+mod development_audits;
+#[cfg(feature = "development-audits")]
+mod vtf;
+#[cfg(feature = "development-audits")]
+mod vpk;
+#[cfg(feature = "development-audits")]
+mod gamemaker;
 mod texture;
 mod engines;
 mod unityfs;
@@ -13,11 +22,15 @@ mod unity_tree;
 mod unreal_legacy;
 mod unreal_modern;
 mod unreal_iostore;
+#[cfg(feature = "development-audits")]
+mod iostore_index;
 mod containers;
 mod gst2;
 mod texture_policy;
 mod audio_policy;
 mod godot3;
+#[cfg(feature = "development-audits")]
+mod godot4_audio;
 mod gdst;
 mod md5;
 #[cfg(not(all(
@@ -812,6 +825,7 @@ fn run() -> io::Result<()> {
         return Ok(());
     }
     let command = args.first().and_then(|s| s.to_str()).unwrap_or("");
+    if let Some(result) = development_audits::dispatch(&args) { return result; }
     if (command == "prune-plan" || command == "prune-apply") && args.len() >= 2 {
         let (debug, rels) = prune_args(&args[2..])?;
         return if command == "prune-plan" {

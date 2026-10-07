@@ -112,6 +112,19 @@ savings or playback validation.
   installed game. `--assets-verify-all` runs the real Balanced transform-candidate
   planner for all games without writing assets; it decodes candidates and may
   take substantially longer.
+- For a reproducible, sortable read-only scan, save `--status --json` and run
+  `python3 tools/asset-opportunity-report.py --status-json status.json --backend
+  ./bgc-native --output-dir report`. The report keeps a hash-identified backend
+  copy, records individual failures, and ranks estimated **logical** savings.
+  It checkpoints each game; pass `--resume` with the same inputs after an
+  interruption, or choose a new output directory for a fresh scan.
+  It separately audits supported Godot 4 PCK textures because the ordinary
+  planner counts those packs without predicting their reduction. Godot 3 PCK
+  reductions are still unestimated. Neither estimate is physical space freed or
+  game compatibility evidence.
+  An optional `--xnb-backend /path/to/development/bgc-native --xnb-max-edge 1024`
+  adds a separate, theoretical XNB v5 BC texture section. It requires a local
+  `development-audits` build and does not add those bytes to the planner total.
 - **Optionally downscales textures** (experimental, opt-in) for loose images and
   DDS plus Godot 3/4 packed textures, preserving the codec and rebuilding mips.
   See [Texture compression](#texture-compression).
@@ -210,8 +223,14 @@ no restore copies. The active profile sets the resolution cap (`balanced` is
 
 Unity and Unreal packed textures have **no writer yet**. Bundled UnityFS content
 can be inventoried read-only with the native `unityfs-inventory` command (while
-`--audit-container` reports a bundle's LZ4 recompression potential), and real
-Addressables bundles retain type trees, but no Unity texture is rewritten.
+`--audit-container` reports a bundle's LZ4 recompression potential). Type trees
+were present in sampled Addressables bundles; other bundles can omit them.
+The bundle inventory reports metadata, not decoded textures, and no Unity texture
+is rewritten. The [next compatibility design](docs/ENGINE_COMPATIBILITY_NEXT.md)
+details the prerequisites; it is research, not new supported formats.
+Local native-only reader drafts and their limited validation status are documented
+in [engine development status](docs/ENGINE_DEVELOPMENT_STATUS.md); they enable no
+new optimization routes or supported formats.
 Encrypted/signed packs and proprietary codecs are skipped.
 
 **Honest limits:** savings are logical file bytes, not measured physical Btrfs
@@ -572,6 +591,15 @@ enabled for automatic installed-file replacement**:
   FMOD banks and safely tested a disposable `Sounds.bank` export. No installed
   content was changed and no in-game compatibility is claimed; see
   [the Carrion trial record](test/engine-results/carrion-steam-trial-2026-10-03.md).
+- **Local XNB development trial:** a feature-gated, detached v5 Texture2D export
+  resized seven copied Carrion artbook/comic pages from 2048 to 1024 pixels,
+  saving 14,155,776 logical bytes in that sample. The BC1 path retains its
+  one-bit alpha mask. An independent parser checked structures, and Pillow
+  decoded and compared pixels. Scratch Btrfs copies used 14,155,776 fewer
+  allocated bytes; game compatibility and installed-game savings remain
+  unverified. This command is
+  absent from normal builds and the installed asset pipeline; see
+  [the XNB export trial](test/engine-results/carrion-xnb-export-2026-10-07.md).
 - **Steam-library Godot Balanced (1080p) copy trial:** exercised the actual
   `assets apply balanced` pipeline on ten disposable installed-game copies
   across Godot PCK v1/v2/v3/v4. Nine were accepted and audited; eligible packs
@@ -842,8 +870,9 @@ library has to be predictable:
   Steam verification results.
 - **The optional experimental texture/asset stage can reduce quality or affect
   compatibility.** It resizes supported loose images and DDS (including DX10
-  BC1-7 with mip rebuild) and Godot 3/4 packed textures, and reduces simple WAV
-  audio. Unity and Unreal packed textures have **no writer** and are left
+  BC1/2/3/4/5/7 with mip rebuild; BC6H is unsupported) and Godot 3/4 packed
+  textures, and reduces simple WAV audio. Unity and Unreal packed textures have
+  **no writer** and are left
   untouched. Native is the default; backups remain until you test the game and
   finalize, and the texture stage is not verified in-game.
 - **It does not promise faster games.** The measured benefit is disk space. Load

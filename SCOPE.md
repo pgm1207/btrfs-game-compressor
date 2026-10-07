@@ -112,14 +112,23 @@ payloads stay opaque. IoStore TOC v1–8 headers expose counts, security flags,
 minimum extents and metadata-only regular companions, not chunk tables,
 signatures, directory contents or `.ucas` data.
 A bounded Unity SerializedFile v17–22 audit reports version/type-tree/class
-evidence and supported type-tree Texture2D fields without following stream paths.
+evidence and supported type-tree Texture2D fields. Declared stream paths receive
+metadata-only same-directory extent checks, not pixel reads or ownership proof.
 A read-only `unityfs-inventory` decodes a UnityFS bundle in memory and summarizes
-its SerializedFile nodes; real Addressables bundles retain type trees, so bundled
-Texture2D metadata is available even though standalone player builds are stripped.
-No Unity writer is enabled; the remaining bundle work is container rebuild
-(`.resS` relocation, object-table shifts, CRC/catalog integrity).
-`--audit-container` exposes these investigations. Audit,
-export and apply are distinct capability levels in the roadmap.
+its SerializedFile nodes. Type trees were present in sampled Addressables bundles
+and absent in sampled standalone player files; bundles can also omit trees.
+This pass counts Texture2D objects but does not inspect their pixels or stream
+ownership. No Unity writer is enabled; schema/field-span handling, reference and
+storage resolution, and container rebuild (`.resS` relocation, object-table
+shifts, CRC/catalog integrity) remain prerequisites. See
+[the next compatibility design](docs/ENGINE_COMPATIBILITY_NEXT.md) for the
+research and draft implementation sequence. Native-only unvalidated reader work
+for these and additional formats is tracked separately in
+[engine development status](docs/ENGINE_DEVELOPMENT_STATUS.md); no draft promotes
+tested support or adds an installed writer.
+`--audit-container` exposes the existing content-detected audits; detailed bundle
+node inventory is currently native-only via `unityfs-inventory`. Audit, export
+and apply are distinct capability levels in the roadmap.
 See `test/ENGINE_EXPERIMENTS.md` for reproducible negative results and current
 resource bottlenecks; logical improvements alone are not physical savings.
 

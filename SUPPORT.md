@@ -62,12 +62,32 @@ restore copy and is irreversible except through Steam verification.
 | XNB v4–6 | Signature/header; no payload parsing | `test/engine-results/steam-library-asset-coverage-2026-10-04.md` |
 | AWB/UE-style `.pak`, RE `.pak` | Inventory only | `test/engine-results/steam-library-asset-coverage-2026-10-04.md` |
 
+Previously tested Unity stream resolution checks declared relative paths, final-file
+symlinks and extent bounds using metadata only. It does **not** establish
+race-resistant containment through intermediate directories, range ownership or
+pixel validity. Bundle tree presence and serialized object-byte counts are also
+metadata evidence, not verified texture coverage. The
+[next compatibility design](docs/ENGINE_COMPATIBILITY_NEXT.md) describes the
+remaining Unity and other engine work; it does not promote support levels.
+The local source contains an unvalidated component-wise `openat` hardening draft;
+no new containment guarantee is claimed until its deferred validation passes.
+
 ## Unsupported — byte-for-byte untouched
+
+**Local development note:** native-only readers for XNB textures, VTF/VPK,
+GameMaker FORM, Godot 4 audio, richer Unity bundle fields/references and IoStore
+addressing have isolated build, fixture and selected copied-file checks. A
+bounded XNB v5 Texture2D **detached lossy exporter** is also available in local
+`development-audits` builds. It has no installed apply route or runtime
+compatibility claim. These routes are disabled in normal builds, are not
+automatic, and are not included in the tested support table.
+See [draft status and limits](docs/ENGINE_DEVELOPMENT_STATUS.md).
 
 These are the honest gaps. The tool detects and skips them; it does not guess.
 
 - **Unity**: packed Texture2D/`.resS` rewriting, SpriteAtlas/UI protection,
-  bundle/catalog integrity re-signing, embedded AudioClip rewrite.
+  bundle/catalog integrity rebuilding, embedded AudioClip rewrite. Signed/custom
+  integrity checks remain blockers, not something the tool can generically re-sign.
 - **Unreal**: **all** cooked `.uasset`/`.uexp`/`.ubulk` texture and SoundWave
   rewriting, Pak/IoStore repacking, chunk/block decoding, virtual textures,
   cubes/arrays, normals/HDR.

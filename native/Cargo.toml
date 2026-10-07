@@ -5,6 +5,12 @@ edition = "2021"
 rust-version = "1.89"
 license = "MIT"
 
+[features]
+default = []
+# Source-only metadata reader drafts. Keep out of normal/release command routes
+# until their separate validation and support-promotion gates are completed.
+development-audits = []
+
 [dependencies]
 image = { version = "=0.25.8", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tga", "pnm", "qoi", "gif", "dds"] }
 image_dds = { version = "=0.7.2", default-features = false, features = ["image", "encode"] }

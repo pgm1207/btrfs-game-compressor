@@ -38,16 +38,16 @@ UNITYFS_TOTAL|2|1|92|21204
 
 ## Key finding
 
-Bundled Unity content (Addressables/asset bundles) **retains type trees**, unlike
-the stripped standalone player builds sampled earlier. That means Texture2D
-dimensions, format and mip data are **readable in bundles**, where the texture
-bytes actually live. This materially changes the Unity outlook:
+The **sampled** bundled Unity content retains type trees, unlike the stripped
+standalone player builds sampled earlier. This makes type-tree-guided Texture2D
+inspection a promising next step, but this metadata-only inventory did not inspect
+dimension/format/mip fields or decode pixel payloads. This changes the Unity outlook:
 
-- A Unity Texture2D writer no longer depends on a stripped-schema fallback for
-  bundle content; it depends on bundle node/block rebuild and `.resS` relocation.
-- The remaining hard parts are container-side: rebuilding SerializedFile object
-  tables and `.resS` stream offsets together, and keeping bundle CRC/hash/catalog
-  consistency.
+- Bundles with supported readable trees can avoid a stripped-schema fallback;
+  bundle node/block rebuild and `.resS` relocation still need implementation.
+- The remaining work includes readable object schemas and field spans, reference
+  and stream ownership, rebuilding SerializedFile object tables and `.resS`
+  offsets together, and keeping bundle CRC/hash/catalog consistency.
 
 ## Honest caveats
 
@@ -55,3 +55,10 @@ bytes actually live. This materially changes the Unity outlook:
   and the `.resS` extents are not validated here.
 - No writer exists. Listing a Texture2D is not permission to rewrite it.
 - No in-game playtest was performed.
+
+### Research clarification — 2026-10-07 (no new validation)
+
+Unity permits `BuildAssetBundleOptions.DisableWriteTypeTree`; tree presence is
+not universal. The reported texture byte totals are serialized object sizes,
+not external pixel bytes. See [the next compatibility design](../../docs/ENGINE_COMPATIBILITY_NEXT.md)
+for stream ownership, schema, reference and integrity prerequisites.

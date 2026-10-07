@@ -63,6 +63,16 @@ texture/audio rewriting. Synchronize script, Cargo package/lock and manpage
 versions at release boundaries. A `v*` tag publishes release archives through CI;
 ordinary commits do not constitute a tagged release.
 
+Unvalidated engine metadata reader drafts are separately tracked in
+[docs/ENGINE_DEVELOPMENT_STATUS.md](docs/ENGINE_DEVELOPMENT_STATUS.md). Their
+native-only routes require the `development-audits` Cargo feature, off by default;
+enabling it is not support certification. A detached XNB exporter exists behind
+that feature, but it has no installed apply route. Do not enable
+it in normal packaging or auto-route its readers until validation passes. When
+validation is authorized, exercise both feature states without replacing a live
+or frozen compaction backend. If tests/builds are paused, keep drafts local and
+do not push changes that would trigger CI.
+
 Non-interactive modes are the easiest place to add value, because they are
 testable. If you add a flag, wire it through `parse_args`, add a `cmd_*`
 function, document it in `usage()`, add a case to `test/smoke.sh`, and add a row
