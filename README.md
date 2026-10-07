@@ -1628,6 +1628,18 @@ uninstall](#install-update-uninstall).
 pending and is retried next time; a game is only recorded once the `btrfs` call
 succeeds.
 
+**A texture looks wrong after the asset stage.** The texture stage is lossy and is
+not verified in-game. If you applied with `--apply-assets` (backups kept), restore
+with `btrfs-game-compressor --restore-assets "GAME"`. With `--compact-all-no-backup`
+or the native `apply-no-backup` there is no restore copy: use Steam's "Verify
+integrity of game files" to fetch the originals.
+
+**Which games can use texture compression?** Run the read-only planner,
+`btrfs-game-compressor --assets "GAME"`. It reports candidate logical bytes;
+small sprites, thin textures and unsupported packed formats (Unity, Unreal) are
+left untouched. The biggest supported wins in a typical library are Godot 4
+`.ctex`; see [Texture compression](#texture-compression).
+
 ## Caveats
 
 - **Compression is applied per extent at write time.** `btrfs filesystem defragment
