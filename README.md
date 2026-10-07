@@ -840,9 +840,12 @@ library has to be predictable:
 - **Compression and deduplication do not touch saves, mods or Proton prefixes.**
   They preserve bytes under `steamapps/common`, so those operations do not alter
   Steam verification results.
-- **The optional [BETA] asset stage can reduce quality or affect compatibility.**
-  It can resize supported loose images/DDS and reduce simple WAV audio; Native is
-  the default. Backups remain until you test the game and choose to finalize.
+- **The optional experimental texture/asset stage can reduce quality or affect
+  compatibility.** It resizes supported loose images and DDS (including DX10
+  BC1-7 with mip rebuild) and Godot 3/4 packed textures, and reduces simple WAV
+  audio. Unity and Unreal packed textures have **no writer** and are left
+  untouched. Native is the default; backups remain until you test the game and
+  finalize, and the texture stage is not verified in-game.
 - **It does not promise faster games.** The measured benefit is disk space. Load
   times and frame rates depend on the game, storage device, and CPU.
 - **It does not run unattended.** No background daemon rewrites a library. The optional
@@ -1634,6 +1637,11 @@ succeeds.
   mount has `compress=zstd`.
 - **It cannot make a game smaller than its compressed assets allow.** Already-optimal
   archives will barely move.
+- **Experimental texture downscaling is lossy and unverified in-game.** It only
+  replaces a texture when the rebuilt file is strictly smaller, preserves the
+  source codec and rebuilds mips, and refuses small/thin textures, cubemaps,
+  arrays, volumes, BC6H and float formats. A game may still rely on exact texture
+  dimensions for UI or data. Unity and Unreal packed textures are untouched.
 - **Expect a full disk read+write per game.** On a mechanical drive this is slow; on
   NVMe it is minutes for a whole library. Interrupting with `Ctrl+C` is safe — the game
   stays marked pending and is retried next time.

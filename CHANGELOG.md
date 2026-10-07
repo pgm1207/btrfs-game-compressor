@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — Unreleased — Texture compression MVP and Unity bundle inventory
 
 - Add an export-only DDS texture compressor: `--texture-compress MAX_DIM FILE
   OUTPUT` (native `texture-compress`) downscales the base mip of a bounded 2D DDS
