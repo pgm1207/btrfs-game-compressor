@@ -1,7 +1,9 @@
 # Engine support and roadmap 
 
-Status: **2026-10-05**, release **0.2.1**. Engine asset writers remain beta and
-are expanded engine by engine; see [SUPPORT.md](SUPPORT.md) for what is tested.
+Status: **2026-10-07**, release **0.2.1**; **0.3.0 unreleased** adds the texture
+compression MVP and the read-only UnityFS bundle inventory. Engine asset writers
+remain beta and are expanded engine by engine; see [SUPPORT.md](SUPPORT.md) for
+what is tested.
 This is a quick market/format survey, not an exhaustive catalogue of every engine,
 fork, middleware or private studio tool. Scope is shipped PC/Steam game content;
 mobile/web-first tools are included where their formats could reach a PC build.

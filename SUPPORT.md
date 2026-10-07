@@ -1,7 +1,7 @@
 # Tested format support and honest coverage gaps
 
-Status: **0.2.1** (2026-10-05). This page is the contract for what the tool has
-actually been tested to do. If a format or engine is not listed here as
+Status: **0.3.0 unreleased** (2026-10-07); **0.2.1** is the current release. This
+page describes the development tree. If a format or engine is not listed here as
 **Stable** or **Beta**, treat it as unsupported. [ROADMAP.md](ROADMAP.md) is the
 plan; this file is the evidence-based present.
 
