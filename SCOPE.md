@@ -74,9 +74,12 @@ optional [BETA] asset stage follows compression and precedes final deduplication
 Native is byte-preserving and Lossless never degrades assets. Lossy profiles are
 explicitly selected and unknown formats are skipped, without per-game recipes.
 
-Implemented beta paths include supported loose images/simple legacy BC1/BC2/BC3
-DDS, simple mono/stereo PCM/float WAV, Hades v7 same-codec lossless LZ4 PKG, plain
-standalone Godot 3 PCK audio/GDST textures and supported Godot 4 PCK GST2 textures.
+Implemented beta paths include supported loose images and DDS (legacy BC1/2/3 and
+32-bit BGRA/RGBA, plus DX10 BC1/2/3/4/5/7 and R8G8B8A8/B8G8R8A8, decoded and
+re-encoded with a rebuilt mip chain), simple mono/stereo PCM/float WAV, Hades v7
+same-codec lossless LZ4 PKG, plain standalone Godot 3 PCK audio/GDST textures and
+supported Godot 4 PCK GST2 textures, and an export-only texture downscaler
+(`--texture-compress`, `--texture-compress-tree`).
 Texture policy preserves small/thin and known-atlas assets, uses soft profile caps
 with an original/logical half-size budget, and retains at least 7-bit explicit RGB
 precision. Audio quality follows the asset profile, not the Zstd level. WAV is not
@@ -110,7 +113,11 @@ minimum extents and metadata-only regular companions, not chunk tables,
 signatures, directory contents or `.ucas` data.
 A bounded Unity SerializedFile v17–22 audit reports version/type-tree/class
 evidence and supported type-tree Texture2D fields without following stream paths.
-Stripped schemas still need explicit resolution; no writer is enabled.
+A read-only `unityfs-inventory` decodes a UnityFS bundle in memory and summarizes
+its SerializedFile nodes; real Addressables bundles retain type trees, so bundled
+Texture2D metadata is available even though standalone player builds are stripped.
+No Unity writer is enabled; the remaining bundle work is container rebuild
+(`.resS` relocation, object-table shifts, CRC/catalog integrity).
 `--audit-container` exposes these investigations. Audit,
 export and apply are distinct capability levels in the roadmap.
 See `test/ENGINE_EXPERIMENTS.md` for reproducible negative results and current
