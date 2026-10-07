@@ -352,6 +352,44 @@ pub fn texture_coverage(path: &Path) -> io::Result<(u64, u64)> {
     Ok((readable, total))
 }
 
+/// Bounded summary of one SerializedFile held in memory (for example a node
+/// inside a UnityFS bundle). Reads metadata only; object payloads stay opaque.
+pub struct BundleSummary {
+    pub version: u32,
+    pub objects: u64,
+    pub trees: bool,
+    pub external: u64,
+    pub textures: u64,
+    pub texture_bytes: u64,
+    pub sprites: u64,
+    pub audio: u64,
+}
+
+pub fn bundle_summary(bytes: &[u8]) -> io::Result<BundleSummary> {
+    if bytes.len() < 20 {
+        return Err(bad("short Unity serialized node"));
+    }
+    let prefix = &bytes[..bytes.len().min(48)];
+    let header = header(prefix, bytes.len() as u64)?;
+    let start = header.start as usize;
+    let end = start.checked_add(header.metadata as usize).ok_or_else(|| bad("Unity metadata overflow"))?;
+    let metadata = bytes.get(start..end).ok_or_else(|| bad("truncated Unity serialized node"))?;
+    let inventory = inventory(metadata, &header)?;
+    let textures = inventory.classes.get(&28).copied().unwrap_or((0, 0));
+    let sprites = inventory.classes.get(&213).copied().unwrap_or((0, 0));
+    let audio = inventory.classes.get(&83).copied().unwrap_or((0, 0));
+    Ok(BundleSummary {
+        version: header.version,
+        objects: inventory.objects as u64,
+        trees: inventory.trees,
+        external: inventory.external as u64,
+        textures: textures.0,
+        texture_bytes: textures.1,
+        sprites: sprites.0,
+        audio: audio.0,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,6 +498,8 @@ mod tests {
             .set_len(texture.stream_offset + texture.stream_size).unwrap();
         audit(&path).unwrap(); assert_eq!(fs::read(&path).unwrap(), bytes);
         assert_eq!(fs::metadata(&companion).unwrap().len(), texture.stream_offset + texture.stream_size);
+        let summary = bundle_summary(&bytes).unwrap();
+        assert_eq!((summary.version, summary.textures), (22, 1));
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

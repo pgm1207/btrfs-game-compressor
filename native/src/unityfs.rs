@@ -29,9 +29,11 @@ impl<'a> Cursor<'a> {
 
 #[derive(Clone)]
 struct Block { decoded: usize, encoded: usize, flags: u16, offset: usize, size_field: usize }
+#[derive(Clone)]
+struct Node { offset: u64, size: u64, path: Vec<u8> }
 struct Bundle {
     version: u32, fields: usize, header_end: usize, flags: u32,
-    info: Vec<u8>, blocks: Vec<Block>, nodes: usize, decoded: u64,
+    info: Vec<u8>, blocks: Vec<Block>, nodes: Vec<Node>, decoded: u64,
 }
 fn align(n: usize) -> io::Result<usize> {
     Ok(n.checked_add(15).ok_or_else(|| invalid("UnityFS alignment overflow"))? & !15)
@@ -107,9 +109,10 @@ fn parse(b: &[u8]) -> io::Result<Bundle> {
     }
     let data_end = if at_end { info_start } else { b.len() };
     if offset != data_end { return Err(invalid("UnityFS block extents do not exactly cover data region")); }
-    let nodes = i.u32()? as usize;
-    if nodes == 0 || nodes > 65536 || nodes > (info.len() - i.pos) / 21 { return Err(invalid("invalid UnityFS node count")); }
-    for _ in 0..nodes {
+    let node_count = i.u32()? as usize;
+    if node_count == 0 || node_count > 65536 || node_count > (info.len() - i.pos) / 21 { return Err(invalid("invalid UnityFS node count")); }
+    let mut nodes = Vec::with_capacity(node_count);
+    for _ in 0..node_count {
         let off = i.u64()?;
         let size = i.u64()?;
         i.u32()?; // Resource flags are preserved verbatim, not interpreted.
@@ -117,6 +120,7 @@ fn parse(b: &[u8]) -> io::Result<Bundle> {
         if path.len() <= 1 || off.checked_add(size).filter(|end| *end <= decoded).is_none() {
             return Err(invalid("invalid UnityFS resource extent/name"));
         }
+        nodes.push(Node { offset: off, size, path: path[..path.len() - 1].to_vec() });
     }
     if i.pos != info.len() { return Err(invalid("unexpected trailing UnityFS metadata")); }
     Ok(Bundle { version, fields, header_end, flags, info, blocks, nodes, decoded })
@@ -174,6 +178,76 @@ fn rebuild(b: &[u8]) -> io::Result<(Vec<u8>, usize, Bundle)> {
     Ok((out, changed, bundle))
 }
 
+/// Read-only inventory of a UnityFS bundle: decode the blocks in memory and
+/// summarize each SerializedFile node (version, object and class counts). Streams
+/// (`*.resS`), resource files and opaque nodes are listed by kind. Nothing is
+/// written and no writer is implied.
+pub fn inventory(path: &Path) -> io::Result<()> {
+    let bytes = read_source(path)?;
+    let bundle = parse(&bytes)?;
+    let mut decoded = Vec::new();
+    for block in &bundle.blocks {
+        super::cancelled()?;
+        let source = bytes
+            .get(block.offset..block.offset + block.encoded)
+            .ok_or_else(|| invalid("UnityFS block outside file"))?;
+        decoded.extend_from_slice(&decode(source, block.decoded, (block.flags & 0x3f) as u32)?);
+    }
+    if decoded.len() as u64 != bundle.decoded {
+        return Err(invalid("UnityFS decoded length mismatch"));
+    }
+    println!(
+        "UNITYFS_BUNDLE|{}|{}|{}|{}",
+        bundle.version,
+        bundle.flags,
+        bundle.nodes.len(),
+        bundle.decoded
+    );
+    let (mut serialized, mut textures, mut texture_bytes) = (0u64, 0u64, 0u64);
+    for node in &bundle.nodes {
+        let start = node.offset as usize;
+        let end = start
+            .checked_add(node.size as usize)
+            .ok_or_else(|| invalid("UnityFS node extent overflow"))?;
+        let slice = decoded.get(start..end).ok_or_else(|| invalid("UnityFS node outside decoded data"))?;
+        let name = String::from_utf8_lossy(&node.path);
+        if node.path.ends_with(b".resS") {
+            println!("UNITYFS_NODE|{name}|{}|stream", node.size);
+        } else if node.path.ends_with(b".resource") {
+            println!("UNITYFS_NODE|{name}|{}|resource", node.size);
+        } else {
+            match crate::unity_serialized::bundle_summary(slice) {
+                Ok(summary) => {
+                    serialized += 1;
+                    textures += summary.textures;
+                    texture_bytes = texture_bytes.saturating_add(summary.texture_bytes);
+                    println!(
+                        "UNITYFS_NODE|{name}|{}|serialized|{}|{}|{}|{}|{}|{}|{}",
+                        node.size,
+                        summary.version,
+                        summary.objects,
+                        u8::from(summary.trees),
+                        summary.textures,
+                        summary.texture_bytes,
+                        summary.sprites,
+                        summary.audio
+                    );
+                }
+                Err(_) => println!("UNITYFS_NODE|{name}|{}|opaque", node.size),
+            }
+        }
+    }
+    println!(
+        "UNITYFS_TOTAL|{}|{}|{}|{}",
+        bundle.nodes.len(),
+        serialized,
+        textures,
+        texture_bytes
+    );
+    eprintln!("Read-only UnityFS bundle inventory: blocks are decoded in memory and SerializedFiles are summarized by metadata; object payloads stay opaque and no writer is implied.");
+    Ok(())
+}
+
 fn read_source(path: &Path) -> io::Result<Vec<u8>> {
     // Belt-and-suspenders symlink refusal. The flags here used to be the
     // hardcoded 0x20000, which is O_NOFOLLOW on x86_64 but not on aarch64, so
@@ -224,7 +298,7 @@ pub fn run(input: &Path, output: Option<&Path>, min_efficiency: f64) -> io::Resu
         "EXPORTED"
     } else { "CANDIDATE" };
     println!("UNITYFS|{}|{}|{}|{}|{}|{}|{:.4}|{:.6}|{}", source.len(), candidate.len(), bundle.decoded,
-        bundle.blocks.len(), changed, bundle.nodes, efficiency, start.elapsed().as_secs_f64(), status);
+        bundle.blocks.len(), changed, bundle.nodes.len(), efficiency, start.elapsed().as_secs_f64(), status);
     eprintln!("Lossless UnityFS analysis: source unchanged. Logical savings only; physical savings and game/catalog CRC compatibility require separate validation.");
     Ok(())
 }
@@ -300,6 +374,17 @@ mod tests {
         assert!(run(&input, Some(&input), 0.0).is_err());
         let skipped = root.join("skipped"); run(&input, Some(&skipped), 100.0).unwrap(); assert!(!skipped.exists());
         assert_eq!(fs::read(&input).unwrap(), b); fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn bundle_inventory_is_read_only_and_lists_nodes() {
+        let root = std::env::temp_dir().join(format!("bgc-unityfs-inv-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&root).unwrap();
+        let input = root.join("bundle");
+        let b = fixture(8, 0x242, 2);
+        fs::write(&input, &b).unwrap();
+        inventory(&input).unwrap();
+        assert_eq!(fs::read(&input).unwrap(), b, "inventory must not modify the bundle");
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn beneficial_export_preserves_source_and_refuses_symlinks() {

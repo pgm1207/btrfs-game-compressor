@@ -27,6 +27,13 @@
   this library are mostly small single-mip WebP sprites the policy correctly
   refuses to downscale; multi-mip `.stex` remain skipped. The large supported
   wins are Godot 4 `.ctex` (see `test/engine-results/godot-texture-opportunity-2026-10-07.md`).
+- Add a read-only `unityfs-inventory` command: decode a UnityFS bundle in memory,
+  classify each node (SerializedFile, `.resS` stream, `.resource`, opaque) and
+  summarize the SerializedFiles. Real Addressables bundles report **type trees
+  present** with readable Texture2D objects, unlike stripped standalone player
+  builds, so Texture2D metadata is available where the texture bytes live. No
+  payload is rewritten and no writer exists yet
+  (`test/engine-results/unity-bundle-inventory-2026-10-07.md`).
 - Unity read-only audit now resolves declared Texture2D stream paths against the
   audited file's own directory and bounds-checks `offset .. offset+size` without
   reading payload bytes. Absolute paths, `..` traversal, symlinks and

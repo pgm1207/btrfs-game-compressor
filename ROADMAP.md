@@ -36,7 +36,7 @@ of compatible rewriting across an entire engine family.
 | --- | --- | --- | --- | --- |
 | **Godot 3.x** | GDPC signature; PCK v1 directory/resources | Beta apply/export for supported GDST `.stex`; atlas/small/thin guards | PCK MP3-resource → Vorbis, supported PCM; PCK dedup export | More import/resource variants and reference-aware protection; P1 |
 | **Godot 4.x** | Plain PCK v2–4 audit; GST2 inventory | Beta apply/export for supported GST2 in standalone PCK v3/v4; reliable logical size required | Packed audio not implemented; PCK dedup export | AudioStreamWAV/Vorbis packet resources, QOA, embedded packs, unsupported texture codecs; P1 |
-| **Unity legacy / 2017–2022 LTS / Unity 6** | Player/layout markers; UnityFS audit; standalone SerializedFile v17–22 metadata and supported type-tree Texture2D fields | G only; **no SerializedFile Texture2D writer** | UnityFS v6–8 same-codec LZ4/HC **export only**; embedded AudioClip streams not rewritten | Stripped schemas, `.resS`/`.resource` resolution, SpriteAtlas/UI protection, bundle/catalog integrity; **P0** |
+| **Unity legacy / 2017–2022 LTS / Unity 6** | Player/layout markers; UnityFS audit and read-only bundle node/SerializedFile inventory; standalone SerializedFile v17–22 metadata and supported type-tree Texture2D fields | G only; **no SerializedFile Texture2D writer** | UnityFS v6–8 same-codec LZ4/HC **export only**; embedded AudioClip streams not rewritten | Bundle node/block rebuild with `.resS` relocation and object-table shifts, SpriteAtlas/UI protection, catalog/CRC integrity; **P0** |
 | **Unreal 4.x / 5.x** | Pak footer v1–11, bounded primary SHA1; v1–9 directory/data-header/stored-payload checks; v10/v11 secondary SHA1 + entry classification; IoStore TOC v1–8 header/bounds/security inventory | G only; **no cooked Texture2D writer** | No Pak/IoStore repacker or packed SoundWave transcode | IoStore chunk/block and package-store/Zen references first for UE5 textures; compressed entry decode; cooked schemas; **P0** |
 | Unreal 1–3 / licensed forks | No dedicated adapter | G only | None | Legacy package/compression formats; do not reuse UE4 parser; P3 |
 | **GameMaker / Studio / modern runtime** | `data.win` heuristic | G only; packed texture pages untouched | None | FORM chunk reader/writer, texture-page/sprite/font geometry and audio references; P2 |
@@ -109,6 +109,11 @@ high-value families; **P3** deferred investigations, not scheduled commitments.
   their payloads. Reject duplicate IDs, overlaps and out-of-bounds objects.
 - [ ] Versioned type-tree reader; explicit validated schema fallback for stripped
   player builds. Unknown or stripped versions never trigger trial-and-error writes.
+  Note: read-only `unityfs-inventory` on real Addressables bundles found type trees
+  **present** (e.g. 92 Texture2D objects in one Cocoon bundle), so bundle content
+  does not need the stripped-schema fallback; the remaining blocker for bundles is
+  container rebuild, not schema. See
+  `test/engine-results/unity-bundle-inventory-2026-10-07.md`.
 - [x] Bounded type-tree-guided Texture2D field inspection for supported node
   layouts: dimensions, numeric format ID, mip count, inline bytes and declared
   stream path/offset/size. Unknown trees remain opaque. Paths are never followed.
