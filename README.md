@@ -209,10 +209,10 @@ no restore copies. The active profile sets the resolution cap (`balanced` is
 | Refused | Cubemaps, arrays, 3D volumes, BC6H, float/HDR, and small or thin textures |
 
 Unity and Unreal packed textures have **no writer yet**. Bundled UnityFS content
-can be inventoried read-only (`--audit-container` and the native
-`unityfs-inventory`), and real Addressables bundles retain type trees, but no
-Unity texture is rewritten. Encrypted/signed packs and proprietary codecs are
-skipped.
+can be inventoried read-only with the native `unityfs-inventory` command (while
+`--audit-container` reports a bundle's LZ4 recompression potential), and real
+Addressables bundles retain type trees, but no Unity texture is rewritten.
+Encrypted/signed packs and proprietary codecs are skipped.
 
 **Honest limits:** savings are logical file bytes, not measured physical Btrfs
 savings, and a game may depend on exact texture dimensions for UI or data.
