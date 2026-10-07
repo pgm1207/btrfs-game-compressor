@@ -62,3 +62,18 @@ done
 ./bgc-native assets apply-no-backup    ultra-performance 1 "$COPY"
 ./bgc-native texture-compress-tree 8192 "$COPY" "$VERIFY"
 ```
+
+## Library-wide scope (read-only scan, 2026-10-07)
+
+A metadata-only scan of all installed Steam games found loose `.dds` in only
+**two** titles:
+
+| Game | DDS files | DDS bytes |
+| --- | ---: | ---: |
+| Journey | 317 | 0.824 GiB |
+| Hohokum | 178 | 0.662 GiB |
+
+So loose-DDS downscaling is a real but **niche** win (≤ ~1.5 GiB before
+reduction). The remaining texture bytes in this library are inside packed
+engine containers (Unity/Unreal/Godot/XNB) that have no writer yet.
+
