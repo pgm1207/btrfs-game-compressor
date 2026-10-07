@@ -233,6 +233,9 @@ pub fn godot_audit(path: &Path) -> io::Result<()> {
     let mut audio_unparsed = 0u64;
     // Encoding and GPU Image::Format are separate: "raw-image" may contain BCn/ETC data.
     let mut textures: BTreeMap<(u32, u32), (u64, u64, u32, u32, u64)> = BTreeMap::new();
+    // Godot 3 `.stex` (GDST): group by raw data-format word and mipmap count so
+    // the unsupported encodings behind the Godot 3 gap are visible.
+    let mut gdst: BTreeMap<(u32, u32), (u64, u64, u32, u32)> = BTreeMap::new();
     for e in &pack.entries {
         super::cancelled()?;
         if e.flags & 2 != 0 { continue; }
@@ -271,6 +274,20 @@ pub fn godot_audit(path: &Path) -> io::Result<()> {
                 }
             }
         }
+        if ext == "stex" && e.flags & 1 == 0 && e.size >= 28 {
+            file.seek(SeekFrom::Start(e.offset))?;
+            let mut b = [0; 28]; file.read_exact(&mut b)?;
+            if &b[..4] == b"GDST" {
+                let w = u16::from_le_bytes(b[4..6].try_into().unwrap()) as u32;
+                let h = u16::from_le_bytes(b[8..10].try_into().unwrap()) as u32;
+                let data_format = u32::from_le_bytes(b[16..20].try_into().unwrap());
+                let mipmaps = u32::from_le_bytes(b[20..24].try_into().unwrap());
+                if w > 0 && h > 0 && mipmaps <= 16 {
+                    let slot = gdst.entry((data_format, mipmaps)).or_default();
+                    slot.0 += 1; slot.1 += e.size; slot.2 = slot.2.max(w); slot.3 = slot.3.max(h);
+                }
+            }
+        }
     }
     unchanged(&meta, &file.metadata()?)?;
     println!("GODOT_PCK|{}|{}.{}.{}|{}|{}|{}|{}", pack.version, pack.engine[0], pack.engine[1], pack.engine[2],
@@ -287,6 +304,9 @@ pub fn godot_audit(path: &Path) -> io::Result<()> {
         let encoding = ["raw-image", "png", "webp", "basis"][encoding as usize];
         println!("PCK_TEXTURE|{encoding}|{format}|{count}|{bytes}|{w}|{h}|{mips}");
         if named_formats.insert(format, ()).is_none() { println!("PCK_IMAGE_FORMAT|{format}|{}", godot_image_format(format)); }
+    }
+    for ((data_format, mipmaps), (count, bytes, w, h)) in gdst {
+        println!("PCK_STEXTURE|{data_format:08x}|{mipmaps}|{count}|{bytes}|{w}|{h}");
     }
     eprintln!("Read-only Godot inventory: bounded resource/audio metadata only; payload bytes are skipped, not verified or rewritten. No pruning decisions or savings are implied, and PCK entries cannot be arbitrarily switched to Zstd.");
     Ok(())

@@ -21,6 +21,12 @@
   gated on a strict byte reduction. Validated on disposable copies: a 1920x1080
   BC3 and a 1920x1080 BGRA DDS each shrank ~85% in place, while a small texture
   and a non-texture file were left untouched.
+- Report a read-only Godot 3 `.stex` histogram (`PCK_STEXTURE`: data-format word,
+  mip count, count, bytes, max dimensions) from `--audit-container`, so the
+  encodings behind the Godot 3 texture gap are visible. Real Godot 3 `.stex` in
+  this library are mostly small single-mip WebP sprites the policy correctly
+  refuses to downscale; multi-mip `.stex` remain skipped. The large supported
+  wins are Godot 4 `.ctex` (see `test/engine-results/godot-texture-opportunity-2026-10-07.md`).
 - Unity read-only audit now resolves declared Texture2D stream paths against the
   audited file's own directory and bounds-checks `offset .. offset+size` without
   reading payload bytes. Absolute paths, `..` traversal, symlinks and
