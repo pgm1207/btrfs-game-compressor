@@ -102,6 +102,15 @@ class SpaceDeltaTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             space.compare(invalid, snapshot())
 
+    def test_refuses_dangling_symlink_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "report.json"
+            target.symlink_to(root / "missing-target")
+            with self.assertRaises(ValueError):
+                space._write_json(str(target), {"kind": "snapshot"})
+            self.assertFalse((root / "missing-target").exists())
+
     def test_capture_and_compare_cli_json(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
