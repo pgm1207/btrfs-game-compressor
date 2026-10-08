@@ -1,7 +1,8 @@
 # Tested format support and honest coverage gaps
 
-Status: **0.3.0 released** (2026-10-08); **0.2.1** was the previous release. This
-page describes the development tree. If a format or engine is not listed here as
+Status: **0.3.1 source tree** (2026-10-08), following the published
+v0.3.0 release. Tagging and successful release workflows are required to ship
+v0.3.1 binaries. This page describes the development tree. If a format or engine is not listed here as
 **Stable** or **Beta**, treat it as unsupported. [ROADMAP.md](ROADMAP.md) is the
 plan; this file is the evidence-based present.
 

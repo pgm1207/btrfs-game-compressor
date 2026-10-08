@@ -1,13 +1,32 @@
 # Changelog
 
-## Unreleased (main after v0.3.0)
+## 0.3.1 — 2026-10-08 — Recovery hardening, measurement and DDS quality
 
-Changes below are source commits **not included in the published v0.3.0
-archives**. They require a subsequent tagged release, release-CI verification and
-fresh binary packaging before end users can obtain them via the installer.
+This maintenance release contains the changes listed below. The release artifacts
+are available to installers **only after** the `v0.3.1` tag triggers release CI
+and the release uploads complete; a merge to `main` alone does not ship them.
 
 ### Safety and compatibility
 
+- Normal Godot PCK beta apply now stages each optimized archive separately,
+  retains a local original with a durable recovery checksum, and supports
+  exact-byte restore/finalize (#34). Explicit no-backup compaction remains
+  irreversible; whole-game crash/power-loss atomicity is not yet guaranteed.
+- Harden rollback: retain prune originals if parent-directory sync fails after
+  unlink; never remove unrelated checksum/staging files on a create-new filename
+  collision (#37).
+- Serialize cooperating native asset mutations per game with automatic-release
+  advisory inode locks (apply, restore, finalize, per-file restore, prune).
+  This does not lock Steam or prevent concurrent Steam updates (#38).
+- Constrain Godot packed-asset mutation to the selected game root via
+  descriptor-anchored `openat2` path checks; reject cross-device backup
+  directories and unexpected nested mounts (#39).
+- Surface packed-asset operational I/O failures (ENOSPC, permissions, staging
+  collisions) instead of silently treating them as unsupported pack skips
+  (#40). Unsupported/invalid formats remain beta skips.
+- Native-only asset apply/restore can now run on non-Btrfs Linux filesystems
+  such as ext4, but main Steam-library discovery and filesystem compression/
+  deduplication still require Btrfs. ext4 backups can cost a full copy (#36).
 - Preserve **all platform-specific asset directories** during `--slim` until
   the game runtime can be independently established. SteamOS can launch native
   Linux titles or Windows titles through Proton, so filesystem/host OS alone is
@@ -27,6 +46,14 @@ fresh binary packaging before end users can obtain them via the installer.
 
 ### Compression, quality and usability
 
+- Add read-only `bgc-native texture-quality ORIGINAL.dds CANDIDATE.dds`
+  codec-distortion metrics, with alpha-aware black/white PSNR and altered-alpha
+  pixel count. These do not measure lost source resolution, game quality or
+  runtime compatibility (#24).
+- Add a separate native-resolution DDS quality comparison: upsample the
+  candidate with Lanczos3 and compare against the original to expose spatial
+  downscaling losses distinct from codec-only PSNR. Pixel scores still do not
+  certify perceptual/gameplay quality (#42).
 - In installed beta DDS apply, skip same-size lossy recompression and reject
   too-thin downsized textures before expensive decoding. Detached DDS export is
   still explicit and separate. The half-original-dimension budget is not yet
@@ -43,6 +70,10 @@ fresh binary packaging before end users can obtain them via the installer.
 
 ### Observed storage reporting
 
+- Add `tools/space-delta.py` with versioned before/after JSON observations:
+  report filesystem-wide available-space deltas separately from Btrfs extent
+  reductions, preserve negative changes, and use `null` for unavailable
+  measurements instead of inventing zero savings (#35).
 - Add an unprivileged read-only `bgc-native fs-space PATH` statvfs report and
   an observed available-space delta around interactive asset apply/restore/
   finalize. The result is filesystem-wide, not an attributable game savings
@@ -55,11 +86,11 @@ fresh binary packaging before end users can obtain them via the installer.
   opt-in native filesystem integration tests, instead of silently passing with
   those cases skipped (#3).
 
-**Still unresolved:** safe transactional cross-filesystem asset writers,
-validated runtime compatibility of altered Godot/Unity/Unreal content, absolute
-protection against concurrent game launch, accurate per-operation attributable
-net reclaimed space, GUI/controller controls, and signed releases. Track those
-separately in GitHub issues #7–#18.
+**Still unresolved:** whole-game power-loss-safe transactions, runtime
+compatibility certification of lossy Godot/Unity/Unreal modifications, absolute
+protection against concurrent Steam changes, causal net reclaimed-space
+attribution, full ext4 Steam-library/TUI support, GUI/controller workflows and
+signed releases. Track these in GitHub issues #7–#18 and #31.
 
 ## 0.3.0 — 2026-10-08 — Texture compression MVP and Unity bundle inventory
 
