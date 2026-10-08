@@ -273,6 +273,57 @@ struct Prepared {
     bytes: Vec<u8>,
 }
 
+/// For exact power-of-two reductions, retain the existing lower-resolution
+/// mip bytes rather than decoding and lossy-reencoding them. This preserves the
+/// *encoded* pixel data of all retained levels byte-for-byte, but lowering the
+/// logical texture dimensions is still a lossy and potentially incompatible
+/// change. Only use a fully parsed chain with an exact dimension match.
+fn reuse_existing_mips(
+    parsed: &Parsed,
+    source: &[u8],
+    target_w: u32,
+    target_h: u32,
+) -> io::Result<Option<Vec<u8>>> {
+    if parsed.mipmaps < 2 || (target_w, target_h) == (parsed.width, parsed.height) {
+        return Ok(None);
+    }
+    let (mut width, mut height) = (parsed.width, parsed.height);
+    let mut start = parsed.data_start;
+    for index in 0..parsed.mipmaps {
+        if index > 0 && (width, height) == (target_w, target_h) {
+            let surface = Surface {
+                width,
+                height,
+                depth: 1,
+                layers: 1,
+                mipmaps: parsed.mipmaps - index,
+                image_format: parsed.format,
+                data: &source[start..],
+            };
+            let candidate = build_dds(&surface)?;
+            if candidate.len() >= source.len() {
+                return Ok(None);
+            }
+            let check = parse(&candidate)?;
+            if check.width != width
+                || check.height != height
+                || check.mipmaps != parsed.mipmaps - index
+                || check.format != parsed.format
+                || candidate[check.data_start..] != source[start..]
+            {
+                return Err(bad("retained DDS mip data did not round-trip"));
+            }
+            return Ok(Some(candidate));
+        }
+        let size = mip_size(parsed.format, width, height)
+            .ok_or_else(|| bad("cannot size source DDS mip"))? as usize;
+        start = start.checked_add(size).ok_or_else(|| bad("DDS mip offset overflow"))?;
+        width = (width / 2).max(1);
+        height = (height / 2).max(1);
+    }
+    Ok(None)
+}
+
 /// Decode, downscale and re-encode one DDS texture in memory, then verify the
 /// container. The source is only read; the codec is preserved and the mip chain
 /// is regenerated. Nothing is written here.
@@ -301,6 +352,24 @@ fn prepare(max_dim: u32, input: &Path, guarded_apply: bool) -> io::Result<Prepar
         if crate::texture_policy::output_too_thin(target_w, target_h) {
             return Err(bad("DDS downscale would create a too-thin texture"));
         }
+    }
+    let (target_w, target_h) = scale_to(parsed.width, parsed.height, max_dim);
+    if let Some(retained) = reuse_existing_mips(&parsed, &bytes, target_w, target_h)? {
+        let check = parse(&retained)?;
+        return Ok(Prepared {
+            outcome: Outcome {
+                before: before.len(),
+                after: retained.len() as u64,
+                width: parsed.width,
+                height: parsed.height,
+                new_width: check.width,
+                new_height: check.height,
+                format: check.format,
+                mipmaps: check.mipmaps,
+                downscaled: true,
+            },
+            bytes: retained,
+        });
     }
     let surface = Surface {
         width: parsed.width,
@@ -680,6 +749,36 @@ mod tests {
         fs::write(&source, &original).unwrap();
         assert!(prepare_asset(640, &source).unwrap().is_none());
         assert_eq!(fs::read(&source).unwrap(), original);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn exact_mip_reduction_reuses_the_encoded_mip_tail() {
+        let root = std::env::temp_dir().join(format!("bgc-texture-mip-reuse-{}", stamp()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("source.dds");
+        let image = checkerboard(64, 64);
+        let encoded = SurfaceRgba8::from_image(&image)
+            .encode(ImageFormat::BC3RgbaUnorm, Quality::Normal, Mipmaps::GeneratedAutomatic)
+            .unwrap();
+        let original = build_dds(&encoded).unwrap();
+        let before = parse(&original).unwrap();
+        assert!(before.mipmaps >= 2);
+        fs::write(&path, &original).unwrap();
+        let prepared = prepare(32, &path, false).unwrap();
+        let after = parse(&prepared.bytes).unwrap();
+        assert_eq!((after.width, after.height), (32, 32));
+        assert_eq!(after.mipmaps, before.mipmaps - 1);
+        let first_mip_size = mip_size(before.format, 64, 64).unwrap() as usize;
+        assert_eq!(
+            &prepared.bytes[after.data_start..],
+            &original[before.data_start + first_mip_size..],
+            "the retained compressed mip bytes must be identical"
+        );
+        assert_eq!(fs::read(&path).unwrap(), original, "source is read-only");
+        // A non-mip-aligned target must keep the normal resampling path.
+        let interpolated = prepare(48, &path, false).unwrap();
+        assert_eq!(parse(&interpolated.bytes).unwrap().width, 48);
         fs::remove_dir_all(root).unwrap();
     }
 
