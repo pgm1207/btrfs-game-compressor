@@ -2092,8 +2092,8 @@ group "Asset apply pre-confirmation"
 cat > "$WORK/asset-confirm-shim" <<'SHIM'
 #!/bin/sh
 case "$1:$2" in
-    assets:plan)  printf 'ASSETS|plan|Balanced (1080p)|1|2048|1024|0|0|0|1|0|0|0|2048|0|0|0\\n' ;;
-    assets:apply) printf 'ASSETS|apply|Balanced (1080p)|1|2048|1024|0|0|0|1|0|0|0|2048|0|0|0\\n' ;;
+    assets:plan)  printf 'ASSETS|plan|Balanced (1080p)|1|2048|1024|0|0|0|1|0|0|0|2048|0|0|0\n' ;;
+    assets:apply) printf 'ASSETS|apply|Balanced (1080p)|1|2048|1024|0|0|0|1|0|0|0|2048|0|0|0\n' ;;
 esac
 SHIM
 chmod +x "$WORK/asset-confirm-shim"
@@ -2102,10 +2102,10 @@ out=$(
     VISUAL_TARGET=balanced
     require_btrfs() { :; }
     discover_running_games() { RUNNING_DIRS=(); }
-    native_backend() { printf '%s\\n' "$WORK/asset-confirm-shim"; }
+    native_backend() { printf '%s\n' "$WORK/asset-confirm-shim"; }
     ensure_sudo() { :; }
-    asset_usage_bytes() { printf '2048\\n'; }
-    effective_level() { printf '3\\n'; }
+    asset_usage_bytes() { printf '2048\n'; }
+    effective_level() { printf '3\n'; }
     asset_workflow Hades --apply-assets 1 </dev/null
 )
 check_contains "TUI preconfirmed apply does not consume a second silent confirmation" "Changed 1 asset file(s)" "$out"
