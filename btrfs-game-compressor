@@ -192,6 +192,7 @@ OPTIONS
         --assets GAME     preview [BETA] asset optimization for one game
         --apply-assets GAME
                           optimize supported assets and Hades LZ4 packages
+                          (Steam: consider Only update when launched)
         --restore-assets GAME
                           restore original assets from the local copy
         --finalize-assets GAME
@@ -3427,6 +3428,7 @@ cmd_slim() {
     IFS='|' read -r _ _ count bytes <<< "$result"
     after=$(asset_usage_bytes "$game") || after=""
     printf 'Slimmed %s unused file(s): %s logical bytes; originals retained for restore.\n' "$count" "$(bytes_human "${bytes:-0}")"
+    steam_update_advisory
     if [ -n "$before" ] && [ -n "$after" ]; then
         printf 'Live game data on disk (excludes restore copies): %s → %s · footprint reduction: %s.\n' \
             "$(bytes_human "$before")" "$(bytes_human "$after")" "$(bytes_human "$((before-after))")"
@@ -3491,6 +3493,11 @@ asset_usage_bytes() {
         line=$(sudo -n -- "$(native_backend)" measure-bytes "$1" 2>/dev/null) || return 1
     fi
     printf '%s\n' "${line%%|*}"
+}
+
+# Inform users; never claim to have changed Steam settings or disabled patches.
+steam_update_advisory() {
+    printf 'Steam update tip: for optimized games, set Properties > Updates > Automatic Updates > Only update this game when I launch it. This defers background updates but does not disable launch-required patches. Revalidate modified assets after any update.\n'
 }
 
 asset_scan_summary() {
@@ -3610,6 +3617,7 @@ asset_workflow() {
                 printf 'Changed %s asset file(s): logical bytes %s → %s · reduction %s (not net disk savings).\n' \
                     "$count" "$(bytes_human "$before")" "$(bytes_human "$after")" "$(bytes_human "$((before-after))")"
                 printf 'Restore copy retained: %s of original asset data. Free space is not reclaimed until that copy is finalized; snapshots may also retain data.\n' "$(bytes_human "$retained")"
+                if [ "$count" -gt 0 ]; then steam_update_advisory; fi
             elif [ "$action" = finalize ]; then
                 printf 'Discarded restore copy: %s logical bytes. Snapshots or other references may retain the blocks.\n' "$(bytes_human "$retained")"
             fi ;;

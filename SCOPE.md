@@ -18,11 +18,12 @@ installs automatically. It does not, because **Steam preallocates game files wit
 Baldur's Gate 3 install sits 90% uncompressed until it is defragmented. See
 [steam-for-linux#12974](https://github.com/valvesoftware/steam-for-linux/issues/12974).
 
-This is worst on SteamOS and the Steam Deck, which mount `/home` and btrfs SD cards
-with `compress-force=zstd` by default: the compression is genuinely enabled, and
-the installs are genuinely still uncompressed. And it is not a one-time fix —
-every Steam update rewrites files and undoes the compression on them again, so the
-work has to be repeatable and stateful.
+SteamOS and Steam Deck storage is **not inherently Btrfs**: traditional stock
+Deck configurations typically use ext4 for `/home` and microSD. SteamOS
+installations explicitly converted to Btrfs with `compress-force=zstd` can
+still contain uncompressed extents. Updates may replace optimized assets or
+introduce new uncompressed extents, so filesystem eligibility and changes must
+be detected rather than assumed.
 
 ## In scope for 0.1.0
 

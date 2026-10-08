@@ -2251,6 +2251,7 @@ out=$(run --slim Hades --variants Hades 2>&1); rc=$?
 check_rc "slim cannot combine with the variant report" 2 "$rc"
 out=$(run --help)
 check_contains "help documents the one-shot slim command" "--slim GAME" "$out"
+check_contains "help suggests deferring updates on optimized assets" "Only update when launched" "$out"
 cat > "$WORK/slim-empty" <<'SHIM'
 #!/bin/sh
 if [ "$1" = prune-plan ]; then printf 'PRUNE|plan|0|0\n'; fi
@@ -2297,6 +2298,11 @@ out=$(
 check_contains "slim forwards the kept languages to the backend" "variants-slim $WORK/Hades en,de" "$(head -1 "$WORK/slim-args.log")"
 check_contains "slim plan states which languages are kept" "languages kept: en,de" "$out"
 check_contains "slim plan warns about the startup language" "can prevent startup" "$out"
+
+group "Steam update recommendation"
+out=$(steam_update_advisory)
+check_contains "Steam update recommendation gives exact setting" "Only update this game when I launch it" "$out"
+check_contains "Steam update recommendation is not a permanent lock" "does not disable launch-required patches" "$out"
 
 group "Language setting"
 out=$(run --keep-languages "en, de, FR, en, xx!" 2>&1); rc=$?

@@ -17,11 +17,12 @@ filesystem compression is stable and engine-independent; engine asset writers ar
 **beta** and unverified at runtime; Unity/Unreal packed texture writers are not
 implemented and are documented as gaps rather than promised.
 
-If you game on Linux with a Btrfs filesystem — a Steam Deck, an Arch/CachyOS box, a
-Fedora or Ubuntu desktop, a Bazzite handheld — there is a good chance a large part of
-your library is sitting on disk **uncompressed**, even though compression is switched
-on. This tool finds those games, compresses them with ZSTD, and remembers what it has
-done so it never repeats work.
+If your Steam library resides on Btrfs, whether on a converted Steam Deck,
+Arch/CachyOS, Fedora, Bazzite or another Linux system, some game files may be
+uncompressed despite mount compression. **Traditional stock Steam Deck
+installations use ext4 for /home and microSD**, so do not assume SteamOS implies
+Btrfs. The tool checks and compresses eligible Btrfs libraries and remembers
+what it has processed.
 
 It is a Bash interface with a bundled, statically linked Rust backend. No daemon, no root service, no telemetry, no config files
 outside your home. It tells you what it is going to do before it does it, never
@@ -789,9 +790,10 @@ defragment it — a long-standing, widely reported issue, see
 This applies to **every** Btrfs setup, not just SteamOS. The only guidance in the wild
 is a manual `btrfs filesystem defragment` you have to remember and re-run.
 
-**And it is not a one-time chore.** Every Steam update rewrites files and breaks
-compression on them again. This tracks which games have drifted, so you only redo the
-work that is actually needed.
+**And it is not a one-time chore.** Steam updates may replace modified assets
+or write fresh uncompressed extents. The tool tracks games that changed so you
+can re-run eligible optimizations. For games with **lossy asset modifications**,
+consider deferring background Steam updates, then revalidate any updated build.
 
 ## Measured results
 
@@ -858,13 +860,16 @@ findmnt -no FSTYPE /path/to/your/steamapps/common    # btrfs?
 findmnt -no OPTIONS /path/to/your/steamapps/common   # has compress= or compress-force= ?
 ```
 
-If the first says `btrfs` and the second mentions `compress`, this tool will give you
-back real disk space. If it says `ext4`, `xfs` or `ntfs`, Btrfs compression does not
-apply to you.
+If the game library's filesystem is `btrfs`, the tool can potentially reclaim
+space. Actual benefit depends on existing compression and shared extents. If
+it reports `ext4`, `xfs` or `ntfs`, Btrfs optimization does not apply.
 
-> **Steam Deck / SteamOS users:** the answer is almost always yes. `/home` and Btrfs
-> SD cards ship with `compress-force=zstd`, so compression is on and most games are
-> still stored uncompressed. This is the tool's primary target.
+> **Steam Deck / SteamOS:** Traditional stock Deck installs typically use
+> **ext4**, not Btrfs, for `/home` and microSD. Explicitly Btrfs-formatted
+> libraries are eligible. Check the *actual game-library mount* with
+> `findmnt -T /path/to/steamapps/common`. Examples with
+> `compress-force=zstd` refer to explicitly converted/configured Btrfs storage.
+> Do not convert a filesystem without a separate backup and migration plan.
 
 ## What it does *not* do
 
@@ -1277,7 +1282,7 @@ whatever the library's mount point is configured with, so a library stays unifor
 
 | Mount option | Level used |
 |---|---|
-| `compress-force=zstd:6` (SteamOS default) | 6 |
+| `compress-force=zstd:6` (example: SteamOS converted to Btrfs) | 6 |
 | `compress-force=zstd` (no level) | 3 (btrfs default) |
 | `compress=zstd:1` | 1 |
 | no `compress` option | 3, and you get a warning telling you to fix the mount |
@@ -1679,6 +1684,21 @@ integrity of game files" to fetch the originals.
 small sprites, thin textures and unsupported packed formats (Unity, Unreal) are
 left untouched. The biggest supported wins in a typical library are Godot 4
 `.ctex`; see [Texture compression](#texture-compression).
+
+## Steam updates for optimized games
+
+**Recommendation:** For games with modified assets, choose **Steam Library >
+Properties > Updates > Automatic Updates > Only update this game when I launch
+it**. This defers background updates that would otherwise replace optimized
+assets. It does **not** permanently disable updates: Steam may require an
+update before launching a game. Steam verification can also restore originals.
+Re-analyze and revalidate after each update rather than blindly repeating lossy
+transforms on a different game build.
+
+Btrfs-only compression and deduplication do not modify game content. Updates
+may create new uncompressed extents that benefit from another pass. Do not
+indefinitely defer necessary security, compatibility or online-play updates
+solely to retain space savings.
 
 ## Caveats
 
