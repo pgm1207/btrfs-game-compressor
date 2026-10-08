@@ -812,6 +812,30 @@ fn balance(tree: &Tree) -> io::Result<()> {
     args[0] = 4; // BTRFS_BALANCE_METADATA (not SYSTEM)
     call(&tree.root, request(3, 0x94, 32, 1024), &mut args)
 }
+/// Observe filesystem-wide available bytes. This is a point-in-time statvfs
+/// reading, not an attribution of a prior Btrfs compression operation: other
+/// writers, snapshots, quotas and metadata allocation influence its delta.
+fn filesystem_space(path: &Path) -> io::Result<()> {
+    let cpath = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| invalid("NUL in filesystem path"))?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(cpath.as_ptr(), &mut stat) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let block = stat.f_frsize as u64;
+    if block == 0 { return Err(invalid("filesystem reports zero fragment size")); }
+    let mul = |v: u64| v.checked_mul(block)
+        .ok_or_else(|| invalid("filesystem capacity overflows u64"));
+    println!(
+        "FS_SPACE|{}|{}|{}|{}",
+        mul(stat.f_bavail as u64)?,
+        mul(stat.f_bfree as u64)?,
+        mul(stat.f_blocks as u64)?,
+        block,
+    );
+    Ok(())
+}
+
 fn run() -> io::Result<()> {
     let args: Vec<_> = env::args_os().skip(1).collect();
     if args.len() == 1 && args[0] == "--protocol-version" {
@@ -841,6 +865,9 @@ fn run() -> io::Result<()> {
     }
     if command == "assets-restore-file" && args.len() == 3 {
         return assets::restore_file(Path::new(&args[1]),Path::new(&args[2]));
+    }
+    if command == "fs-space" && args.len() == 2 {
+        return filesystem_space(Path::new(&args[1]));
     }
     if command == "measure-file" && args.len() == 2 {
         let path = Path::new(&args[1]);
@@ -988,7 +1015,7 @@ fn run() -> io::Result<()> {
         ("compress",3)=>(Path::new(&args[2]),args[1].to_str().and_then(|s|s.parse::<u8>().ok()).ok_or_else(||invalid("invalid level"))?),
         ("measure"|"measure-bytes"|"usage"|"balance",2)=>(Path::new(&args[1]),0),
         ("dedupe",3)=>(Path::new(&args[1]),0),
-        _=>return Err(invalid("usage: bgc-native compress LEVEL DIR | measure DIR | measure-bytes DIR | measure-file FILE | usage DIR | dedupe DIR SCRATCH_DIR | balance DIR | assets ACTION TARGET LEVEL DIR | asset-inventory DIR | asset-plan-inventory PROFILE DIR | asset-plan PROFILE DIR | asset-container-inventory DIR | asset-audit-packs DIR | asset-audit-fmod DIR | assets-restore-file DIR RELATIVE_PATH | assets-physical-rejections DIR | prune-plan DIR [--debug] [REL...] | prune-apply DIR [--debug] [REL...] | fmod-reencode PROFILE INPUT OUTPUT | fmod-audit INPUT | package-audit INPUT | engine-scan DIR | container-audit FILE | unity-texture-coverage FILE | unityfs-audit FILE | unityfs-inventory FILE | unityfs-recompress MIN_PCT INPUT OUTPUT | texture-compress MAX_DIM INPUT OUTPUT | texture-compress-tree MAX_DIM INDIR OUTDIR | godot-audit FILE | godot-dedup-audit FILE | godot-dedup-export MIN_PCT INPUT OUTPUT | godot-texture-audit PROFILE FILE | godot-texture-export PROFILE MIN_PCT INPUT OUTPUT | godot3-audit PROFILE FILE | godot3-optimize PROFILE MIN_PCT INPUT OUTPUT | unreal-audit FILE | --licenses")),
+        _=>return Err(invalid("usage: bgc-native compress LEVEL DIR | measure DIR | measure-bytes DIR | measure-file FILE | fs-space PATH | usage DIR | dedupe DIR SCRATCH_DIR | balance DIR | assets ACTION TARGET LEVEL DIR | asset-inventory DIR | asset-plan-inventory PROFILE DIR | asset-plan PROFILE DIR | asset-container-inventory DIR | asset-audit-packs DIR | asset-audit-fmod DIR | assets-restore-file DIR RELATIVE_PATH | assets-physical-rejections DIR | prune-plan DIR [--debug] [REL...] | prune-apply DIR [--debug] [REL...] | fmod-reencode PROFILE INPUT OUTPUT | fmod-audit INPUT | package-audit INPUT | engine-scan DIR | container-audit FILE | unity-texture-coverage FILE | unityfs-audit FILE | unityfs-inventory FILE | unityfs-recompress MIN_PCT INPUT OUTPUT | texture-compress MAX_DIM INPUT OUTPUT | texture-compress-tree MAX_DIM INDIR OUTDIR | godot-audit FILE | godot-dedup-audit FILE | godot-dedup-export MIN_PCT INPUT OUTPUT | godot-texture-audit PROFILE FILE | godot-texture-export PROFILE MIN_PCT INPUT OUTPUT | godot3-audit PROFILE FILE | godot3-optimize PROFILE MIN_PCT INPUT OUTPUT | unreal-audit FILE | --licenses")),
     };
     let tree = Tree::new(root)?;
     match command {

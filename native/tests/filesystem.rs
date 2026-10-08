@@ -328,6 +328,22 @@ fn real_btrfs_preserves_data_and_shares_blocks() {
 }
 
 #[test]
+fn filesystem_space_reports_read_only_available_capacity_without_btrfs() {
+    let root = env::temp_dir();
+    let out = success(&["fs-space", root.to_str().unwrap()]);
+    let parts: Vec<&str> = out.trim().split('|').collect();
+    assert_eq!(parts.len(), 5, "{out}");
+    assert_eq!(parts[0], "FS_SPACE");
+    let available: u64 = parts[1].parse().unwrap();
+    let free: u64 = parts[2].parse().unwrap();
+    let total: u64 = parts[3].parse().unwrap();
+    let fragment: u64 = parts[4].parse().unwrap();
+    assert!(fragment > 0);
+    assert!(available <= free && free <= total, "{out}");
+    assert!(!run(&["fs-space", "/nonexistent-bgc-space-root"]).status.success());
+}
+
+#[test]
 fn exact_byte_measurement_is_a_valid_command() {
     let out = run(&["measure-bytes", "/nonexistent-bgc-test-directory"]);
     assert!(!out.status.success());
