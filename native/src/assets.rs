@@ -1530,6 +1530,42 @@ pub fn prune_plan(root: &Path, rels: &[PathBuf], debug: bool) -> io::Result<()> 
     Ok(())
 }
 
+/// Remove one game asset only after its original and removal marker are
+/// durable. A failed directory sync after unlink MUST NOT destroy the backup:
+/// the live pathname may be gone and the original is still needed for restore.
+/// The injectable sync is also used to test the post-unlink failure boundary.
+fn prune_one_with_sync(
+    path: &Path,
+    backup: &Path,
+    sync_parent: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    clone_file(path, backup)?;
+    let check = sidecar(backup);
+    let mut marker_created = false;
+    let mut source_unlinked = false;
+    let result = (|| -> io::Result<()> {
+        let mut c = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(NOFOLLOW)
+            .open(&check)?;
+        marker_created = true;
+        c.write_all(REMOVED)?;
+        c.sync_all()?;
+        File::open(check.parent().ok_or_else(|| bad("invalid checksum path"))?)?.sync_all()?;
+        fs::remove_file(path)?;
+        source_unlinked = true;
+        sync_parent()
+    })();
+    if result.is_err() && !source_unlinked {
+        // Only remove objects created by this operation. An existing marker
+        // (including one created by a concurrent actor) must be preserved.
+        if marker_created { let _ = fs::remove_file(&check); }
+        let _ = fs::remove_file(backup);
+    }
+    result
+}
+
 pub fn prune_apply(root: &Path, rels: &[PathBuf], debug: bool) -> io::Result<()> {
     if !fs::symlink_metadata(root)?.file_type().is_dir() {
         return Err(bad("game path is not a real directory"));
@@ -1547,26 +1583,9 @@ pub fn prune_apply(root: &Path, rels: &[PathBuf], debug: bool) -> io::Result<()>
             continue;
         }
         ensure_backup_dirs(root, relative.parent().unwrap_or(Path::new("")))?;
-        clone_file(&path, &backup)?;
-        let result = (|| -> io::Result<()> {
-            let check = sidecar(&backup);
-            let mut c = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .custom_flags(NOFOLLOW)
-                .open(&check)?;
-            c.write_all(REMOVED)?;
-            c.sync_all()?;
-            File::open(check.parent().ok_or_else(|| bad("invalid checksum path"))?)?.sync_all()?;
-            fs::remove_file(&path)?;
-            File::open(path.parent().ok_or_else(|| bad("invalid prune path"))?)?.sync_all()?;
-            Ok(())
-        })();
-        if let Err(e) = result {
-            let _ = fs::remove_file(&backup);
-            let _ = fs::remove_file(sidecar(&backup));
-            return Err(e);
-        }
+        prune_one_with_sync(&path, &backup, || {
+            File::open(path.parent().ok_or_else(|| bad("invalid prune path"))?)?.sync_all()
+        })?;
         if std::env::var_os("BGC_VERBOSE").is_some() {
             eprintln!("Pruned unused file (restorable): {}", path.display());
         }
@@ -1891,10 +1910,13 @@ fn packed_apply_with_backup(root: &Path, path: &Path, target: &str, level: u8) -
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "packed asset recovery data already exists"));
     }
     let staged = append_suffix(path, &format!(".bgc-packed-stage-{}", std::process::id()));
+    let mut staged_created = false;
     let mut backup_created = false;
+    let mut marker_created = false;
     let mut committed = false;
     let outcome = (|| -> io::Result<(u64, u64)> {
         clone_file(path, &staged)?;
+        staged_created = true;
         if !same_contents(path, &staged)? {
             return Err(bad("source pack changed during staging"));
         }
@@ -1911,6 +1933,7 @@ fn packed_apply_with_backup(root: &Path, path: &Path, target: &str, level: u8) -
         }
         let digest = checksum_file(&staged)?;
         let mut side = OpenOptions::new().write(true).create_new(true).custom_flags(NOFOLLOW).open(&check)?;
+        marker_created = true;
         writeln!(side, "{digest:016x}")?;
         side.sync_all()?;
         File::open(check.parent().ok_or_else(|| bad("missing backup parent"))?)?.sync_all()?;
@@ -1924,11 +1947,12 @@ fn packed_apply_with_backup(root: &Path, path: &Path, target: &str, level: u8) -
         File::open(path.parent().ok_or_else(|| bad("missing game parent"))?)?.sync_all()?;
         Ok(counts)
     })();
-    let _ = fs::remove_file(&staged);
+    // A create_new collision must never delete someone else's existing file.
+    if staged_created { let _ = fs::remove_file(&staged); }
     if outcome.is_err() && backup_created && !committed {
-        // Original still occupies the game path; only our newly created
-        // recovery data may be removed. Never discard backups after commit.
-        let _ = fs::remove_file(&check);
+        // Original still occupies the game path. Retain any pre-existing
+        // checksum marker; remove only sidecars we created ourselves.
+        if marker_created { let _ = fs::remove_file(&check); }
         let _ = fs::remove_file(&backup);
     }
     outcome
@@ -2218,6 +2242,41 @@ mod tests {
     }
 
     #[test]
+    fn prune_parent_sync_failure_keeps_restorable_original() {
+        let root = fixture("prune-sync-failure");
+        let original = root.join("game.pdb");
+        let backup = root.join(BACKUP).join("game.pdb");
+        fs::write(&original, b"irreplaceable debug file").unwrap();
+        let err = prune_one_with_sync(&original, &backup, || {
+            Err(io::Error::other("simulated failure after unlink"))
+        }).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(!original.exists(), "the simulated sync failed after unlink");
+        assert_eq!(fs::read(&backup).unwrap(), b"irreplaceable debug file");
+        assert_eq!(fs::read(sidecar(&backup)).unwrap(), REMOVED);
+        assert!(known_version(&original, &backup).unwrap());
+        finish_backups("restore", &root, vec![backup.clone()]).unwrap();
+        assert_eq!(fs::read(&original).unwrap(), b"irreplaceable debug file");
+        assert!(!backup.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prune_existing_checksum_collision_never_deletes_other_marker() {
+        let root = fixture("prune-checksum-collision");
+        let original = root.join("game.pdb");
+        let backup = root.join(BACKUP).join("game.pdb");
+        fs::write(&original, b"original file").unwrap();
+        fs::write(sidecar(&backup), b"existing unrelated marker").unwrap();
+        let result = prune_one_with_sync(&original, &backup, || Ok(()));
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&original).unwrap(), b"original file");
+        assert!(!backup.exists());
+        assert_eq!(fs::read(sidecar(&backup)).unwrap(), b"existing unrelated marker");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn prune_rejects_escaping_symlinked_and_missing_targets() {
         use std::os::unix::fs::symlink;
         let root = fixture("prune-safety");
@@ -2364,6 +2423,21 @@ mod tests {
         let no_gain = packed_apply_with_backup(&root, &pack, "ultra-performance", 1).unwrap();
         assert_eq!(no_gain, (0, 0));
         assert!(!backup.exists(), "no-gain pack must not retain a backup");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn packed_staging_filename_collision_never_removes_existing_file() {
+        let root = fixture("packed-stage-collision");
+        let pack = root.join("game.pck");
+        let existing_stage = append_suffix(&pack, &format!(".bgc-packed-stage-{}", std::process::id()));
+        fs::write(&pack, b"original source, intentionally not a complete pack").unwrap();
+        fs::write(&existing_stage, b"unrelated user data").unwrap();
+        let result = packed_apply_with_backup(&root, &pack, "balanced", 1);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&existing_stage).unwrap(), b"unrelated user data");
+        assert_eq!(fs::read(&pack).unwrap(), b"original source, intentionally not a complete pack");
+        assert!(!root.join(BACKUP).join("game.pck").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
