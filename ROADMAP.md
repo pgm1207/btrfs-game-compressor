@@ -1,6 +1,6 @@
 # Engine support and roadmap 
 
-Status: **2026-10-07**, release **0.2.1**; **0.3.0 unreleased** adds the texture
+Status: **2026-10-08**, release **0.3.0** adds the texture
 compression MVP and the read-only UnityFS bundle inventory. Engine asset writers
 remain beta and are expanded engine by engine; see [SUPPORT.md](SUPPORT.md) for
 what is tested.
@@ -219,10 +219,10 @@ rules**. Never launch or kill games automatically or edit installed games as tes
 
 ## Versioning and incremental GitHub publication
 
-- `v0.1.0`, `v0.1.1` and `v0.2.0` were tagged previously; the `v0.2.0` release
-  build failed on aarch64, so no 0.2.0 artifact was published. `0.2.1` is the
-  current **release**: script, native Cargo package/lock and manpage all say
-  `0.2.1`. Engine asset writers inside it are beta; see [SUPPORT.md](SUPPORT.md).
+- `v0.1.0`, `v0.1.1`, `v0.2.0` and `v0.2.1` were tagged previously; the `v0.2.0`
+  release build failed on aarch64, so no 0.2.0 artifact was published. `0.3.0` is
+  the current **release**: script, native Cargo package/lock and manpage all say
+  `0.3.0`. Engine asset writers inside it are beta; see [SUPPORT.md](SUPPORT.md).
 - Keep a shared SemVer number in the script, native Cargo package/lock and manpage.
   Update them together at a release boundary, with a changelog and package checks.
   Use commit hashes to identify individual development improvements; not every

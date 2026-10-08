@@ -17,7 +17,7 @@ pub fn dispatch(args: &[OsString]) -> Option<io::Result<()>> {
         if args.len() != 1 {
             return Some(Err(super::invalid("--development-audits takes no arguments")));
         }
-        println!("Development asset routes (not in published 0.2.1 binaries).");
+        println!("Development asset routes (not in published 0.3.0 binaries).");
         println!("Development reader routes: {}", if cfg!(feature = "development-audits") { "compiled in" } else { "disabled" });
         for name in COMMANDS { println!("  {name} FILE"); }
         println!("  {XNB_EXPORT} MAX_EDGE INPUT OUTPUT (detached experimental export)");

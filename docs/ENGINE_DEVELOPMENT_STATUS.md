@@ -35,7 +35,7 @@ the drafts below is promoted to tested audit support, beta export or beta apply.
 
 These **native-only** command names are registered in source, with no Bash UI,
 container auto-routing or installed-library integration. They are not available
-in published 0.2.1 binaries. Their dispatch is additionally gated behind an
+in published 0.3.0 binaries. Their dispatch is additionally gated behind an
 explicit `development-audits` Cargo feature, **off by default**. Normal source
 builds refuse these commands without opening the supplied input.
 `--development-audits` lists source-level routes and the compile-time gate state.

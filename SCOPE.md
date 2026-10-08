@@ -1,7 +1,7 @@
 # Scope
 
 This document records the project's current scope and goals. The initial 0.1.0
-finish line is retained below. Current release is 0.2.1, adding
+finish line is retained below. Current release is 0.3.0, adding
 native extent deduplication and opt-in format-aware asset optimization. See
 [SUPPORT.md](SUPPORT.md) for tested coverage and [ROADMAP.md](ROADMAP.md) for the
 engine support chart and delivery/versioning plan.

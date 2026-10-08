@@ -4,7 +4,7 @@
 # libraries living on Btrfs. Bash UI plus the bundled bgc-native backend.
 # Filesystem operations use Linux ioctls; no external filesystem tools are used.
 
-VERSION="0.2.1"
+VERSION="0.3.0"
 PROGNAME="btrfs-game-compressor"
 # Owner/repo used by --self-update and --check-update to find the latest release.
 REPO="${BTRFS_GAME_COMPRESSOR_REPO:-pgm1207/btrfs-game-compressor}"

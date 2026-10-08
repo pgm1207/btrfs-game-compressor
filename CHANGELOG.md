@@ -1,7 +1,26 @@
 # Changelog
 
-## 0.3.0 — Unreleased — Texture compression MVP and Unity bundle inventory
+## 0.3.0 — 2026-10-08 — Texture compression MVP and Unity bundle inventory
 
+- Add a gated, default-off `development-audits` build with native-only draft
+  readers for uncompressed XNB v5 Texture2D, PC VTF 7.1–7.4, Valve VPK v1/v2,
+  GameMaker FORM, richer Unity bundle fields, Godot 4.3 audio and IoStore v3–8
+  addressing, plus a **detached** XNB v5 BC1/2/3 Texture2D resizing exporter.
+  Normal builds refuse these routes before opening an input; no installed apply,
+  automatic routing or Bash UI is enabled.
+- Detached export safety: immutable in-memory reparsing (shared parser), a
+  byte-identical no-change rebuild check, BC1 one-bit alpha retention, and
+  anonymous `O_TMPFILE` staging published with a no-replace `linkat` so a partial
+  or replaced destination is never visible. Sources are never modified.
+- `tools/asset-opportunity-report.py` schema 3 keeps experimental XNB estimates
+  out of production totals and records audited/header coverage and partial errors
+  separately, so research failures do not erase production results. Schema-2
+  reports are preserved, not migrated.
+- Unity read-only audit validates bounded type-tree hierarchy and local strings
+  before unknown common-string semantics (separating malformed/unsupported/budget
+  statuses), builds subtree ends in linear time, and no longer allocates field
+  paths for skipped array elements. A reference/ownership design contract records
+  the unresolved Sprite/SpriteAtlas/PPtr and stream-ownership gates.
 - Add an export-only DDS texture compressor: `--texture-compress MAX_DIM FILE
   OUTPUT` (native `texture-compress`) downscales the base mip of a bounded 2D DDS
   to a maximum dimension, re-encodes it to the same codec with a regenerated mip
