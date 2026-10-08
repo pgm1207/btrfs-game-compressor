@@ -1895,6 +1895,10 @@ fn packed_apply_with_backup(root: &Path, path: &Path, target: &str, level: u8) -
     let mut committed = false;
     let outcome = (|| -> io::Result<(u64, u64)> {
         clone_file(path, &staged)?;
+        if !same_contents(path, &staged)? {
+            return Err(bad("source pack changed during staging"));
+        }
+        let staged_source_hash = checksum_file(&staged)?;
         let counts = packed_apply_one(&staged, target, level)?;
         if counts.0 + counts.1 == 0 || fs::metadata(&staged)?.len() >= fs::metadata(path)?.len() {
             return Ok((0, 0));
@@ -1902,8 +1906,8 @@ fn packed_apply_with_backup(root: &Path, path: &Path, target: &str, level: u8) -
         ensure_backup_dirs(root, rel.parent().unwrap_or(Path::new("")))?;
         clone_file(path, &backup)?;
         backup_created = true;
-        if !same_contents(path, &backup)? {
-            return Err(bad("source pack changed while preparing a backup"));
+        if !same_contents(path, &backup)? || checksum_file(&backup)? != staged_source_hash {
+            return Err(bad("source pack changed between staging and backup creation"));
         }
         let digest = checksum_file(&staged)?;
         let mut side = OpenOptions::new().write(true).create_new(true).custom_flags(NOFOLLOW).open(&check)?;
