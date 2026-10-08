@@ -109,6 +109,8 @@ OPT_DRY_RUN=0
 OPT_DEDUPE=0
 OPT_RECHECK=0
 OPT_ASSETS=0
+OPT_ASSET_PLAN_DIR=0
+ASSET_PLAN_DIR=""
 OPT_ASSET_INVENTORY=0
 OPT_ASSET_CONTAINERS=0
 OPT_AUDIT_GAME_PACKS=0
@@ -190,6 +192,9 @@ OPTIONS
                           (also marks them COMPACTED after a successful pass)
         --recheck         remeasure installed games and refresh saved statistics
         --assets GAME     preview [BETA] asset optimization for one game
+        --asset-plan-dir DIR
+                          read-only Balanced asset preview for any directory,
+                          including ext4; no game changes, logical estimates only
         --apply-assets GAME
                           optimize supported assets and Hades LZ4 packages
                           (Steam: consider Only update when launched)
@@ -419,6 +424,11 @@ parse_args() {
                 }
                 OPT_CONTAINER=1; CONTAINER_ACTION="$1"; CONTAINER_SOURCE="$2"; CONTAINER_OUTPUT="$3"
                 shift 2 ;;
+            --asset-plan-dir)
+                [ -n "${2:-}" ] || { echo "$PROGNAME: --asset-plan-dir requires a directory" >&2; exit 2; }
+                OPT_ASSET_PLAN_DIR=1
+                ASSET_PLAN_DIR="$2"
+                shift ;;
             --assets|--apply-assets|--restore-assets|--finalize-assets)
                 [ -n "${2:-}" ] || { echo "$PROGNAME: $1 requires a game name or path" >&2; exit 2; }
                 OPT_ASSETS=1
@@ -538,6 +548,7 @@ parse_args() {
         "OPT_DEDUPE:--dedupe:0"
         "OPT_RECHECK:--recheck:0"
         "OPT_ASSETS:--assets:0"
+        "OPT_ASSET_PLAN_DIR:--asset-plan-dir:0"
         "OPT_ASSET_INVENTORY:--asset-inventory:0"
         "OPT_ASSET_CONTAINERS:--asset-containers:0"
         "OPT_AUDIT_GAME_PACKS:--audit-game-packs:0"
@@ -4857,6 +4868,20 @@ if [ "$OPT_RECHECK" -eq 1 ]; then
     require_btrfs
     discover_data
     cmd_recheck
+    exit $?
+fi
+
+# Read-only backend planning can run on ext4 and non-Steam directories. The
+# native planner opens regular asset files but does not invoke Btrfs ioctls in
+# plan mode. Never silently apply asset changes through this route.
+if [ "$OPT_ASSET_PLAN_DIR" -eq 1 ]; then
+    require_btrfs  # checks bundled backend protocol, not filesystem type
+    if [ ! -d "$ASSET_PLAN_DIR" ] || [ -L "$ASSET_PLAN_DIR" ]; then
+        printf '%s: --asset-plan-dir requires a real directory (no symlink).\n' "$PROGNAME" >&2
+        exit 2
+    fi
+    printf 'Read-only Balanced asset preview on any filesystem; estimates are logical bytes, NOT net free-space savings or game compatibility.\n'
+    "$(native_backend)" asset-plan balanced "$ASSET_PLAN_DIR"
     exit $?
 fi
 
