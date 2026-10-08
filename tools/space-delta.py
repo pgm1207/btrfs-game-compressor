@@ -132,7 +132,7 @@ def _write_json(output, obj):
         # Keep reports outside the measured filesystem when possible: report
         # writes themselves otherwise perturb its free-space observation.
         target = Path(output)
-        if target.exists() and target.is_symlink():
+        if target.is_symlink():
             raise ValueError("Refusing to overwrite a symlink output")
         target.write_text(serialized)
 
