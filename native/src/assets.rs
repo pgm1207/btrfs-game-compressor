@@ -1936,8 +1936,20 @@ fn packed_asset_pass(root: &Path, target: &str, p: &Profile, action: &str, level
                             )));
                         }
                     }
-                    if std::env::var_os("BGC_VERBOSE").is_some() {
-                        eprintln!("Skipping packed asset {}: {e}", path.display());
+                    // A format parse failure is an unsupported candidate; a
+                    // filesystem/staging failure is not. Silent ENOSPC, EACCES
+                    // and create_new collisions are unacceptable on a command
+                    // that reports successful optimization.
+                    if matches!(e.kind(),
+                        io::ErrorKind::InvalidData | io::ErrorKind::Unsupported |
+                        io::ErrorKind::UnexpectedEof
+                    ) {
+                        if std::env::var_os("BGC_VERBOSE").is_some() {
+                            eprintln!("Skipping unsupported packed asset {}: {e}", path.display());
+                        }
+                    } else {
+                        return Err(io::Error::new(e.kind(),
+                            format!("packed optimization failed for {}: {e}", path.display())));
                     }
                 }
             }
@@ -2503,6 +2515,25 @@ mod tests {
         let no_gain = packed_apply_with_backup(&root, &pack, "ultra-performance", 1).unwrap();
         assert_eq!(no_gain, (0, 0));
         assert!(!backup.exists(), "no-gain pack must not retain a backup");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn packed_pass_reports_staging_collision_instead_of_silent_success() {
+        let root = fixture("packed-io-errors");
+        let pack = root.join("game.pck");
+        let stale = append_suffix(&pack, &format!(".bgc-packed-stage-{}", std::process::id()));
+        fs::write(&pack, vec![0u8; 100]).unwrap();
+        fs::write(&stale, b"important pre-existing data").unwrap();
+        let p = profile("balanced").unwrap().unwrap();
+        let tree = crate::Tree::for_asset_writes(&root).unwrap();
+        let e = packed_asset_pass(&root, "balanced", &p, "apply", 1, true, Some(&tree)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&stale).unwrap(), b"important pre-existing data");
+        assert_eq!(fs::read(&pack).unwrap(), vec![0u8; 100]);
+        fs::remove_file(&stale).unwrap();
+        let result = packed_asset_pass(&root, "balanced", &p, "apply", 1, true, Some(&tree)).unwrap();
+        assert_eq!(result.count, 0, "unsupported pack is a no-op");
         fs::remove_dir_all(root).unwrap();
     }
 
