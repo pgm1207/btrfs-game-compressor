@@ -466,6 +466,132 @@ pub fn prepare_asset(max_edge: u32, path: &Path) -> io::Result<Option<(Vec<u8>, 
     }
 }
 
+/// Read-only diagnostic: compare a candidate DDS against an original downscaled
+/// to the same dimensions. This measures codec-generation differences versus a
+/// Lanczos3 reference; it deliberately does NOT measure detail lost by lowering
+/// the resolution or establish game/runtime compatibility.
+#[derive(Debug)]
+struct QualityMetrics {
+    original_w: u32,
+    original_h: u32,
+    candidate_w: u32,
+    candidate_h: u32,
+    psnr_black: f64,
+    psnr_white: f64,
+    alpha_differing_pixels: u64,
+}
+
+fn read_quality_input(path: &Path) -> io::Result<(Vec<u8>, Parsed)> {
+    const QUALITY_MAX_BYTES: u64 = 128 * 1024 * 1024;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let before = file.metadata()?;
+    if !before.is_file() || before.len() < 128 || before.len() > QUALITY_MAX_BYTES {
+        return Err(bad("quality analysis requires a regular DDS up to 128 MiB"));
+    }
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    // Bound the actual bytes read as well as the initial fstat size, even if
+    // another process grows the descriptor after the metadata check.
+    (&mut file).take(QUALITY_MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > QUALITY_MAX_BYTES {
+        return Err(bad("DDS grew past quality analysis file budget"));
+    }
+    let after = file.metadata()?;
+    if before.len() != after.len()
+        || before.mtime() != after.mtime()
+        || before.mtime_nsec() != after.mtime_nsec()
+    {
+        return Err(bad("DDS changed during quality analysis"));
+    }
+    let parsed = parse(&bytes)?;
+    if parsed.width as u64 * parsed.height as u64 > 16_777_216 {
+        return Err(bad("quality analysis exceeds the 16 million pixel budget"));
+    }
+    Ok((bytes, parsed))
+}
+
+fn decode_quality_base(bytes: &[u8], p: &Parsed) -> io::Result<RgbaImage> {
+    let surface = Surface {
+        width: p.width,
+        height: p.height,
+        depth: 1,
+        layers: 1,
+        mipmaps: p.mipmaps,
+        image_format: p.format,
+        data: &bytes[p.data_start..],
+    };
+    let pixels = surface.decode_rgba8()
+        .map_err(|error| bad(&format!("cannot decode quality DDS: {error}")))?;
+    pixels.get_image(0, 0, 0).ok_or_else(|| bad("quality DDS has no base mip"))
+}
+
+fn quality_metrics(original_path: &Path, candidate_path: &Path) -> io::Result<QualityMetrics> {
+    let (original_bytes, original) = read_quality_input(original_path)?;
+    let (candidate_bytes, candidate) = read_quality_input(candidate_path)?;
+    if original.format != candidate.format
+        || candidate.width > original.width
+        || candidate.height > original.height
+    {
+        return Err(bad("candidate DDS must retain the codec and never upscale"));
+    }
+    let source = decode_quality_base(&original_bytes, &original)?;
+    let expected = if (original.width, original.height) == (candidate.width, candidate.height) {
+        source
+    } else {
+        image::imageops::resize(
+            &source, candidate.width, candidate.height, FilterType::Lanczos3,
+        )
+    };
+    let actual = decode_quality_base(&candidate_bytes, &candidate)?;
+    if expected.dimensions() != actual.dimensions() {
+        return Err(bad("decoded quality DDS dimensions disagree"));
+    }
+    let (mut black_error, mut white_error, mut alpha_differing) = (0f64, 0f64, 0u64);
+    for (a, b) in expected.pixels().zip(actual.pixels()) {
+        let ap = a.0;
+        let bp = b.0;
+        if ap[3] != bp[3] { alpha_differing += 1; }
+        for channel in 0..3 {
+            let av = ap[channel] as f64 * ap[3] as f64 / 255.0;
+            let bv = bp[channel] as f64 * bp[3] as f64 / 255.0;
+            black_error += (av - bv).powi(2);
+            // Also compare the appearance when alpha is composited onto white.
+            let aw = av + (255 - ap[3]) as f64;
+            let bw = bv + (255 - bp[3]) as f64;
+            white_error += (aw - bw).powi(2);
+        }
+    }
+    let samples = candidate.width as f64 * candidate.height as f64 * 3.0;
+    let psnr = |error: f64| {
+        if error == 0.0 { f64::INFINITY }
+        else { 10.0 * (255.0f64 * 255.0 * samples / error).log10() }
+    };
+    Ok(QualityMetrics {
+        original_w: original.width,
+        original_h: original.height,
+        candidate_w: candidate.width,
+        candidate_h: candidate.height,
+        psnr_black: psnr(black_error),
+        psnr_white: psnr(white_error),
+        alpha_differing_pixels: alpha_differing,
+    })
+}
+
+/// Compare two DDS files without writing either source. The PSNR values
+/// describe only additional codec distortion after matching dimensions.
+pub fn quality(original: &Path, candidate: &Path) -> io::Result<()> {
+    let q = quality_metrics(original, candidate)?;
+    println!(
+        "TEXTURE_QUALITY|{}|{}|{}|{}|{:.2}|{:.2}|{}",
+        q.original_w, q.original_h, q.candidate_w, q.candidate_h,
+        q.psnr_black, q.psnr_white, q.alpha_differing_pixels,
+    );
+    eprintln!("Quality comparison is against a resized source, not the original rendered size. It does not measure lost detail, engine compatibility or in-game quality.");
+    Ok(())
+}
+
 /// Downscale a DDS texture to `max_dim` and export it to `output`, printing one
 /// machine-readable summary line. The source is only read.
 pub fn compress(max_dim: u32, input: &Path, output: &Path) -> io::Result<()> {
@@ -779,6 +905,30 @@ mod tests {
         // A non-mip-aligned target must keep the normal resampling path.
         let interpolated = prepare(48, &path, false).unwrap();
         assert_eq!(parse(&interpolated.bytes).unwrap().width, 48);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn quality_diagnostic_is_read_only_and_rejects_incompatible_candidates() {
+        let root = std::env::temp_dir().join(format!("bgc-texture-quality-{}", stamp()));
+        fs::create_dir(&root).unwrap();
+        let original_path = root.join("original.dds");
+        let candidate_path = root.join("candidate.dds");
+        let original = encoded_source(64, 64, ImageFormat::BC3RgbaUnorm);
+        fs::write(&original_path, &original).unwrap();
+        compress(32, &original_path, &candidate_path).unwrap();
+        let candidate_before = fs::read(&candidate_path).unwrap();
+        let metrics = quality_metrics(&original_path, &candidate_path).unwrap();
+        assert_eq!((metrics.original_w, metrics.original_h), (64, 64));
+        assert_eq!((metrics.candidate_w, metrics.candidate_h), (32, 32));
+        assert!(metrics.psnr_black > 0.0 && metrics.psnr_white > 0.0);
+        assert!(metrics.alpha_differing_pixels <= 32 * 32);
+        quality(&original_path, &candidate_path).unwrap();
+        assert_eq!(fs::read(&original_path).unwrap(), original);
+        assert_eq!(fs::read(&candidate_path).unwrap(), candidate_before);
+        assert!(quality_metrics(&candidate_path, &original_path).is_err());
+        fs::write(root.join("bad.dds"), b"not a DDS").unwrap();
+        assert!(quality_metrics(&original_path, &root.join("bad.dds")).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

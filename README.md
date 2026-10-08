@@ -214,6 +214,20 @@ output is lossy and has not been validated in-game.
 ./btrfs-game-compressor --texture-compress-tree 1920 assets/ out/assets/
 ```
 
+**Read-only DDS quality diagnostic (original and candidate DDS files):**
+
+```sh
+bgc-native texture-quality original.dds candidate.dds
+```
+
+The output includes input/output dimensions, PSNR for black/white backgrounds,
+and changed alpha-pixel counts. The comparison resizes the original to the
+candidate dimensions first, so it **measures codec-generation distortion only**:
+there is no claim that lost source resolution, sprite readability or game
+compatibility are acceptable. Both DDS files remain unchanged; the diagnostic
+refuses differing codecs, upscaled candidates, overly large inputs or unsupported
+layouts.
+
 **Apply to an installed game (beta, opt-in):**
 
 ```sh
