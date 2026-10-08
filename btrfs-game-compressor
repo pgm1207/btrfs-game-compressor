@@ -4772,6 +4772,8 @@ if [ "$OPT_COMPACT_ALL" -eq 1 ]; then
         runner="$(dirname "$(readlink -f "$0")")/bgc-library-compaction.py"
     fi
     [ -f "$runner" ] || { printf 'Library compaction runner is missing.\n' >&2; exit 1; }
+    printf 'Warning: this library-wide Balanced asset pass does not retain new restore copies. Steam verification/downloads may be needed to undo changed assets.\n' >&2
+    steam_update_advisory >&2
     exec python3 "$runner" --repo "$(dirname "$(readlink -f "$0")")" \
         --state-dir "${XDG_STATE_HOME:-$HOME/.local/state}/btrfs-game-compressor/compact-balanced" \
         --apply-assets-no-backup

@@ -74,7 +74,10 @@ libraries: 1   games: 225   pending: 12   compacted: 209   compressed only: 4   
 
 Run `./btrfs-game-compressor --compact-all-no-backup` for a checkpointed installed-library
 Balanced asset → Zstd → dedupe pipeline. Python 3 is required. This is irreversible:
-no new asset backups are retained. Results and `stats.md` are stored under
+no new asset backups are retained. **Consider setting affected games to Steam's
+'Only update this game when I launch it' policy before applying lossy changes;**
+this only defers background updates and cannot prevent launch-required patches.
+After a game update, reassess the new assets before repeating optimization. Results and `stats.md` are stored under
 `${XDG_STATE_HOME:-~/.local/state}/btrfs-game-compressor/compact-balanced`.
 An interrupted asset stage is flagged for manual recovery, never blindly repeated.
 Unsupported formats remain unchanged; completion is not full asset coverage or
