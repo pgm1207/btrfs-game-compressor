@@ -1,5 +1,58 @@
 # Changelog
 
+## Unreleased (main after v0.3.0)
+
+Changes below are source commits **not included in the published v0.3.0
+archives**. They require a subsequent tagged release, release-CI verification and
+fresh binary packaging before end users can obtain them via the installer.
+
+### Safety and compatibility
+
+- Preserve **all platform-specific asset directories** during `--slim` until
+  the game runtime can be independently established. SteamOS can launch native
+  Linux titles or Windows titles through Proton, so filesystem/host OS alone is
+  not evidence for deletion (#1).
+- Correct default Steam Deck storage claims. Standard Steam Deck installations
+  typically use ext4; only explicitly Btrfs-formatted game libraries are eligible
+  for Btrfs compression/deduplication (#2).
+- Give the actual Steam update policy: `Only update this game when I launch it`
+  defers background changes and cannot permanently disable updates. Show the
+  advisory after supported asset apply/slim and before irreversible library-wide
+  compaction; remind users to revalidate lossy assets after Steam updates (#2, #21).
+- Avoid reading an invisible **second confirmation** when the TUI already asked
+  the user to approve asset optimization (#4).
+- Improve running-game heuristics by checking accessible `/proc/PID/cwd` in
+  addition to memory mapped file paths; document that process checks are
+  best-effort and cannot atomically prevent later launches (#22).
+
+### Compression, quality and usability
+
+- In installed beta DDS apply, skip same-size lossy recompression and reject
+  too-thin downsized textures before expensive decoding. Detached DDS export is
+  still explicit and separate. The half-original-dimension budget is not yet
+  implemented for this loose DDS route (#5).
+- Reuse **byte-identical encoded lower DDS mip levels** when a requested size
+  exactly matches an existing mip chain level. This avoids an additional codec
+  generation but **does not preserve lost spatial resolution** or establish
+  game compatibility (#19).
+- Add `--asset-plan-dir DIR`, a read-only Balanced asset-candidate scan for
+  arbitrary real directories, including ext4 Steam libraries. It does not
+  perform filesystem compression or enable asset writes outside Btrfs (#6).
+- Add native end-to-end read-only planner tests using a regular temporary
+  filesystem and symlinked root rejection (#20).
+
+### Testing
+
+- Add CI that creates a disposable loopback Btrfs mount and actually runs the
+  opt-in native filesystem integration tests, instead of silently passing with
+  those cases skipped (#3).
+
+**Still unresolved:** safe transactional cross-filesystem asset writers,
+validated runtime compatibility of altered Godot/Unity/Unreal content, absolute
+protection against concurrent game launch, accurate per-operation attributable
+net reclaimed space, GUI/controller controls, and signed releases. Track those
+separately in GitHub issues #7–#18.
+
 ## 0.3.0 — 2026-10-08 — Texture compression MVP and Unity bundle inventory
 
 - Add a gated, default-off `development-audits` build with native-only draft
