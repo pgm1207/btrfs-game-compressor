@@ -6,13 +6,78 @@ import hashlib
 from io import BytesIO
 import json
 import math
+import os
 from pathlib import Path
+import re
+import stat
 import struct
+
+MAX_FILE_BYTES = 64 * 1024 * 1024
+MAX_PIXELS = 16_777_216
+
+
+def read_snapshot(path):
+    """Bounded regular-file read; hashes describe this snapshot, not an install."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or not 10 <= before.st_size <= MAX_FILE_BYTES:
+        # Validate on the raw descriptor before wrapping it: fdopen refuses a
+        # directory with IsADirectoryError, which is a different failure surface.
+        os.close(fd)
+        raise ValueError('XNB verification requires a bounded regular file')
+    with os.fdopen(fd, 'rb', buffering=0) as source:
+        chunks = []
+        remaining = before.st_size
+        while remaining:
+            chunk = source.read(min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ValueError('XNB input truncated during verification')
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(source.fileno())
+        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError('XNB input changed during verification')
+        return b''.join(chunks)
+
+
+def known_texture_reader(name, version):
+    """Independent, non-executing implementation of the reader-name subset."""
+    parts = [part.strip() for part in name.split(',')]
+    if version != 0 or parts[0] != 'Microsoft.Xna.Framework.Content.Texture2DReader':
+        return False
+    if len(parts) == 1:
+        return True
+    if parts[1] not in ('Microsoft.Xna.Framework', 'Microsoft.Xna.Framework.Graphics',
+                        'MonoGame.Framework', 'FNA'):
+        return False
+    seen = set()
+    for qualifier in parts[2:]:
+        key, separator, value = qualifier.partition('=')
+        if not separator or key in seen:
+            return False
+        seen.add(key)
+        if key == 'Version':
+            components = value.split('.')
+            if (len(components) != 4 or any(not re.fullmatch(r'[0-9]{1,5}', part)
+                                           or int(part) > 65535 for part in components)):
+                return False
+        elif key == 'Culture':
+            if value != 'neutral':
+                return False
+        elif key == 'PublicKeyToken':
+            if value != 'null' and not re.fullmatch(r'[0-9a-fA-F]{16}', value):
+                return False
+        else:
+            return False
+    return True
 
 
 def read_7bit(data, offset):
     value = 0
     for step in range(5):
+        if not 0 <= offset < len(data):
+            raise ValueError('truncated 7-bit value')
         byte = data[offset]
         offset += 1
         if step == 4 and byte > 7:
@@ -26,13 +91,15 @@ def read_7bit(data, offset):
 
 
 def u32(data, offset):
+    if offset < 0 or offset + 4 > len(data):
+        raise ValueError('truncated 32-bit value')
     return struct.unpack_from('<I', data, offset)[0]
 
 
 def inspect(data):
-    if len(data) < 10 or data[:3] != b'XNB' or data[3] not in (ord('d'), ord('w')):
+    if not 10 <= len(data) <= MAX_FILE_BYTES or data[:3] != b'XNB' or data[3] not in (ord('d'), ord('w')):
         raise ValueError('invalid XNB header')
-    if data[4] != 5 or data[5] != 0 or u32(data, 6) != len(data):
+    if data[4] != 5 or data[5] not in (0, 1) or u32(data, 6) != len(data):
         raise ValueError('unsupported XNB version, flags or declared length')
     offset = 10
     readers, offset = read_7bit(data, offset)
@@ -43,31 +110,33 @@ def inspect(data):
         length, offset = read_7bit(data, offset)
         if not 1 <= length <= 4096 or offset + length + 4 > len(data):
             raise ValueError('reader record outside file')
-        names.append(data[offset:offset + length].decode('utf-8'))
+        name = data[offset:offset + length].decode('utf-8')
         offset += length
-        if u32(data, offset) != 0:
-            raise ValueError('reader version outside subset')
+        version = struct.unpack_from('<i', data, offset)[0]
+        names.append((name, version))
         offset += 4
     shared, offset = read_7bit(data, offset)
     root, offset = read_7bit(data, offset)
     if shared != 0 or not 1 <= root <= readers:
         raise ValueError('shared resource or root outside subset')
-    name = names[root - 1]
-    if name.split(',', 1)[0].strip() != 'Microsoft.Xna.Framework.Content.Texture2DReader':
+    name, version = names[root - 1]
+    if not known_texture_reader(name, version):
         raise ValueError('unsupported texture reader')
     texture_offset = offset
     if offset + 20 > len(data):
         raise ValueError('truncated texture header')
     format_id, width, height, levels, size = struct.unpack_from('<IIIII', data, offset)
     offset += 20
-    if format_id not in (4, 5, 6) or width == 0 or height == 0 or levels != 1:
+    if (format_id not in (4, 5, 6) or not 1 <= width <= 32768 or not 1 <= height <= 32768
+            or width * height > MAX_PIXELS or levels != 1):
         raise ValueError('unsupported texture shape')
     block_bytes = 8 if format_id == 4 else 16
     expected = ((width + 3) // 4) * ((height + 3) // 4) * block_bytes
     if size != expected or offset + size != len(data):
         raise ValueError('mip byte count or trailing data mismatch')
     return {'reader_prefix_end': texture_offset, 'format': format_id,
-            'width': width, 'height': height, 'payload_bytes': size}
+            'width': width, 'height': height, 'payload_bytes': size,
+            'flags': data[5], 'reader': name}
 
 
 def decode_pixels(data, info):
@@ -111,8 +180,8 @@ def pixel_metrics(original, exported, before, after):
 
 
 def verify(source, candidate, pixels=False):
-    original = source.read_bytes()
-    exported = candidate.read_bytes()
+    original = read_snapshot(source)
+    exported = read_snapshot(candidate)
     before, after = inspect(original), inspect(exported)
     prefix = before['reader_prefix_end']
     if (prefix != after['reader_prefix_end'] or original[:6] != exported[:6]
@@ -121,7 +190,9 @@ def verify(source, candidate, pixels=False):
     if (before['format'] != after['format'] or after['width'] > before['width']
             or after['height'] > before['height'] or len(exported) >= len(original)):
         raise ValueError('codec, dimensions or reduction gate mismatch')
-    result = {'source_sha256': hashlib.sha256(original).hexdigest(),
+    result = {'verification': 'detached_snapshot_structure_only',
+            'runtime_compatibility': 'unverified', 'physical_savings_bytes': None,
+            'source_sha256': hashlib.sha256(original).hexdigest(),
             'candidate_sha256': hashlib.sha256(exported).hexdigest(),
             'source_bytes': len(original), 'candidate_bytes': len(exported),
             'logical_savings_bytes': len(original) - len(exported),
@@ -130,6 +201,7 @@ def verify(source, candidate, pixels=False):
             'format_id': before['format']}
     if pixels:
         result['pixel_metrics'] = pixel_metrics(original, exported, before, after)
+        result['verification'] = 'detached_snapshot_structure_and_pixel_metrics'
     return result
 
 

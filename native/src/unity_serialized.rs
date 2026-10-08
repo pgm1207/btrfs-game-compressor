@@ -156,7 +156,9 @@ fn inventory_with_references(bytes: &[u8], h: &Header, retain: bool) -> io::Resu
                 Ok(_) => "TREE_NODE_BUDGET_SKIPPED",
                 Err(error) if error.kind() == io::ErrorKind::Unsupported => "UNSUPPORTED_TREE_SCHEMA",
                 Err(error) if crate::audit_io::is_budget_error(&error) => "TREE_BUDGET_SKIPPED",
-                Err(_) => "INVALID_OR_UNSUPPORTED_TREE",
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+                Err(error) if error.kind() == io::ErrorKind::InvalidData => "MALFORMED_TREE",
+                Err(_) => "TREE_PARSE_ERROR",
             };
             // Status retention is for the draft report only, bounded independently
             // of a possibly large type table. Existing summaries stay unchanged.

@@ -6,6 +6,11 @@ v5 Texture2D **detached development export** now performs a byte-identical
 no-change rebuild check before resizing, but runtime compatibility and visual
 quality are unverified. No installed writer is enabled by these drafts.
 
+**2026-10-08 local revision:** immutable snapshot reparsing and anonymous
+no-replace publication have been drafted, not built or tested. Historical trial
+results below apply to the baseline, not this revision. See the
+[hardening review](ENGINE_HARDENING_REVIEW_2026_10_08.md).
+
 ## Shared separation of responsibilities
 
 Keep four separate results:
@@ -51,12 +56,46 @@ re-encoding but still changes dimensions/texel usage: it is lossy and may break
 atlas/scripting coordinates. Unknown external texture consumers remain blockers
 for installed apply. A detached research artifact is not a validated game patch.
 
+### Detached publication draft — not an installed transaction
+
+The current local source reparses the immutable captured source and requires
+agreement with the initial descriptor inventory. It reparses the candidate from
+memory, retaining the exact prefix apart from the file-length word. This uses
+the **same parser**: independent verification remains a separate Python/media
+gate, not something Rust self-reparsing proves.
+
+`native/src/detached_export.rs` stages a new inode with Linux `O_TMPFILE` in a
+held destination directory, writes in cancellable chunks, syncs it, and rechecks
+the source descriptor. `linkat` through the held `/proc/self/fd` descriptor path
+then publishes it under a **new** basename, never replacing an existing file,
+directory or symlink. The directory is synced after publication. Staged files
+have owner-only mode `0600` (subject to umask); there is no named temporary-file
+fallback, pathname cleanup or output deletion on failure.
+
+Before link publication, an error drops the anonymous inode and creates no
+destination. After publication, directory-sync failure returns an explicit
+**complete artifact exists, durability unconfirmed** error; the artifact is
+retained and must not be blindly removed/retried. Cancellation is checked before
+commit, not misreported as precommit failure afterwards. Codec calls remain
+non-interruptible internally, with cancellation checks at their boundaries.
+
+Requirements/limitations: an `O_TMPFILE`-capable destination filesystem and usable
+`/proc/self/fd`; unsupported environments fail closed. The selected parent must
+be a trusted research directory. Its final component cannot be a symlink, but
+ancestor lookup, directory relocation/mount manipulation and hostile source
+writes are **not** sandboxed or snapshotted. This is not a multi-file recovery
+protocol and grants no installed-write eligibility. All of these new guarantees
+remain implementation intent until deferred validation passes.
+
 ## Unity: exact schema and ownership before rebuilding
 
 Start with one exact SerializedFile version/endian/schema and inline storage,
 not the entire v17–22 header range. The draft's selected field spans can locate
 original bytes, but `PRIMITIVE_BITS` does not establish signedness or purpose.
 Required size-dependent fields must have independently verified semantic types.
+The [reference/ownership contract](UNITY_REFERENCE_OWNERSHIP_CONTRACT.md) defines
+the separate graph-completeness prerequisite; it is design, not an implemented
+consumer reader or texture writer.
 
 The initial no-change recipe needs the original header, raw metadata/type hashes,
 object IDs/type indexes, object-table entry bytes, object bytes/gaps/alignment,

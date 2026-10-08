@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -103,38 +104,93 @@ def godot4_pcks(root):
                 yield path, metadata.st_size
 
 
-def plain_xnbs(root):
+def plain_xnbs(root, deadline=None):
     """Find uncompressed desktop XNB v5 files for optional development audits."""
+    def check_deadline():
+        if deadline is not None and time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired('xnb discovery', 0)
+
+    check_deadline()
     device = root.stat().st_dev
     for parent, directories, names in os.walk(root, followlinks=False, onerror=raise_walk_error):
-        directories[:] = [name for name in directories if name != '.bgc-assets-backup'
-                          and not (Path(parent) / name).is_symlink()
-                          and (Path(parent) / name).stat().st_dev == device]
+        check_deadline()
+        retained = []
+        for name in directories:
+            check_deadline()
+            if name == '.bgc-assets-backup':
+                continue
+            child = (Path(parent) / name).lstat()
+            if stat.S_ISDIR(child.st_mode) and child.st_dev == device:
+                retained.append(name)
+        directories[:] = retained
         for name in names:
+            check_deadline()
             if not name.lower().endswith('.xnb'):
                 continue
             path = Path(parent) / name
             metadata = path.lstat()
-            if not path.is_file() or path.is_symlink() or metadata.st_dev != device or metadata.st_size > 64 * 1024 * 1024:
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_dev != device or metadata.st_size > 64 * 1024 * 1024:
                 continue
-            with path.open('rb') as source:
+            # Refuse a final symlink/FIFO swapped in between discovery and open.
+            # Ancestor containment and filesystem snapshot consistency are NOT
+            # guaranteed by this read-only research scanner.
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            with os.fdopen(fd, 'rb', buffering=0) as source:
+                opened = os.fstat(source.fileno())
+                if (not stat.S_ISREG(opened.st_mode) or opened.st_dev != metadata.st_dev
+                        or opened.st_ino != metadata.st_ino or opened.st_size != metadata.st_size
+                        or opened.st_mtime_ns != metadata.st_mtime_ns or opened.st_ctime_ns != metadata.st_ctime_ns):
+                    raise ValueError(f'XNB source changed during discovery: {path}')
                 header = source.read(10)
+                after = os.fstat(source.fileno())
+                if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+                        opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns):
+                    raise ValueError(f'XNB source changed during header reading: {path}')
             if (len(header) == 10 and header[:3] == b'XNB' and header[3] in (ord('d'), ord('w'))
-                    and header[4:6] == b'\x05\x00'
+                    and header[4] == 5 and header[5] in (0, 1)
                     and int.from_bytes(header[6:], 'little') == metadata.st_size):
                 yield path, metadata.st_size
 
 
 def parse_xnb_audit(stdout, source_bytes, max_edge):
+    def record(tag, fields):
+        rows = [line.split('|') for line in stdout.splitlines() if line.startswith(tag + '|')]
+        if len(rows) != 1 or len(rows[0]) != fields + 1:
+            raise ValueError(f'unexpected {tag} schema')
+        return rows[0][1:]
+
+    def numbers(values):
+        if any(not value.isascii() or not value.isdecimal() for value in values):
+            raise ValueError('unexpected XNB numeric schema')
+        return list(map(int, values))
+
+    if not 64 <= max_edge <= 8192:
+        raise ValueError('XNB target edge outside export subset')
     texture = [line.split('|') for line in stdout.splitlines() if line.startswith('XNB_TEXTURE|')]
     status = [line.split('|') for line in stdout.splitlines() if line.startswith('XNB_TEXTURE_STATUS|')]
     if len(status) != 1 or len(status[0]) != 3:
         raise ValueError('unexpected XNB audit status schema')
-    if status[0][1:] != ['METADATA_ONLY', 'METADATA_ONLY']:
+    if status[0][1] == 'OPAQUE' and status[0][2] in {
+            'UNSUPPORTED_VERSION', 'COMPRESSED_PAYLOAD_NOT_DECODED', 'UNSUPPORTED_TARGET',
+            'SHARED_RESOURCES_NOT_PARSED', 'NULL_ROOT', 'CUSTOM_OR_UNSUPPORTED_ROOT_READER',
+            'UNSUPPORTED_SURFACE_FORMAT'}:
         return None
-    if len(texture) != 1 or len(texture[0]) != 5 or any(not v.isdecimal() for v in texture[0][1:]):
+    if status[0][1:] != ['METADATA_ONLY', 'METADATA_ONLY']:
+        raise ValueError('unexpected XNB audit status value')
+    header = record('XNB_CONTENT_HEADER', 4)
+    version, flags, declared_size = numbers(header[1:])
+    if (header[0] not in ('w', 'd') or version != 5 or flags not in (0, 1)
+            or declared_size != source_bytes or source_bytes > 64 * 1024 * 1024):
+        raise ValueError('XNB audit header or source length mismatch')
+    shared = numbers(record('XNB_SHARED', 1))[0]
+    root = numbers(record('XNB_ROOT', 1))[0]
+    if shared != 0 or not 1 <= root <= 128:
+        raise ValueError('XNB shared resources or root outside subset')
+    if len(texture) != 1 or len(texture[0]) != 5:
         raise ValueError('unexpected XNB texture schema')
-    surface, width, height, levels = map(int, texture[0][1:])
+    surface, width, height, levels = numbers(texture[0][1:])
+    if not 1 <= width <= 32768 or not 1 <= height <= 32768:
+        raise ValueError('XNB dimensions outside audit subset')
     if (surface not in (4, 5, 6) or levels != 1 or width * height > 16_777_216
             or max(width, height) <= 512 or min(width, height) <= 64):
         return None
@@ -146,11 +202,55 @@ def parse_xnb_audit(stdout, source_bytes, max_edge):
     block = 8 if surface == 4 else 16
     old_payload = ((width + 3) // 4) * ((height + 3) // 4) * block
     new_payload = ((new_width + 3) // 4) * ((new_height + 3) // 4) * block
-    if old_payload <= new_payload or source_bytes < old_payload + 4:
+    level, mip_width, mip_height, offset, size = numbers(record('XNB_MIP', 5))
+    if (level != 0 or (mip_width, mip_height) != (width, height)
+            or size != old_payload or offset < 30 or offset + size != source_bytes
+            or old_payload <= new_payload):
         raise ValueError('XNB payload or candidate length is inconsistent')
     return {'format_id': surface, 'width': width, 'height': height,
             'candidate_width': new_width, 'candidate_height': new_height,
             'theoretical_logical_savings_bytes': old_payload - new_payload}
+
+
+def xnb_opportunities(backend, root, max_edge, deadline):
+    """Keep optional research failures independent from production estimates."""
+    result = {'xnb_candidates': [], 'xnb_theoretical_logical_savings_bytes': 0,
+              'xnb_audit_status': 'ok', 'xnb_header_files': 0, 'xnb_audited_files': 0,
+              'xnb_name_skips': 0, 'xnb_error_count': 0, 'xnb_error_samples': []}
+
+    def error(message):
+        result['xnb_error_count'] += 1
+        result['xnb_audit_status'] = 'partial error'
+        if len(result['xnb_error_samples']) < 16:
+            result['xnb_error_samples'].append(message[-1000:])
+
+    try:
+        for xnb, source_bytes in plain_xnbs(root, deadline):
+            result['xnb_header_files'] += 1
+            if atlas_hint(xnb):
+                result['xnb_name_skips'] += 1
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired('xnb-texture-audit', 0)
+            try:
+                audited = subprocess.run([str(backend), 'xnb-texture-audit', str(xnb)],
+                                         capture_output=True, text=True, timeout=remaining, check=False)
+                if audited.returncode:
+                    raise ValueError(f'XNB audit exited {audited.returncode} for {xnb}: {audited.stderr[-1000:]}')
+                details = parse_xnb_audit(audited.stdout, source_bytes, max_edge)
+                result['xnb_audited_files'] += 1
+                if details:
+                    details['path'] = str(xnb)
+                    result['xnb_candidates'].append(details)
+                    result['xnb_theoretical_logical_savings_bytes'] += details['theoretical_logical_savings_bytes']
+            except (OSError, ValueError) as exc:
+                error(f'{xnb}: {exc}')
+    except subprocess.TimeoutExpired:
+        result['xnb_audit_status'] = 'timeout'
+    except (OSError, ValueError) as exc:
+        error(str(exc))
+    return result
 
 
 def atlas_hint(path):
@@ -205,13 +305,15 @@ def render_markdown(report):
     if report.get('experimental_xnb_backend_sha256'):
         lines.extend(['', '## Experimental XNB v5 texture opportunities', '',
                       'These are theoretical payload-byte reductions for audited single-mip BC textures at the selected edge. '
-                      'They are excluded from the combined totals above. Atlas references, runtime compatibility, visual quality and physical savings are unverified.',
-                      '', '| Game | Candidate files | Theoretical logical reduction | Audit status |',
-                      '|---|---:|---:|---|'])
+                      'They are excluded from the combined totals above. Partial/error/timeout rows include only candidates recorded so far, not complete coverage. '
+                      'Header discovery omits compressed/other-version files. Atlas references, runtime compatibility, visual quality and physical savings are unverified.',
+                      '', '| Game | Candidate files | Theoretical logical reduction | Audited / header files | Audit status |',
+                      '|---|---:|---:|---:|---|'])
         for row in sorted(rows, key=lambda item: item.get('xnb_theoretical_logical_savings_bytes', 0), reverse=True):
             name = row['name'].replace('|', '\\|').replace('\n', ' ')
             lines.append(f"| {name} | {len(row.get('xnb_candidates', []))} | "
-                         f"{row.get('xnb_theoretical_logical_savings_bytes', 0):,} | "
+                          f"{row.get('xnb_theoretical_logical_savings_bytes', 0):,} | "
+                          f"{row.get('xnb_audited_files', 0)} / {row.get('xnb_header_files', 0)} | "
                          f"{row.get('xnb_audit_status', 'not run')} |")
     return '\n'.join(lines) + '\n'
 
@@ -274,7 +376,7 @@ def main(argv=None):
         if not report_path.is_file():
             parser.error('--resume requires an existing asset-opportunities.json')
         report = json.loads(report_path.read_text())
-        if (report.get('schema') != 2 or report.get('profile') != args.profile
+        if (report.get('schema') != 3 or report.get('profile') != args.profile
                 or report.get('backend_sha256') != backend_hash
                 or report.get('experimental_xnb_backend_sha256') != xnb_hash
                 or report.get('xnb_max_edge', 1024) != args.xnb_max_edge
@@ -289,7 +391,7 @@ def main(argv=None):
     else:
         if report_path.exists() or markdown_path.exists():
             parser.error('report already exists; choose a new output directory or pass --resume')
-        report = {'schema': 2, 'profile': args.profile, 'backend_sha256': backend_hash,
+        report = {'schema': 3, 'profile': args.profile, 'backend_sha256': backend_hash,
                   'experimental_xnb_backend_sha256': xnb_hash, 'xnb_max_edge': args.xnb_max_edge,
                   'status_json_sha256': source_hash, 'selected_count': len(selected),
                   'selected_games': manifest, 'started_unix': time.time(),
@@ -321,33 +423,14 @@ def main(argv=None):
                     row['godot4_pcks'].append(details)
                     row['godot4_logical_savings_bytes'] += details['estimated_logical_savings_bytes']
                 row['estimated_logical_savings_bytes'] += row['godot4_logical_savings_bytes']
-                if xnb_backend:
-                    row['xnb_candidates'] = []
-                    row['xnb_theoretical_logical_savings_bytes'] = 0
-                    row['xnb_audit_status'] = 'ok'
-                    for xnb, source_bytes in plain_xnbs(Path(path)):
-                        if atlas_hint(xnb):
-                            continue
-                        remaining = args.timeout - (time.monotonic() - started)
-                        if remaining <= 0:
-                            row['xnb_audit_status'] = 'timeout'
-                            break
-                        audited = subprocess.run([str(xnb_backend), 'xnb-texture-audit', str(xnb)],
-                                                 capture_output=True, text=True, timeout=remaining, check=False)
-                        if audited.returncode:
-                            row['xnb_audit_status'] = 'partial error'
-                            continue
-                        details = parse_xnb_audit(audited.stdout, source_bytes, args.xnb_max_edge)
-                        if details:
-                            details['path'] = str(xnb)
-                            row['xnb_candidates'].append(details)
-                            row['xnb_theoretical_logical_savings_bytes'] += details['theoretical_logical_savings_bytes']
                 row['status'] = 'ok'
         except subprocess.TimeoutExpired:
             row['status'] = 'timeout'
             row['error'] = f'exceeded {args.timeout} seconds'
         except (OSError, ValueError) as error:
             row['error'] = str(error)
+        if xnb_backend and row['status'] == 'ok':
+            row.update(xnb_opportunities(xnb_backend, Path(path), args.xnb_max_edge, started + args.timeout))
         row['scan_seconds'] = time.monotonic() - started
         report['games'].append(row)
         atomic_write(report_path, json.dumps(report, indent=2) + '\n')
@@ -357,7 +440,8 @@ def main(argv=None):
     atomic_write(report_path, json.dumps(report, indent=2) + '\n')
     atomic_write(markdown_path, render_markdown(report))
     print(markdown_path)
-    return 1 if any(row['status'] != 'ok' for row in report['games']) else 0
+    return 1 if any(row['status'] != 'ok' or row.get('xnb_audit_status', 'ok') != 'ok'
+                    for row in report['games']) else 0
 
 
 if __name__ == '__main__':

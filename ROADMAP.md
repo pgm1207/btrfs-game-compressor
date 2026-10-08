@@ -18,6 +18,10 @@ Subsequent native-only reader drafts and their limits are tracked in
 milestones below are still pending even where draft code now exists.
 Preliminary [BA2/Wwise/Defold follow-up research](docs/ENGINE_FOLLOWUP_CANDIDATES.md)
 records additional archive, reference and integrity requirements, not new support.
+The [2026-10-08 hardening review](docs/ENGINE_HARDENING_REVIEW_2026_10_08.md)
+tracks source-only XNB publication/report safety and Unity diagnostic revisions.
+They and the [Unity ownership contract](docs/UNITY_REFERENCE_OWNERSHIP_CONTRACT.md)
+do not complete any validated writer or release milestone below.
 
 ## What “support” means
 

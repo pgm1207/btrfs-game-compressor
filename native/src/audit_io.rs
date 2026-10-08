@@ -100,7 +100,12 @@ impl Source {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(size).map_err(|_| invalid("format audit allocation limit exceeded"))?;
         bytes.resize(size, 0);
-        self.file.read_exact_at(&mut bytes, offset)?;
+        // Full-file export snapshots can be large. Bound the interval between
+        // cancellation checks instead of doing one multi-megabyte syscall.
+        for (index, chunk) in bytes.chunks_mut(1024 * 1024).enumerate() {
+            cancelled()?;
+            self.file.read_exact_at(chunk, offset + index as u64 * 1024 * 1024)?;
+        }
         cancelled()?;
         Ok(bytes)
     }

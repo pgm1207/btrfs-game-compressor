@@ -10,6 +10,19 @@ fn u32_at(b: &[u8], offset: usize, big: bool) -> u32 {
     let v = b[offset..offset + 4].try_into().unwrap();
     if big { u32::from_be_bytes(v) } else { u32::from_le_bytes(v) }
 }
+fn local_string_at(strings: &[u8], offset: u32) -> io::Result<&str> {
+    let tail = strings.get(offset as usize..).ok_or_else(|| bad("Unity tree string offset out of bounds"))?;
+    let n = match tail.iter().take(513).position(|b| *b == 0) {
+        Some(n) => n,
+        None if tail.len() > 512 => return Err(crate::audit_io::budget_error("Unity tree string length exceeds inspection budget")),
+        None => return Err(bad("unterminated Unity tree string")),
+    };
+    let text = std::str::from_utf8(&tail[..n]).map_err(|_| bad("invalid Unity tree UTF-8"))?;
+    if text.is_empty() || text.chars().any(|c| c.is_control() || matches!(c, '|' | '/')) {
+        return Err(bad("unsafe Unity tree string"));
+    }
+    Ok(text)
+}
 fn string_at(strings: &[u8], offset: u32) -> io::Result<String> {
     // Only common strings needed by this bounded inspector. Unknown common
     // offsets are unsupported, never interpreted as an arbitrary type.
@@ -26,35 +39,69 @@ fn string_at(strings: &[u8], offset: u32) -> io::Result<String> {
         if common.is_empty() { return Err(unsupported("unsupported Unity common string")); }
         return Ok(common.to_owned());
     }
-    let tail = strings.get(offset as usize..).ok_or_else(|| bad("Unity tree string offset out of bounds"))?;
-    let n = tail.iter().take(513).position(|b| *b == 0).ok_or_else(|| bad("invalid Unity tree string"))?;
-    let text = std::str::from_utf8(&tail[..n]).map_err(|_| bad("invalid Unity tree UTF-8"))?;
-    if text.is_empty() || text.chars().any(|c| c.is_control() || matches!(c, '|' | '/')) {
-        return Err(bad("unsafe Unity tree string"));
-    }
-    Ok(text.to_owned())
+    Ok(local_string_at(strings, offset)?.to_owned())
 }
 pub fn parse(raw: &[u8], strings: &[u8], stride: usize, big: bool) -> io::Result<Vec<Node>> {
-    if !matches!(stride, 24 | 32) || raw.len() % stride != 0 || raw.is_empty() || raw.len() / stride > 4096 {
+    super::cancelled()?;
+    if !matches!(stride, 24 | 32) || raw.len() % stride != 0 || raw.is_empty() {
         return Err(bad("unsupported Unity type-tree node bounds"));
     }
+    if raw.len() / stride > 4096 { return Err(crate::audit_io::budget_error("Unity tree node count exceeds inspection budget")); }
+    // Validate framing/hierarchy BEFORE resolving common-string semantics. An
+    // unknown common offset in an early node must not mask malformed later nodes.
+    let mut previous_level = None;
+    let mut depth_exceeded = false;
+    for (index, b) in raw.chunks_exact(stride).enumerate() {
+        if index % 256 == 0 { super::cancelled()?; }
+        let level = b[2];
+        if previous_level.is_none() && level != 0
+            || previous_level.is_some_and(|previous: u8| level == 0 || level as u16 > previous as u16 + 1) {
+            return Err(bad("invalid Unity tree hierarchy"));
+        }
+        depth_exceeded |= level > 32;
+        previous_level = Some(level);
+    }
+    // Validate all bounded local strings too. Oversized strings remain a budget
+    // skip, but a later out-of-bounds/invalid local string is still malformed.
+    let mut string_limit = None;
+    for (index, b) in raw.chunks_exact(stride).enumerate() {
+        if index % 256 == 0 { super::cancelled()?; }
+        for position in [4, 8] {
+            let offset = u32_at(b, position, big);
+            if offset & 0x80000000 == 0 {
+                match local_string_at(strings, offset) {
+                    Ok(_) => (),
+                    Err(error) if crate::audit_io::is_budget_error(&error) => { string_limit = Some(error); }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+    if depth_exceeded { return Err(crate::audit_io::budget_error("Unity tree depth exceeds inspection budget")); }
+    if let Some(error) = string_limit { return Err(error); }
     let mut nodes: Vec<Node> = Vec::new();
     let mut string_budget = 128 * 1024usize;
     for b in raw.chunks_exact(stride) {
         let level = b[2];
-        if level > 32 || nodes.is_empty() && level != 0
-            || !nodes.is_empty() && (level == 0 || level > nodes.last().unwrap().level + 1) {
-            return Err(bad("invalid Unity tree hierarchy"));
-        }
         let kind = string_at(strings, u32_at(b, 4, big))?;
         let name = string_at(strings, u32_at(b, 8, big))?;
-        string_budget = string_budget.checked_sub(kind.len() + name.len()).ok_or_else(|| bad("Unity tree text budget exceeded"))?;
+        string_budget = string_budget.checked_sub(kind.len() + name.len())
+            .ok_or_else(|| crate::audit_io::budget_error("Unity tree text budget exceeded"))?;
         nodes.push(Node { kind, name,
             size: u32_at(b, 12, big) as i32, align: u32_at(b, 20, big) & 0x4000 != 0, level, end: 0 });
     }
+    // Linear subtree-end construction instead of repeatedly searching the
+    // remaining node table. The validated depth bounds the active stack to 33.
+    let mut active: Vec<usize> = Vec::with_capacity(33);
     for i in 0..nodes.len() {
-        nodes[i].end = (i + 1..nodes.len()).find(|&j| nodes[j].level <= nodes[i].level).unwrap_or(nodes.len());
+        if i % 256 == 0 { super::cancelled()?; }
+        while active.last().is_some_and(|&parent| nodes[parent].level >= nodes[i].level) {
+            nodes[active.pop().unwrap()].end = i;
+        }
+        active.push(i);
     }
+    let end = nodes.len();
+    for parent in active { nodes[parent].end = end; }
     if nodes[0].kind != "Texture2D" { return Err(bad("tree is not Texture2D")); }
     Ok(nodes)
 }
@@ -95,7 +142,7 @@ impl Reader<'_> {
     }
     fn align(&mut self) -> io::Result<()> { self.take((4 - self.pos % 4) % 4)?; Ok(()) }
     fn save(&mut self, path: &str, value: Value, capture: bool) -> io::Result<()> {
-        if path.len() > 1024 { return Err(bad("Unity field path exceeds limit")); }
+        if path.len() > 1024 { return Err(crate::audit_io::budget_error("Unity field path exceeds limit")); }
         if capture && self.values.insert(path.to_owned(), value).is_some() { return Err(bad("duplicate Unity texture field")); }
         Ok(())
     }
@@ -152,15 +199,26 @@ impl Reader<'_> {
                     self.span(path, start, "LENGTH_PREFIXED_BYTES", Some((start + 4, count)), capture)?;
                     self.save(path, Value::Bytes(count), capture)?;
                 } else {
-                    if count > 100000 { return Err(bad("Unity array count exceeds limit")); }
+                    if count > 100000 { return Err(crate::audit_io::budget_error("Unity array count exceeds limit")); }
                     for _ in 0..count { self.walk(nodes, data, path, false)?; }
                 }
             }
             _ if child => {
                 let mut j = i + 1;
                 while j < n.end {
-                    let p = if path.is_empty() { nodes[j].name.clone() } else { format!("{path}/{}", nodes[j].name) };
-                    self.walk(nodes, j, &p, capture)?; j = nodes[j].end;
+                    if capture {
+                        let length = path.len().checked_add(nodes[j].name.len())
+                            .and_then(|length| length.checked_add(usize::from(!path.is_empty())))
+                            .ok_or_else(|| bad("Unity field path length overflow"))?;
+                        if length > 1024 { return Err(crate::audit_io::budget_error("Unity field path exceeds limit")); }
+                        let p = if path.is_empty() { nodes[j].name.clone() } else { format!("{path}/{}", nodes[j].name) };
+                        self.walk(nodes, j, &p, true)?;
+                    } else {
+                        // Skipped array elements need schema walking, not a new
+                        // path allocation for every nested field/element.
+                        self.walk(nodes, j, path, false)?;
+                    }
+                    j = nodes[j].end;
                 }
             }
             _ => {
@@ -333,6 +391,33 @@ pub(crate) mod tests {
         tree[1].kind = "future_type".to_owned(); assert!(inspect_texture(&tree, &bytes, false).is_err());
         assert_eq!(string_at(&[], 0x80000000 | 874).unwrap(), "Texture2D");
         assert!(string_at(&[], 0x80000000 | 123456).is_err());
+    }
+    #[test]
+    fn unknown_common_strings_do_not_hide_later_malformed_tree_structure() {
+        for big in [false, true] {
+            let (raw, strings, _) = fixture(big);
+            let mut unknown = raw.clone();
+            let offset = 0x80000000u32 | 123456;
+            unknown[4..8].copy_from_slice(&if big { offset.to_be_bytes() } else { offset.to_le_bytes() });
+            assert_eq!(parse(&unknown, &strings, 32, big).unwrap_err().kind(), io::ErrorKind::Unsupported);
+            let mut broken = unknown.clone();
+            broken[32 + 2] = 3;
+            assert_eq!(parse(&broken, &strings, 32, big).unwrap_err().kind(), io::ErrorKind::InvalidData);
+            let mut broken = unknown;
+            let invalid_offset = strings.len() as u32 + 1;
+            broken[32 + 4..32 + 8].copy_from_slice(&if big { invalid_offset.to_be_bytes() } else { invalid_offset.to_le_bytes() });
+            assert_eq!(parse(&broken, &strings, 32, big).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        }
+    }
+    #[test]
+    fn oversized_tree_strings_are_budget_skips_not_proof_of_malformed_storage() {
+        let (mut raw, mut strings, _) = fixture(false);
+        let offset = strings.len() as u32;
+        strings.extend([b'x'; 600]); strings.push(0);
+        raw[8..12].copy_from_slice(&offset.to_le_bytes());
+        assert!(crate::audit_io::is_budget_error(&parse(&raw, &strings, 32, false).unwrap_err()));
+        raw[32 + 2] = 3;
+        assert_eq!(parse(&raw, &strings, 32, false).unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
     #[test]
     fn texture_format_names_are_bounded_and_unknown_values_stay_unknown() {

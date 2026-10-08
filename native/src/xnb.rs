@@ -1,6 +1,6 @@
 //! XNB header inventory, a development-only v5 Texture2D metadata reader,
 //! and a detached experimental BC texture export.
-use std::{fs, io::{self, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt}, path::Path};
+use std::{fs, io::{self, Read}, os::unix::fs::{MetadataExt, OpenOptionsExt}, path::Path};
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -62,11 +62,14 @@ const MAX_READERS: u32 = 128;
 const MAX_READER_NAME: u32 = 4096;
 const TEXTURE_AUDIT_BUDGET: u64 = 1024 * 1024;
 
+#[derive(Debug, PartialEq, Eq)]
 struct ContentReader {
     name: String, version: i32,
     record_start: u64, name_offset: u64, name_size: u32, version_offset: u64,
 }
+#[derive(Debug, PartialEq, Eq)]
 struct Mip { level: u32, width: u32, height: u32, length_offset: u64, offset: u64, size: u64 }
+#[derive(Debug, PartialEq, Eq)]
 struct ContentInventory {
     header: Header,
     readers: Vec<ContentReader>,
@@ -80,9 +83,57 @@ struct ContentInventory {
     texture_offset: Option<u64>,
 }
 
+/// One metadata parser for descriptor reads and immutable export snapshots.
+/// Slice reparsing is a self-check, NOT independent format verification.
+trait ContentSource {
+    fn len(&self) -> u64;
+    fn read_at(&mut self, offset: u64, size: usize) -> io::Result<Vec<u8>>;
+    fn range(&self, offset: u64, size: u64) -> io::Result<()> {
+        if offset.checked_add(size).is_none_or(|end| end > self.len()) {
+            return Err(invalid("XNB extent exceeds source bounds"));
+        }
+        Ok(())
+    }
+    fn u8(&mut self, offset: &mut u64) -> io::Result<u8> {
+        let value = self.read_at(*offset, 1)?[0];
+        *offset = offset.checked_add(1).ok_or_else(|| invalid("XNB offset overflow"))?;
+        Ok(value)
+    }
+    fn u32(&mut self, offset: &mut u64) -> io::Result<u32> {
+        let bytes = self.read_at(*offset, 4)?;
+        *offset = offset.checked_add(4).ok_or_else(|| invalid("XNB offset overflow"))?;
+        Ok(u32::from_le_bytes(bytes.as_slice().try_into().unwrap()))
+    }
+}
+
+impl ContentSource for super::audit_io::Source {
+    fn len(&self) -> u64 { super::audit_io::Source::len(self) }
+    fn read_at(&mut self, offset: u64, size: usize) -> io::Result<Vec<u8>> {
+        super::audit_io::Source::read_at(self, offset, size)
+    }
+}
+
+struct Snapshot<'a> { bytes: &'a [u8], remaining: u64 }
+impl<'a> Snapshot<'a> {
+    fn new(bytes: &'a [u8]) -> Self { Self { bytes, remaining: TEXTURE_AUDIT_BUDGET } }
+}
+impl ContentSource for Snapshot<'_> {
+    fn len(&self) -> u64 { self.bytes.len() as u64 }
+    fn read_at(&mut self, offset: u64, size: usize) -> io::Result<Vec<u8>> {
+        super::cancelled()?;
+        self.range(offset, size as u64)?;
+        self.remaining = self.remaining.checked_sub(size as u64)
+            .ok_or_else(|| super::audit_io::budget_error("XNB snapshot metadata budget exceeded"))?;
+        let mut result = Vec::new();
+        result.try_reserve_exact(size).map_err(|_| invalid("XNB snapshot metadata allocation failed"))?;
+        result.extend_from_slice(&self.bytes[offset as usize..offset as usize + size]);
+        Ok(result)
+    }
+}
+
 /// Nonnegative .NET-style 7-bit integers only; counts/indices are never signed.
 /// Reject overlong encodings and a fifth byte beyond Int32::MAX.
-fn seven_bit(source: &mut super::audit_io::Source, offset: &mut u64) -> io::Result<u32> {
+fn seven_bit(source: &mut impl ContentSource, offset: &mut u64) -> io::Result<u32> {
     let mut value = 0u32;
     for shift in (0..35).step_by(7) {
         let b = source.u8(offset)?;
@@ -147,14 +198,19 @@ fn texture_layout(format: u32) -> Option<super::audit_io::Layout> {
 /// altered surface is accepted.
 fn rebuild_single_mip(bytes: &[u8], texture_offset: usize, format: u32,
     width: u32, height: u32, payload: &[u8]) -> io::Result<Vec<u8>> {
+    if texture_offset < 10 { return Err(invalid("XNB texture prefix is shorter than the header")); }
     let prefix = bytes.get(..texture_offset).ok_or_else(|| invalid("XNB texture offset is out of bounds"))?;
     let payload_len = u32::try_from(payload.len()).map_err(|_| invalid("XNB mip exceeds format limit"))?;
-    let mut result = prefix.to_vec();
+    let length = texture_offset.checked_add(20).and_then(|len| len.checked_add(payload.len()))
+        .ok_or_else(|| invalid("XNB rebuilt length overflow"))?;
+    let total = u32::try_from(length).map_err(|_| invalid("XNB rebuilt file exceeds format limit"))?;
+    let mut result = Vec::new();
+    result.try_reserve_exact(length).map_err(|_| invalid("XNB rebuild allocation failed"))?;
+    result.extend_from_slice(prefix);
     for value in [format, width, height, 1, payload_len] {
         result.extend_from_slice(&value.to_le_bytes());
     }
     result.extend_from_slice(payload);
-    let total = u32::try_from(result.len()).map_err(|_| invalid("XNB rebuilt file exceeds format limit"))?;
     result[6..10].copy_from_slice(&total.to_le_bytes());
     Ok(result)
 }
@@ -172,6 +228,7 @@ fn encode_bc1_alpha_blocks(data: &mut [u8], image: &image::RgbaImage) -> io::Res
          ((value & 31) as i32 * 255 + 15) / 31]
     };
     for by in 0..blocks_h {
+        super::cancelled()?;
         for bx in 0..blocks_w {
             if !(0..4).any(|y| (0..4).any(|x| {
                 let px = bx as u32 * 4 + x;
@@ -209,7 +266,7 @@ fn encode_bc1_alpha_blocks(data: &mut [u8], image: &image::RgbaImage) -> io::Res
     Ok(())
 }
 
-fn content_inventory(source: &mut super::audit_io::Source) -> io::Result<ContentInventory> {
+fn content_inventory(source: &mut impl ContentSource) -> io::Result<ContentInventory> {
     let bytes = source.read_at(0, 10)?;
     let header = parse(&bytes, source.len())?;
     let mut result = ContentInventory { header, readers: Vec::new(), shared: None,
@@ -331,12 +388,17 @@ pub fn texture_audit(path: &Path) -> io::Result<()> {
 /// Development-only detached export for a single ordinary v5 Texture2D root.
 /// The source, format and reader table are preserved; only one BC base image is
 /// resized and re-encoded. No game file is replaced or marked compatible.
+#[cfg(any(test, feature = "development-audits"))]
 pub fn texture_export(max_edge: u32, input: &Path, output: &Path) -> io::Result<()> {
     use image::imageops::FilterType;
     use image_dds::{ImageFormat, Mipmaps, Quality, Surface, SurfaceRgba8};
     use super::audit_io::Source;
     if !(64..=8192).contains(&max_edge) { return Err(invalid("XNB export max edge must be 64..8192")); }
-    if fs::symlink_metadata(output).is_ok() { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "XNB export destination exists")); }
+    match fs::symlink_metadata(output) {
+        Ok(_) => return Err(io::Error::new(io::ErrorKind::AlreadyExists, "XNB export destination exists")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error),
+    }
     const MAX_EXPORT: u64 = 64 * 1024 * 1024;
     let mut source = Source::open(input, MAX_EXPORT, MAX_EXPORT + TEXTURE_AUDIT_BUDGET)?;
     let inventory = content_inventory(&mut source)?;
@@ -371,6 +433,9 @@ pub fn texture_export(max_edge: u32, input: &Path, output: &Path) -> io::Result<
     }
     let bytes = source.read_at(0, source.len() as usize)?;
     source.unchanged()?;
+    if content_inventory(&mut Snapshot::new(&bytes))? != inventory {
+        return Err(invalid("XNB captured source metadata differs from the initial inventory"));
+    }
     let mip = &inventory.mips[0];
     let data = bytes.get(mip.offset as usize..(mip.offset + mip.size) as usize)
         .ok_or_else(|| invalid("XNB source mip is out of bounds"))?;
@@ -378,64 +443,78 @@ pub fn texture_export(max_edge: u32, input: &Path, output: &Path) -> io::Result<
     if rebuild_single_mip(&bytes, texture_offset, surface_id, width, height, data)? != bytes {
         return Err(invalid("XNB no-change rebuild differs from its source"));
     }
-    let decoded = Surface { width, height, depth: 1, layers: 1, mipmaps: 1,
-        image_format: format, data }.decode_rgba8()
-        .map_err(|error| invalid(&format!("XNB source texture decode failed: {error}")))?;
-    let base = decoded.get_image(0, 0, 0).ok_or_else(|| invalid("XNB base texture missing"))?;
-    let resized = image::imageops::resize(&base, new_width, new_height, FilterType::Lanczos3);
+    let resized = {
+        super::cancelled()?;
+        let decoded = Surface { width, height, depth: 1, layers: 1, mipmaps: 1,
+            image_format: format, data }.decode_rgba8()
+            .map_err(|error| invalid(&format!("XNB source texture decode failed: {error}")))?;
+        if decoded.width != width || decoded.height != height || decoded.depth != 1
+            || decoded.layers != 1 || decoded.mipmaps != 1
+            || decoded.data.len() != width as usize * height as usize * 4 {
+            return Err(invalid("XNB decoded source image has an unexpected shape"));
+        }
+        // Move the one decoded image instead of get_image's full RGBA copy.
+        // Drop source RGBA storage before encoding the resized candidate.
+        let base = image::RgbaImage::from_raw(width, height, decoded.data)
+            .ok_or_else(|| invalid("XNB base texture missing"))?;
+        super::cancelled()?;
+        image::imageops::resize(&base, new_width, new_height, FilterType::Lanczos3)
+    };
+    // The dependency calls are not internally cancellable. Check at each boundary.
+    super::cancelled()?;
     let encoded = SurfaceRgba8::from_image(&resized).encode(format, Quality::Normal, Mipmaps::Disabled)
         .map_err(|error| invalid(&format!("XNB texture encode failed: {error}")))?;
-    if encoded.width != new_width || encoded.height != new_height || encoded.mipmaps != 1 {
+    super::cancelled()?;
+    if encoded.width != new_width || encoded.height != new_height || encoded.mipmaps != 1
+        || encoded.depth != 1 || encoded.layers != 1 || encoded.image_format != format {
         return Err(invalid("XNB encoder returned an unexpected image shape"));
     }
-    let mut encoded_bytes = encoded.data.to_vec();
+    let mut encoded_bytes = encoded.data;
     if surface_id == 4 { encode_bc1_alpha_blocks(&mut encoded_bytes, &resized)?; }
     let encoded_bytes: &[u8] = &encoded_bytes;
-    let decoded_candidate = Surface { width: new_width, height: new_height, depth: 1,
-        layers: 1, mipmaps: 1, image_format: format, data: encoded_bytes }.decode_rgba8()
-        .map_err(|error| invalid(&format!("XNB exported texture decode failed: {error}")))?;
-    if decoded_candidate.get_image(0, 0, 0).is_none_or(|image| image.dimensions() != (new_width, new_height)) {
-        return Err(invalid("XNB exported base image has wrong dimensions"));
+    if encoded_bytes.len() as u64 != texture_layout(surface_id).unwrap().bytes(new_width, new_height)? {
+        return Err(invalid("XNB encoder payload differs from its storage shape"));
     }
-    if surface_id == 4 {
-        let image = decoded_candidate.get_image(0, 0, 0).ok_or_else(|| invalid("XNB exported base image missing"))?;
-        if image.pixels().zip(resized.pixels()).any(|(encoded, source)|
-            (encoded.0[3] < 128) != (source.0[3] < 128)) {
-            return Err(invalid("XNB BC1 alpha mask changed during encoding"));
+    {
+        let decoded_candidate = Surface { width: new_width, height: new_height, depth: 1,
+            layers: 1, mipmaps: 1, image_format: format, data: encoded_bytes }.decode_rgba8()
+            .map_err(|error| invalid(&format!("XNB exported texture decode failed: {error}")))?;
+        super::cancelled()?;
+        if decoded_candidate.width != new_width || decoded_candidate.height != new_height
+            || decoded_candidate.depth != 1 || decoded_candidate.layers != 1 || decoded_candidate.mipmaps != 1
+            || decoded_candidate.data.len() != new_width as usize * new_height as usize * 4 {
+            return Err(invalid("XNB exported base image has wrong dimensions"));
+        }
+        if surface_id == 4 {
+            let image = image::RgbaImage::from_raw(new_width, new_height, decoded_candidate.data)
+                .ok_or_else(|| invalid("XNB exported base image missing"))?;
+            for (encoded_row, source_row) in image.rows().zip(resized.rows()) {
+                super::cancelled()?;
+                if encoded_row.zip(source_row).any(|(encoded, source)|
+                    (encoded.0[3] < 128) != (source.0[3] < 128)) {
+                    return Err(invalid("XNB BC1 alpha mask changed during encoding"));
+                }
+            }
         }
     }
+    drop(resized);
+    super::cancelled()?;
     let candidate = rebuild_single_mip(&bytes, texture_offset, surface_id, new_width, new_height, encoded_bytes)?;
     if candidate.len() >= bytes.len() {
+        source.unchanged()?;
         println!("XNB_TEXTURE_EXPORT|{}|{}|{}|{}|NO_GAIN", bytes.len(), candidate.len(), new_width, new_height);
         return Ok(());
     }
-    // Verify the complete new XNB structure and its re-encoded base image before
-    // creating a destination. Exact byte identity is retained outside the root.
-    let tmp = std::env::temp_dir().join(format!("bgc-xnb-verify-{}-{}", std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-    let mut created = false;
-    let verification = (|| -> io::Result<()> {
-        let mut temporary = fs::OpenOptions::new().write(true).create_new(true)
-            .custom_flags(libc::O_NOFOLLOW).open(&tmp)?;
-        created = true;
-        temporary.write_all(&candidate)?;
-        temporary.sync_all()?;
-        drop(temporary);
-        let mut check = Source::open(&tmp, MAX_EXPORT, TEXTURE_AUDIT_BUDGET)?;
-        let parsed = content_inventory(&mut check)?;
-        if parsed.status != "METADATA_ONLY" || parsed.texture != Some((surface_id, new_width, new_height, 1)) {
-            return Err(invalid("XNB exported structure failed independent parse"));
-        }
-        check.unchanged()?;
-        Ok(())
-    })();
-    if created { let _ = fs::remove_file(&tmp); }
-    verification?;
-    source.unchanged()?;
-    let mut destination = fs::OpenOptions::new().write(true).create_new(true)
-        .custom_flags(libc::O_NOFOLLOW).open(output)?;
-    let write = (|| -> io::Result<()> { destination.write_all(&candidate)?; destination.sync_all() })();
-    if let Err(error) = write { let _ = fs::remove_file(output); return Err(error); }
+    // Reparse the immutable candidate with the SAME parser, before publishing.
+    // This checks internal consistency, not independent parser agreement.
+    let parsed = content_inventory(&mut Snapshot::new(&candidate))?;
+    if parsed.status != "METADATA_ONLY" || parsed.texture != Some((surface_id, new_width, new_height, 1))
+        || parsed.readers != inventory.readers || parsed.root != inventory.root
+        || parsed.shared != inventory.shared || parsed.texture_offset != inventory.texture_offset
+        || candidate[..6] != bytes[..6] || candidate[10..texture_offset] != bytes[10..texture_offset] {
+        return Err(invalid("XNB exported structure or retained prefix failed self-check"));
+    }
+    super::detached_export::publish(output, &candidate, || source.unchanged())?;
     println!("XNB_TEXTURE_EXPORT|{}|{}|{}|{}|EXPORTED", bytes.len(), candidate.len(), new_width, new_height);
     eprintln!("Experimental detached XNB export: source unchanged; logical savings only. Runtime compatibility and atlas references are unverified.");
     Ok(())
@@ -487,6 +566,53 @@ mod tests {
     }
 
     #[test]
+    fn immutable_snapshot_parser_checks_bounds_budgets_and_reader_identity() {
+        let bytes = texture_fixture(b"Microsoft.Xna.Framework.Content.Texture2DReader");
+        let parsed = content_inventory(&mut Snapshot::new(&bytes)).unwrap();
+        assert_eq!(parsed.status, "METADATA_ONLY");
+        assert_eq!(parsed.mips[0].offset + parsed.mips[0].size, parsed.mips[1].length_offset);
+        assert_eq!(parsed.mips[1].offset + parsed.mips[1].size, bytes.len() as u64);
+        let mut tiny = Snapshot { bytes: &bytes, remaining: 9 };
+        assert!(super::super::audit_io::is_budget_error(&content_inventory(&mut tiny).unwrap_err()));
+        let mut snapshot = Snapshot::new(&bytes);
+        assert!(snapshot.range(u64::MAX, 1).is_err());
+        assert!(snapshot.read_at(bytes.len() as u64, 1).is_err());
+        for name in [
+            "Microsoft.Xna.Framework.Content.Texture2DReader, FNA, Version=65536.0.0.0",
+            "Microsoft.Xna.Framework.Content.Texture2DReader, FNA, Culture=neutral, Culture=neutral",
+            "Microsoft.Xna.Framework.Content.Texture2DReader, FNA, CodeBase=file:///tmp/code.dll",
+        ] {
+            let reader = ContentReader { name: name.to_owned(), version: 0,
+                record_start: 0, name_offset: 0, name_size: 0, version_offset: 0 };
+            assert!(!known_texture_reader(&reader));
+        }
+        assert!(rebuild_single_mip(&bytes, 6, 4, 8, 8, &[0; 32]).is_err());
+    }
+
+    #[test]
+    fn seven_bit_snapshot_rejects_truncation_overflow_and_noncanonical_counts() {
+        for bytes in [&b"\x80\x00"[..], &b"\xff\xff\xff\xff\x08"[..], &b"\x80"[..]] {
+            assert!(seven_bit(&mut Snapshot::new(bytes), &mut 0).is_err());
+        }
+        assert_eq!(seven_bit(&mut Snapshot::new(b"\x80\x01"), &mut 0).unwrap(), 128);
+    }
+
+    #[test]
+    fn bc1_alpha_restoration_handles_partial_blocks_and_preserves_opaque_blocks() {
+        let mut image = image::RgbaImage::from_pixel(5, 3, image::Rgba([255, 0, 0, 255]));
+        image.put_pixel(4, 2, image::Rgba([0, 0, 0, 0]));
+        let mut data = vec![0x11; 16];
+        encode_bc1_alpha_blocks(&mut data, &image).unwrap();
+        assert_eq!(&data[..8], &[0x11; 8]);
+        let endpoint0 = u16::from_le_bytes(data[8..10].try_into().unwrap());
+        let endpoint1 = u16::from_le_bytes(data[10..12].try_into().unwrap());
+        assert!(endpoint0 <= endpoint1);
+        let indices = u32::from_le_bytes(data[12..16].try_into().unwrap());
+        assert_eq!((indices >> (2 * (2 * 4))) & 3, 3);
+        assert!(encode_bc1_alpha_blocks(&mut data[..8], &image).is_err());
+    }
+
+    #[test]
     fn v5_texture_inventory_tracks_exact_mips_and_rejects_bad_lengths() {
         let path = std::env::temp_dir().join(format!("bgc-xnb-test-{}-{}", std::process::id(),
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
@@ -498,6 +624,7 @@ mod tests {
         };
         let result = (|| {
             let inventory = run(&original).unwrap();
+            assert_eq!(content_inventory(&mut Snapshot::new(&original)).unwrap(), inventory);
             assert_eq!(inventory.status, "METADATA_ONLY");
             assert_eq!(inventory.texture, Some((4, 8, 8, 2)));
             assert_eq!(inventory.mips.iter().map(|m| (m.width, m.height, m.size)).collect::<Vec<_>>(),

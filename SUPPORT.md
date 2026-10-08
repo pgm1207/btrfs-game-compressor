@@ -82,6 +82,12 @@ bounded XNB v5 Texture2D **detached lossy exporter** is also available in local
 compatibility claim. These routes are disabled in normal builds, are not
 automatic, and are not included in the tested support table.
 See [draft status and limits](docs/ENGINE_DEVELOPMENT_STATUS.md).
+The 2026-10-08 local hardening revision is built and its native/Python/smoke
+suites pass, with real read-only Carrion XNB and Cocoon Unity audits and four
+independently verified detached exports. Those are **local development results**,
+not runtime certification: prior build and copied-file evidence still does not
+establish installed playability or physical savings. See the
+[review](docs/ENGINE_HARDENING_REVIEW_2026_10_08.md).
 
 These are the honest gaps. The tool detects and skips them; it does not guess.
 

@@ -124,7 +124,14 @@ savings or playback validation.
   game compatibility evidence.
   An optional `--xnb-backend /path/to/development/bgc-native --xnb-max-edge 1024`
   adds a separate, theoretical XNB v5 BC texture section. It requires a local
-  `development-audits` build and does not add those bytes to the planner total.
+   `development-audits` build and does not add those bytes to the planner total.
+   The local schema-3 draft records XNB header/audit coverage and partial errors
+   separately, keeping successful production estimates visible if research fails.
+   An incomplete XNB section still yields a nonzero exit. Older schema-2 reports
+   are preserved but cannot resume under schema 3; use a new output directory.
+   These reporting/publication changes passed their local suites and a real
+   Carrion/Cocoon trial; results are in the
+   [hardening review](docs/ENGINE_HARDENING_REVIEW_2026_10_08.md).
 - **Optionally downscales textures** (experimental, opt-in) for loose images and
   DDS plus Godot 3/4 packed textures, preserving the codec and rebuilding mips.
   See [Texture compression](#texture-compression).

@@ -1,14 +1,31 @@
 # Engine reader drafts — not validated support
 
-Updated **2026-10-07**. These are **local, uncommitted source drafts**, not a new
-release. Both default and `development-audits` configurations pass isolated
-offline `cargo check` and `cargo test` runs: 150 native unit and 9 integration
-tests per configuration. The added tests cover source read budgets/change
-detection, component-wise companion opening, record escaping, XNB export and
-reader bounds, and Unity texture shapes. The
-default build rejects a draft command before opening a nonexistent source, while
-the feature build attempts to open it. The existing `bgc-native` binary and the
-frozen installed-library runner were not rebuilt or replaced.
+Updated **2026-10-08**. The baseline drafts were committed in `859cb4d`; they
+are not a new release.
+
+The **current 2026-10-08 revision is now built and tested** in isolated target
+directories (the repository `bgc-native` and the frozen installed-library runner
+were **not** rebuilt or replaced): default **159 unit + 9 filesystem** tests pass;
+`development-audits` **158 unit + 9 filesystem** tests pass; the Python suite is
+**16 tests OK**; `test/smoke.sh` is **483 passed / 0 failed**. Real read-only
+audits reproduced the Carrion XNB tally and ran Cocoon bundle inventories; four
+detached Carrion exports used the new anonymous-publication path with unchanged
+sources and independent Pillow verification (36.0–50.7 dB). The default binary
+reports `Development reader routes: disabled`, the feature binary `compiled in`.
+Full evidence: [2026-10-08 review](ENGINE_HARDENING_REVIEW_2026_10_08.md).
+
+The 2026-10-08 review adds tested-source hardening for immutable XNB reparsing,
+anonymous atomic detached publication, separate experimental report failures,
+independent verifier bounds, and mixed Unity tree diagnostics. Passing tests are
+**local development results, not runtime certification or a support promotion**;
+none of the drafts below is promoted to tested audit support, beta export or beta
+apply.
+
+The **2026-10-07 baseline** recorded isolated offline `cargo check` and `cargo
+test` runs for both configurations: 150 native unit and 9 integration tests per
+configuration. Baseline tests cover source read budgets/change detection,
+component-wise companion opening, record escaping, XNB export and reader bounds,
+and Unity texture shapes.
 
 The format research is in [ENGINE_COMPATIBILITY_NEXT.md](ENGINE_COMPATIBILITY_NEXT.md).
 [SUPPORT.md](../SUPPORT.md) remains the evidence-based support contract. None of
@@ -51,7 +68,7 @@ none scans a library or follows an archive entry onto the host filesystem.
 | Reader | Declared file / work boundaries |
 | --- | --- |
 | XNB audit | At most `u32::MAX` file bytes; 1 MiB actual read budget; 128 readers, 4096 bytes per reader name; mip pixels are range-checked and skipped |
-| XNB detached export | At most 64 MiB source; one BC1/2/3 mip and at most 16,777,216 pixels; source and candidate pixels decoded; candidate re-parsed before create-new output |
+| XNB detached export | At most 64 MiB source; one BC1/2/3 mip and at most 16,777,216 pixels; source and candidate pixels decoded; immutable source/candidate reparsing; unvalidated anonymous staging and no-replace publication draft |
 | VTF | At most 4 GiB file length; 64 KiB actual reads; 32 resources; image/resource bodies are not decoded |
 | VPK | At most 8 GiB file length; 32 MiB tree; tree + 64-byte read budget; 65,536 entries; 8 MiB retained path/extension text budget; at most 4096 detailed entry records |
 | FORM | At most `u32::MAX + 8` file bytes; 1 MiB actual reads; 256 chunks, 4096 candidate pointers per table; no object dereference |
@@ -88,8 +105,13 @@ contracts as well as the new feature-gated routes. The feature guard does not
 mean every shared source change is excluded from normal builds.
 Local Unity audit/coverage paths also now propagate interruption instead of
 counting an interrupted inspection as opaque, and coverage rechecks opened-source
-size/time metadata before returning counts. These paths compile and the existing
-tests pass, but their new edge cases still need focused fixtures.
+size/time metadata before returning counts. The baseline compiled and passed its
+existing tests; the latest shared changes need both build configurations and
+focused regressions. Tree parsing now checks bounded hierarchy/local strings
+before unknown common-string semantics; detailed statuses distinguish
+`MALFORMED_TREE`, `UNSUPPORTED_TREE_SCHEMA`, `TREE_BUDGET_SKIPPED` and
+`TREE_PARSE_ERROR`. Interruptions propagate. This new diagnostic contract is
+provisional and untested, and does not prove that an opaque object is safe.
 
 ## Output is evidence, not eligibility
 
@@ -133,9 +155,12 @@ documentation links require deferred validation too.
 
 1. Continue source-level review of resource bounds, version traps and cancellation;
    keep report schemas explicitly provisional.
-2. Refine remaining mixed malformed/unknown-tree diagnostics, then design
+2. Validate the mixed malformed/unknown-tree diagnostic draft, then implement
    Sprite/SpriteAtlas/PPtr consumers without guessing stripped schemas. Absent
    trees and retained per-type budget/schema statuses are already distinct drafts.
+   [UNITY_REFERENCE_OWNERSHIP_CONTRACT.md](UNITY_REFERENCE_OWNERSHIP_CONTRACT.md)
+   defines graph identity, completeness and consumer gates; no graph reader or
+   ownership proof is implemented yet.
 3. Define no-change rebuilding and retained-byte contracts for an exact inline
    Unity version/schema. The experimental XNB export now checks a byte-identical
    no-change rebuild; it still needs independent pixel comparison and runtime
@@ -150,9 +175,13 @@ documentation links require deferred validation too.
 
 ## Remaining validation
 
-Isolated builds, native tests, a default-vs-feature command guard check, and
-three shared-I/O fixtures have passed. Continue with small synthetic/malformed
-fixtures before running any installed-library census through draft routes:
+Baseline isolated builds, native tests, a default-vs-feature command guard check,
+and three shared-I/O fixtures were recorded earlier. The 2026-10-08 revision has
+now additionally been built (both configurations) and its native/Python/smoke
+suites pass, with real Carrion XNB and Cocoon Unity read-only audits and four
+verified detached exports; see the
+[2026-10-08 review](ENGINE_HARDENING_REVIEW_2026_10_08.md). Continue with the
+remaining focused fixtures and independent reconstruction work:
 
 - Recheck both build configurations after substantive changes, using separate
   build/output locations without replacing `bgc-native` or the frozen installed-run
@@ -162,7 +191,13 @@ fixtures before running any installed-library census through draft routes:
 - Shared I/O: final/intermediate symlinks, traversal, FIFO/nonregular files,
   depth/read/allocation budgets, escaped record round trips and cancellation.
 - XNB: 7-bit overflow/overlong encodings, qualifier allowlist, shared/null/custom
-  roots, targets/versions, mip arithmetic, truncated blobs and trailing data.
+   roots, targets/versions, mip arithmetic, truncated blobs and trailing data.
+  Also validate snapshot/descriptor agreement, retained prefix, partial-block BC1
+  alpha, anonymous publication/destination races, source-guard aborts, unsupported
+  staging filesystems and directory-sync failure after commit. Independent Python
+  fixtures and report failure/timeout/coverage fixtures now run in the Python
+  suite; anonymous-publication commit-point edge cases still need dedicated
+  disposable-directory fixtures.
 - VTF/VPK: independent header/tree framing, mip order, resource flags/overlaps,
   preload-only entries, section bounds, duplicate/case-colliding paths, malicious
   names and custom versions. Independently reconstruct entry bytes before

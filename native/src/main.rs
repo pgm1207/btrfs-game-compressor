@@ -8,6 +8,8 @@ mod variants;
 mod xnb;
 mod audit_io;
 mod development_audits;
+#[cfg(any(test, feature = "development-audits"))]
+mod detached_export;
 #[cfg(feature = "development-audits")]
 mod vtf;
 #[cfg(feature = "development-audits")]
