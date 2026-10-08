@@ -1858,6 +1858,17 @@ fn packed_asset_pass(root: &Path, target: &str, p: &Profile, action: &str, level
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
                 Err(e) => {
+                    if retain_backup {
+                        let rel = path.strip_prefix(root).map_err(|_| bad("packed asset escaped root"))?;
+                        if root.join(BACKUP).join(rel).exists() {
+                            // Commit or directory-sync may have failed after
+                            // publishing the new file. Retained recovery state
+                            // makes this a failure, never a silent safe skip.
+                            return Err(io::Error::new(e.kind(), format!(
+                                "packed optimization needs recovery review: {e}"
+                            )));
+                        }
+                    }
                     if std::env::var_os("BGC_VERBOSE").is_some() {
                         eprintln!("Skipping packed asset {}: {e}", path.display());
                     }
@@ -2321,6 +2332,9 @@ mod tests {
         finish_backups("finalize", &root, vec![backup.clone()]).unwrap();
         assert!(!backup.exists());
         assert!(fs::metadata(&pack).unwrap().len() < bytes.len() as u64);
+        let no_gain = packed_apply_with_backup(&root, &pack, "ultra-performance", 1).unwrap();
+        assert_eq!(no_gain, (0, 0));
+        assert!(!backup.exists(), "no-gain pack must not retain a backup");
         fs::remove_dir_all(root).unwrap();
     }
 
