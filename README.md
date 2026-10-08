@@ -350,9 +350,16 @@ tuning or semantic guesses required:
   encoded sheet. A large sheet can contain tiny sprites: a 4K sheet must not be
   treated like one large background image.
 
-These conservative rules run in both asset apply and Godot exports. They are
-not universal UI detection: unnamed atlases or compressed/unrecognized metadata
-may not be identified. Start from original assets when comparing profiles;
+These conservative rules apply to loose raster images and supported Godot
+exports. **Known limitation:** the loose DDS path has the small/thin input gate,
+output short-edge gate, and at-cap no-reencode gate, but does not yet implement
+the soft half-original-dimension budget. An aggressive DDS profile may shrink
+more than half along an axis; validate visual quality manually. See the adaptive
+quality planner backlog for consistent cross-format budgets.
+
+These guards are not universal UI detection: unnamed atlases or
+compressed/unrecognized metadata may not be identified. Start from original
+assets when comparing profiles;
 already-discarded detail cannot be recovered by changing the profile. Manual
 visual testing remains necessary.
 
