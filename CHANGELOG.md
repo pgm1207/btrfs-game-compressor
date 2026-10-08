@@ -41,6 +41,14 @@ fresh binary packaging before end users can obtain them via the installer.
 - Add native end-to-end read-only planner tests using a regular temporary
   filesystem and symlinked root rejection (#20).
 
+### Observed storage reporting
+
+- Add an unprivileged read-only `bgc-native fs-space PATH` statvfs report and
+  an observed available-space delta around interactive asset apply/restore/
+  finalize. The result is filesystem-wide, not an attributable game savings
+  measurement; concurrent writes, snapshots and backup storage may influence
+  the observed change (#23).
+
 ### Testing
 
 - Add CI that creates a disposable loopback Btrfs mount and actually runs the
