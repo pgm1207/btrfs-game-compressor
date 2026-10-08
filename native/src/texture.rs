@@ -466,10 +466,10 @@ pub fn prepare_asset(max_edge: u32, path: &Path) -> io::Result<Option<(Vec<u8>, 
     }
 }
 
-/// Read-only diagnostic: compare a candidate DDS against an original downscaled
-/// to the same dimensions. This measures codec-generation differences versus a
-/// Lanczos3 reference; it deliberately does NOT measure detail lost by lowering
-/// the resolution or establish game/runtime compatibility.
+/// Independent objective quality views:
+/// (1) source resized to candidate dimensions: additional codec distortion;
+/// (2) candidate reconstructed at original dimensions: includes resolution loss.
+/// Neither metric certifies the visual appearance or runtime of a game.
 #[derive(Debug)]
 struct QualityMetrics {
     original_w: u32,
@@ -479,6 +479,9 @@ struct QualityMetrics {
     psnr_black: f64,
     psnr_white: f64,
     alpha_differing_pixels: u64,
+    original_resolution_psnr_black: f64,
+    original_resolution_psnr_white: f64,
+    original_resolution_alpha_differing_pixels: u64,
 }
 
 fn read_quality_input(path: &Path) -> io::Result<(Vec<u8>, Parsed)> {
@@ -527,6 +530,43 @@ fn decode_quality_base(bytes: &[u8], p: &Parsed) -> io::Result<RgbaImage> {
     pixels.get_image(0, 0, 0).ok_or_else(|| bad("quality DDS has no base mip"))
 }
 
+
+#[derive(Default)]
+struct CompositeErrors {
+    black: f64,
+    white: f64,
+    alpha_differing: u64,
+}
+
+fn composite_errors(expected: &RgbaImage, actual: &RgbaImage) -> io::Result<CompositeErrors> {
+    if expected.dimensions() != actual.dimensions() {
+        return Err(bad("quality images have mismatched decoded dimensions"));
+    }
+    let mut errors = CompositeErrors::default();
+    for (a, b) in expected.pixels().zip(actual.pixels()) {
+        let ap = a.0;
+        let bp = b.0;
+        if ap[3] != bp[3] { errors.alpha_differing += 1; }
+        for channel in 0..3 {
+            let av = ap[channel] as f64 * ap[3] as f64 / 255.0;
+            let bv = bp[channel] as f64 * bp[3] as f64 / 255.0;
+            errors.black += (av - bv).powi(2);
+            let aw = av + (255 - ap[3]) as f64;
+            let bw = bv + (255 - bp[3]) as f64;
+            errors.white += (aw - bw).powi(2);
+        }
+    }
+    Ok(errors)
+}
+
+fn quality_psnr(error: f64, width: u32, height: u32) -> f64 {
+    if error == 0.0 { f64::INFINITY }
+    else {
+        let samples = width as f64 * height as f64 * 3.0;
+        10.0 * (255.0f64 * 255.0 * samples / error).log10()
+    }
+}
+
 fn quality_metrics(original_path: &Path, candidate_path: &Path) -> io::Result<QualityMetrics> {
     let (original_bytes, original) = read_quality_input(original_path)?;
     let (candidate_bytes, candidate) = read_quality_input(candidate_path)?;
@@ -538,57 +578,49 @@ fn quality_metrics(original_path: &Path, candidate_path: &Path) -> io::Result<Qu
     }
     let source = decode_quality_base(&original_bytes, &original)?;
     let expected = if (original.width, original.height) == (candidate.width, candidate.height) {
-        source
+        source.clone()
     } else {
         image::imageops::resize(
             &source, candidate.width, candidate.height, FilterType::Lanczos3,
         )
     };
     let actual = decode_quality_base(&candidate_bytes, &candidate)?;
-    if expected.dimensions() != actual.dimensions() {
-        return Err(bad("decoded quality DDS dimensions disagree"));
-    }
-    let (mut black_error, mut white_error, mut alpha_differing) = (0f64, 0f64, 0u64);
-    for (a, b) in expected.pixels().zip(actual.pixels()) {
-        let ap = a.0;
-        let bp = b.0;
-        if ap[3] != bp[3] { alpha_differing += 1; }
-        for channel in 0..3 {
-            let av = ap[channel] as f64 * ap[3] as f64 / 255.0;
-            let bv = bp[channel] as f64 * bp[3] as f64 / 255.0;
-            black_error += (av - bv).powi(2);
-            // Also compare the appearance when alpha is composited onto white.
-            let aw = av + (255 - ap[3]) as f64;
-            let bw = bv + (255 - bp[3]) as f64;
-            white_error += (aw - bw).powi(2);
-        }
-    }
-    let samples = candidate.width as f64 * candidate.height as f64 * 3.0;
-    let psnr = |error: f64| {
-        if error == 0.0 { f64::INFINITY }
-        else { 10.0 * (255.0f64 * 255.0 * samples / error).log10() }
+    let codec = composite_errors(&expected, &actual)?;
+    let reconstructed = if source.dimensions() == actual.dimensions() {
+        actual
+    } else {
+        image::imageops::resize(
+            &actual, original.width, original.height, FilterType::Lanczos3,
+        )
     };
+    let full = composite_errors(&source, &reconstructed)?;
     Ok(QualityMetrics {
         original_w: original.width,
         original_h: original.height,
         candidate_w: candidate.width,
         candidate_h: candidate.height,
-        psnr_black: psnr(black_error),
-        psnr_white: psnr(white_error),
-        alpha_differing_pixels: alpha_differing,
+        psnr_black: quality_psnr(codec.black, candidate.width, candidate.height),
+        psnr_white: quality_psnr(codec.white, candidate.width, candidate.height),
+        alpha_differing_pixels: codec.alpha_differing,
+        original_resolution_psnr_black: quality_psnr(full.black, original.width, original.height),
+        original_resolution_psnr_white: quality_psnr(full.white, original.width, original.height),
+        original_resolution_alpha_differing_pixels: full.alpha_differing,
     })
 }
 
-/// Compare two DDS files without writing either source. The PSNR values
-/// describe only additional codec distortion after matching dimensions.
+/// Read-only diagnostic with codec-generation and native-resolution metrics.
+/// Native-resolution reconstruction includes downscale/upscale losses but
+/// remains a pixel metric, not a perceptual or in-game certification.
 pub fn quality(original: &Path, candidate: &Path) -> io::Result<()> {
     let q = quality_metrics(original, candidate)?;
     println!(
-        "TEXTURE_QUALITY|{}|{}|{}|{}|{:.2}|{:.2}|{}",
+        "TEXTURE_QUALITY|{}|{}|{}|{}|{:.2}|{:.2}|{}|{:.2}|{:.2}|{}",
         q.original_w, q.original_h, q.candidate_w, q.candidate_h,
         q.psnr_black, q.psnr_white, q.alpha_differing_pixels,
+        q.original_resolution_psnr_black, q.original_resolution_psnr_white,
+        q.original_resolution_alpha_differing_pixels,
     );
-    eprintln!("Quality comparison is against a resized source, not the original rendered size. It does not measure lost detail, engine compatibility or in-game quality.");
+    eprintln!("Codec PSNR compares at candidate dimensions; full-resolution PSNR compares with a Lanczos3-upscaled candidate. Neither proves acceptable game visuals or runtime compatibility.");
     Ok(())
 }
 
@@ -923,6 +955,13 @@ mod tests {
         assert_eq!((metrics.candidate_w, metrics.candidate_h), (32, 32));
         assert!(metrics.psnr_black > 0.0 && metrics.psnr_white > 0.0);
         assert!(metrics.alpha_differing_pixels <= 32 * 32);
+        assert!(metrics.original_resolution_psnr_black > 0.0);
+        assert!(metrics.original_resolution_psnr_white > 0.0);
+        assert!(metrics.original_resolution_alpha_differing_pixels <= 64 * 64);
+        let identical = quality_metrics(&original_path, &original_path).unwrap();
+        assert!(identical.psnr_black.is_infinite());
+        assert!(identical.original_resolution_psnr_black.is_infinite());
+        assert_eq!(identical.original_resolution_alpha_differing_pixels, 0);
         quality(&original_path, &candidate_path).unwrap();
         assert_eq!(fs::read(&original_path).unwrap(), original);
         assert_eq!(fs::read(&candidate_path).unwrap(), candidate_before);
