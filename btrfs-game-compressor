@@ -3554,7 +3554,10 @@ asset_workflow() {
             fi
             printf 'Discard the local restore copy for %s? Steam verification may be needed to recover originals. [y/N] ' "$query"
         fi
-        if [ "$action" = apply ] || [ "$action" = finalize ]; then
+        # The TUI already asked the user before calling us with confirmed=1.
+        # Do not silently consume a *second* input line without a prompt.
+        # Finalize always asks here and cannot be pre-confirmed.
+        if [ "$action" = finalize ] || { [ "$action" = apply ] && [ "$confirmed" != 1 ]; }; then
             local reply
             read -r reply || reply=""
             [[ "$reply" = y || "$reply" = Y ]] || return 0
