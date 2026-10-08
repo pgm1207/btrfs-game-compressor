@@ -220,13 +220,19 @@ output is lossy and has not been validated in-game.
 bgc-native texture-quality original.dds candidate.dds
 ```
 
-The output includes input/output dimensions, PSNR for black/white backgrounds,
-and changed alpha-pixel counts. The comparison resizes the original to the
-candidate dimensions first, so it **measures codec-generation distortion only**:
-there is no claim that lost source resolution, sprite readability or game
-compatibility are acceptable. Both DDS files remain unchanged; the diagnostic
-refuses differing codecs, upscaled candidates, overly large inputs or unsupported
-layouts.
+The output includes input/output dimensions and two distinct PSNR comparisons
+for black/white alpha-composited backgrounds, along with changed alpha-pixel counts:
+
+- **Codec-only PSNR:** original downscaled to candidate dimensions, then compared
+  with the optimized candidate. This isolates the extra codec-generation loss.
+- **Full-resolution PSNR:** candidate upscaled to original dimensions, then
+  compared with the original image. This also captures lost spatial detail.
+
+Both are objective pixel metrics, **not** perceptual quality thresholds or
+proof that sprite readability, UI fidelity, alpha blending or actual gameplay
+remain acceptable. They use a Lanczos3 resizing reference. Both DDS files remain
+unchanged; the diagnostic refuses mismatched codecs, upscaled candidates,
+oversized inputs and unsupported layouts.
 
 **Apply to an installed game (beta, opt-in):**
 
