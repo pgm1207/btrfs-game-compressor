@@ -292,6 +292,16 @@ fn prepare(max_dim: u32, input: &Path, guarded_apply: bool) -> io::Result<Prepar
         return Err(bad("texture source changed during read"));
     }
     let parsed = parse(&bytes)?;
+    if guarded_apply {
+        let (target_w, target_h) = scale_to(parsed.width, parsed.height, max_dim);
+        // Fail before allocating and decoding large BCn pixel surfaces.
+        if (target_w, target_h) == (parsed.width, parsed.height) {
+            return Err(bad("texture fits this profile; skip lossy re-encoding"));
+        }
+        if crate::texture_policy::output_too_thin(target_w, target_h) {
+            return Err(bad("DDS downscale would create a too-thin texture"));
+        }
+    }
     let surface = Surface {
         width: parsed.width,
         height: parsed.height,
@@ -305,16 +315,8 @@ fn prepare(max_dim: u32, input: &Path, guarded_apply: bool) -> io::Result<Prepar
     let base: RgbaImage = decoded.get_image(0, 0, 0).ok_or_else(|| bad("DDS texture has no base mip"))?;
     let (width, height) = base.dimensions();
     let (new_width, new_height) = scale_to(width, height, max_dim);
-    // Installed beta asset changes must actually reduce dimensions. Re-encoding
-    // a BCn texture at the same size can lose quality for no resolution gain.
-    // An explicit detached export remains an opt-in experiment.
-    if guarded_apply && (new_width, new_height) == (width, height) {
-        return Err(bad("texture fits this profile; skip lossy re-encoding"));
-    }
-    // Mirror the minimum short-edge guard used for non-DDS images.
-    if guarded_apply && crate::texture_policy::output_too_thin(new_width, new_height) {
-        return Err(bad("DDS downscale would create a too-thin texture"));
-    }
+    // Only the explicit detached exporter allows at-cap or too-thin re-encoding.
+    // Installed apply candidates passed their quality gates before decoding.
     let resized = if (new_width, new_height) == (width, height) {
         base
     } else {
