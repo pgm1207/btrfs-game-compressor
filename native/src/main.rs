@@ -150,6 +150,25 @@ impl Tree {
             sector,
         })
     }
+    /// Securely pin an asset root on any Linux filesystem. The sector value
+    /// is a placeholder used only for the confined openat2 file access path;
+    /// Btrfs-only compression, dedupe and extent measurement still require
+    /// the ordinary Btrfs-validated Tree::new constructor.
+    fn for_asset_writes(path: &Path) -> io::Result<Self> {
+        match Self::new(path) {
+            Ok(tree) => Ok(tree),
+            Err(error) if ioctl_unsupported(&error) => {
+                let root = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+                    .open(path)?;
+                let dev = root.metadata()?.dev();
+                Ok(Self { root, display: path.to_owned(), dev, sector: 4096 })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn open(&self, path: &Path, write: bool) -> io::Result<File> {
         let name =
             CString::new(path.as_os_str().as_bytes()).map_err(|_| invalid("NUL in filename"))?;
