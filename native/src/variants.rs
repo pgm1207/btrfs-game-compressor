@@ -469,6 +469,13 @@ pub fn slim_plan(root: &Path, keep_languages: &[String]) -> io::Result<Vec<Remov
             Some(kinds) => kinds,
             None => continue,
         };
+        // Linux is not proof that Steam launched this game's Linux build.
+        // Steam may select native or Proton on the same host. Until we can
+        // establish the active depot/runtime, platform variants are never
+        // automatically pruned, including when an unqualified base exists.
+        if kinds.iter().any(|kind| matches!(kind, Fallback::HostPlatform | Fallback::OtherPlatform)) {
+            continue;
+        }
         // A pure language group is handled separately, respecting the keep set.
         if kinds.iter().all(|k| matches!(k, Fallback::Language(_))) {
             if keep_languages.is_empty() {
@@ -657,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn slim_keeps_highest_resolution_and_host_platform_only() {
+    fn slim_keeps_highest_resolution_but_never_guesses_active_platform() {
         let base = fixture("slim");
         // Resolution ladder without an unqualified base -> keep 1080p, drop 720p.
         for (tier, size) in [("720p", 100u64), ("1080p", 300)] {
@@ -665,7 +672,7 @@ mod tests {
             fs::create_dir_all(&dir).unwrap();
             fs::write(dir.join("A.pkg"), vec![1u8; size as usize]).unwrap();
         }
-        // Platform folders -> keep Windows, drop Mac/PS4.
+        // Platform folders are all retained until the active Steam runtime is known.
         for platform in ["Windows", "Mac", "PS4"] {
             let dir = base.join("Audio").join(platform);
             fs::create_dir_all(&dir).unwrap();
@@ -682,9 +689,25 @@ mod tests {
         let paths: Vec<String> = plan.iter().map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert!(paths.contains(&"720p".to_string()), "{paths:?}");
         assert!(!paths.contains(&"1080p".to_string()), "{paths:?}");
-        assert!(paths.contains(&"Mac".to_string()) && paths.contains(&"PS4".to_string()));
+        assert!(!paths.contains(&"Mac".to_string()) && !paths.contains(&"PS4".to_string()));
         assert!(!paths.contains(&"Windows".to_string()));
         assert!(!paths.iter().any(|p| p.starts_with("Level_") || p == "en" || p == "fr"), "{paths:?}");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn slim_does_not_prune_platform_siblings_with_unqualified_base() {
+        let base = fixture("platform-base");
+        let dir = base.join("Content");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("asset.bin"), vec![1u8; 32]).unwrap();
+        for platform in ["Windows", "Linux", "Mac"] {
+            let variant = dir.join(platform);
+            fs::create_dir_all(&variant).unwrap();
+            fs::write(variant.join("asset.bin"), vec![2u8; 16]).unwrap();
+        }
+        let plan = slim_plan(&base, &[]).unwrap();
+        assert!(plan.is_empty(), "{plan:?}");
         fs::remove_dir_all(base).unwrap();
     }
 
