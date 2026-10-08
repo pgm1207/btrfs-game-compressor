@@ -470,14 +470,19 @@ btrfs-game-compressor --slim GAME       # one-shot, reversible removal
 ```
 
 `--slim` performs a single offline pass that keeps the **highest resolution
-tier** and the **host-platform build**, removing the other resolution fallbacks
-and non-host platform folders (plus the debug symbols `--prune-assets` already
-handles). When a language list is set, it furthermore removes every **language
-pack** whose language you did not select — localized audio, subtitles and
+tier**, removing candidate resolution fallbacks (plus the debug symbols
+`--prune-assets` already handles). **All platform-specific assets are retained:**
+Linux can launch either a native build or a Windows build through Proton, and
+folder names alone cannot establish the runtime. When a language list is set,
+it furthermore removes every **language pack** whose language you did not select — localized audio, subtitles and
 `locale/` data — so the game only carries the languages you actually use. This
 covers both language **folders** (`locale/fr/`) and language-named **files**
 (`voiceover_fr.bundle`, `Dialogue_De.bank`, `CueSheet_VO_Battle_ja.awb`), which
 is how many Wwise/FMOD/CriWare titles ship voice data.
+
+Do not treat automatic resolution/language classification as proof of runtime
+compatibility. Review the displayed removal list and test the game before
+finalizing recovery copies. Platform folders are audit-only for slimming.
 
 ```sh
 btrfs-game-compressor --keep-languages en,de    # codes or names ("English,German")
@@ -493,8 +498,7 @@ language the game boots with (usually the first/English one): removing it can
 prevent startup, which is why the confirmation says so and every removal stays
 restorable.
  No runtime service, no per-game configuration and no plugins are
-involved: it reads directory shape and names, changes files once, and the game
-simply plays afterwards. Everything is written to the same restorable backup
+involved: it reads directory shape and names, changes files once, and the game *may* continue to play afterwards, but this is not guaranteed. Everything is written to the same restorable backup
 tree, so `--restore-assets` undoes it and `--finalize-assets` frees the space
 after you test. Ambiguous groups are never touched.
 

@@ -224,10 +224,11 @@ OPTIONS
                           file-name layout; nothing is changed
         --opportunities   scan every installed game for possible duplicate
                           resolution/platform/language suites; read-only estimate
-        --slim GAME       one-shot: remove unused resolution fallbacks, non-host
-                          platform folders, debug symbols and (with keep_languages
-                          set) other language packs; keeps the highest tier and
-                          the host build; restorable
+        --slim GAME       one-shot: remove candidate resolution fallbacks,
+                          debug symbols and (with keep_languages set) other
+                          language packs; ALL platform builds are retained
+                          because native Linux vs Proton cannot be inferred;
+                          restorable
         --keep-languages LIST
                           set the languages --slim will keep, e.g. "en,de" or
                           "English,German"; clears the list when empty
@@ -3341,8 +3342,8 @@ cmd_engines() {
     printf '  Nothing was changed. Inspect candidates with --variants or supported packed files with --audit-container. Supported packed PCK textures/audio are rewritten only by asset apply, not by this audit.\n'
 }
 
-# One-shot, format-agnostic slimming: keep the highest resolution tier and the
-# host-platform build, remove the rest plus debug symbols, all restorable.
+# One-shot, format-agnostic slimming: keep the highest resolution tier and ALL
+# platform builds, prune eligible other variants and debug symbols, restorable.
 cmd_slim() {
     local game="" matches=0 i
     for i in "${!GAMES_PATH[@]}"; do
@@ -3405,7 +3406,7 @@ cmd_slim() {
         printf '  languages: none selected - language packs are left untouched (set with --keep-languages en,de or in Settings)\n'
     fi
     printf '  total logical: %s\n' "$(bytes_human "$grand")"
-    printf 'Kept: the highest resolution tier, the host-platform build, your languages and every non-variant file. Removing fallbacks is only visible if the engine selects a lower tier or another platform.\n'
+    printf 'Kept: the highest resolution tier, ALL platform builds (native/Proton unknown), your languages and every non-variant file. Resolution removal can break games selecting another tier.\n'
     if [ -n "$KEEP_LANGUAGES" ]; then
         printf 'Warning: keep the language the game starts with (usually the first/English one); removing it can prevent startup. If in doubt, test and use --restore-assets.\n'
     fi
