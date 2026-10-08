@@ -1193,20 +1193,21 @@ Each game gets one of six states:
   Proton update). Worth re-compressing.
 - **UNCOMPRESSED** — never compressed by this tool.
 - **LOW YIELD** — updated, but not expected to be worth the time. Pending dedupe still runs in batch mode.
-- **RUNNING** — a live process has a file open inside the game's install directory, so
-  it is in use. Held back, and counted separately in `--status`.
+- **RUNNING** — an accessible live process has a mapped file or a working directory
+  inside the game's install tree. Held back, and counted separately in `--status`.
 
-### A running game is never touched
+### Running-game protection is best effort
 
-The one failure mode that is not merely wasted time is rewriting the files of a game
-somebody is playing. A game is treated as running when any process has a file mapped
-under its install directory, which is read from `/proc/<pid>/maps` and matched against
-each library root — so it works for native and Proton titles alike, and does not depend
-on Steam's own `StateFlags`.
+Rewriting the files of a game while it is in use is risky. The tool detects
+accessible processes whose memory-mapped files (`/proc/<pid>/maps`) or current
+working directory (`/proc/<pid>/cwd`) point inside an installed game, for both
+native Linux and Proton workloads. It does not guess undocumented Steam
+`StateFlags` values.
 
-That check runs again immediately before the write, not just once at startup, so a game
-you launch halfway through a long batch is still caught rather than being rewritten
-underneath itself.
+The detection is repeated immediately before each write. This is a protective
+heuristic, **not a guaranteed lock**: inaccessible processes, games launching
+between checks or processes using assets without a mapped file or game-specific
+working directory can be missed. Close games and launchers before compression.
 
 ### Rebalancing is a separate, deliberate step
 
