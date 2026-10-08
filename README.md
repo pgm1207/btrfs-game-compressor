@@ -878,6 +878,21 @@ it reports `ext4`, `xfs` or `ntfs`, Btrfs optimization does not apply.
 > `compress-force=zstd` refer to explicitly converted/configured Btrfs storage.
 > Do not convert a filesystem without a separate backup and migration plan.
 
+### Read-only asset discovery without Btrfs
+
+Even on an ext4 Steam Deck or an unregistered Linux game folder, the bundled
+native backend can analyze supported asset candidates without changing files:
+
+```sh
+btrfs-game-compressor --asset-plan-dir /path/to/your/game
+```
+
+This **does not apply** compression, deduplication or asset transformations.
+It does not need Btrfs, but it still requires the bundled compatible native
+backend. Estimates refer to logical candidate file bytes, not actual free
+space recovered or validated gameplay. Writing assets on a non-Btrfs filesystem
+is not implemented by this CLI.
+
 ## What it does *not* do
 
 Being clear about this up front is the point, because a tool that compresses your game
@@ -1131,6 +1146,9 @@ btrfs-game-compressor --ratios "Factorio"
 
 # read-only desktop notice (requires notify-send)
 btrfs-game-compressor --notify
+
+# read-only asset preview on any filesystem (including stock Deck ext4)
+btrfs-game-compressor --asset-plan-dir /path/to/game
 ```
 
 | Flag | |
@@ -1141,7 +1159,8 @@ btrfs-game-compressor --notify
 | `-n, --dry-run` | list pending work, change nothing |
 | `--dedupe` | deduplicate Btrfs Steam libraries and report measured usage before and after |
 | `--recheck` | refresh current game size and savings measurements without recompressing |
-| `--assets GAME` | preview supported asset changes |
+| `--assets GAME` | preview supported asset changes in a discovered Btrfs library |
+| `--asset-plan-dir DIR` | read-only Balanced asset candidate preview for any real directory, including ext4; no writes |
 | `--apply-assets GAME` | apply beta optimization to supported images, simple DDS, and WAV audio; keeps a local restore copy; needs a terminal |
 | `--restore-assets GAME` | restore original assets |
 | `--finalize-assets GAME` | discard restore copy after testing; needs a terminal |

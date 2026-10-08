@@ -2110,6 +2110,29 @@ out=$(
 )
 check_contains "TUI preconfirmed apply does not consume a second silent confirmation" "Changed 1 asset file(s)" "$out"
 
+group "Read-only asset preview on any filesystem"
+out=$(run --asset-plan-dir 2>&1); rc=$?
+check_rc "directory planner requires a path" 2 "$rc"
+out=$(run --asset-plan-dir /definitely-not-a-directory 2>&1); rc=$?
+check_rc "directory planner rejects missing paths" 2 "$rc"
+mkdir -p "$WORK/asset-dir"
+cat > "$WORK/asset-dir-shim" <<'SHIM'
+#!/bin/sh
+if [ "$1" = --protocol-version ]; then echo 1; exit 0; fi
+if [ "$1" = asset-plan ] && [ "$2" = balanced ]; then
+    printf 'ASSETS|plan|Balanced (1080p)|0|0|0|0|0|0|0|0|0|0|0|0|0\n'
+    exit 0
+fi
+exit 1
+SHIM
+chmod +x "$WORK/asset-dir-shim"
+out=$(BTRFS_GAME_COMPRESSOR_BACKEND="$WORK/asset-dir-shim" run --asset-plan-dir "$WORK/asset-dir"); rc=$?
+check_rc "read-only planner works on a regular directory" 0 "$rc"
+check_contains "any filesystem preview is explicitly read-only" "Read-only Balanced asset preview" "$out"
+check_contains "planner invokes native asset-plan protocol" "ASSETS|plan|Balanced" "$out"
+out=$(run --asset-plan-dir "$WORK/asset-dir" --status 2>&1); rc=$?
+check_rc "directory planner conflicts with other modes" 2 "$rc"
+
 group "Packed-container CLI"
 out=$(run --audit-container 2>&1); rc=$?
 check_rc "container audit requires a file" 2 "$rc"
