@@ -1089,8 +1089,8 @@ fi
 # ---------------------------------------------------------------------------
 group "Running games are never defragmented"
 
-# Detection asks the kernel whether any live process has a file from the game
-# directory mapped in. So the test puts a real long-lived process in there:
+# Detection checks mapped files and process working directories. This test
+# first puts a real long-lived process in the game install tree:
 # a copy of sleep, executing. Steam's appmanifest StateFlags is deliberately
 # not consulted, because the published references disagree on which bit means
 # "running" and guessing wrong defragments a live game.
@@ -1116,6 +1116,27 @@ else
     ok "a game with no live process is not reported as RUNNING"
 fi
 check_contains "--status counts the running games" "running: 1" "$out"
+
+# A system binary with its working directory in the game tree must also be
+# detected even if none of its executable mappings live under that tree.
+mkdir -p "$L/CwdOnlyGame"
+(cd "$L/CwdOnlyGame" && exec sleep 30) >/dev/null 2>&1 &
+CWD_RUN_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(readlink "/proc/$CWD_RUN_PID/cwd" 2>/dev/null)" = "$L/CwdOnlyGame" ] && break
+    sleep 0.1
+done
+(
+    LIBS=("$L")
+    RUNNING_DIRS=()
+    discover_running_games
+    if game_is_running "$L/CwdOnlyGame"; then
+        printf 'CWD_GUARD_OK\\n'
+    fi
+) > "$WORK/cwd-guard-result"
+check_contains "a process with cwd inside a game is detected without mapped assets" "CWD_GUARD_OK" "$(cat "$WORK/cwd-guard-result")"
+kill "$CWD_RUN_PID" 2>/dev/null || :
+wait "$CWD_RUN_PID" 2>/dev/null || :
 
 # The footer has to account for every discovered game exactly once. This is the
 # arithmetic that catches a state being tallied twice or not at all, which is
