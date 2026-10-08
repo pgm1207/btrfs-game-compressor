@@ -1626,7 +1626,7 @@ fn run_internal(action: &str, target: &str, level: u8, root: &Path, prepare_cand
         eprintln!("Applying assets without persistent restore copies. Runtime compatibility is unverified; recover original assets with Steam verification.");
     }
     let tree = if action == "apply" {
-        Some(super::Tree::new(root)?)
+        Some(super::Tree::for_asset_writes(root)?)
     } else {
         None
     };
@@ -1698,7 +1698,7 @@ fn run_internal(action: &str, target: &str, level: u8, root: &Path, prepare_cand
                 .as_ref()
                 .ok_or_else(|| bad("Btrfs tree was not opened"))?
                 .open(rel_tmp, true)?;
-            super::compress_file(&writable, rel_tmp, level)?;
+            super::compress_file_best_effort(&writable, rel_tmp, level)?;
             // No-backup mode still uses a new, synced file and atomic rename.
             // The original remains live until the replacement is fully written.
             if retain_backup {
@@ -2070,6 +2070,31 @@ mod tests {
             .with_guessed_format().unwrap().decode().unwrap();
         assert_eq!((decoded.width(), decoded.height()), (1920, 1080));
         assert!(fs::metadata(&path).unwrap().len() > 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_apply_and_restore_works_without_btrfs_ioctl() {
+        // The test fixture lives on the runner's ordinary temporary filesystem
+        // (typically ext4 or tmpfs), not under BGC_TEST_BTRFS_DIR.
+        let root = fixture("generic-filesystem-assets");
+        let path = root.join("wallpaper.png");
+        let image = image::ImageBuffer::from_fn(2048, 1024, |x, y| {
+            image::Rgb([
+                ((x.wrapping_mul(13) ^ y.wrapping_mul(7)) & 0xff) as u8,
+                ((x.wrapping_mul(3) + y.wrapping_mul(17)) & 0xff) as u8,
+                ((x.wrapping_mul(19) ^ y.wrapping_mul(23)) & 0xff) as u8,
+            ])
+        });
+        image.save(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+        run("apply", "ultra-performance", 1, &root).unwrap();
+        let backup = root.join(BACKUP).join("wallpaper.png");
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert!(fs::metadata(&path).unwrap().len() < original.len() as u64);
+        run("restore", "native", 0, &root).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!backup.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
