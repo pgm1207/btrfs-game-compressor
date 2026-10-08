@@ -23,6 +23,44 @@ fn success(args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 #[test]
+fn read_only_asset_plan_works_without_a_btrfs_mount() {
+    // This test intentionally uses the ordinary temporary directory. It must
+    // exercise the real native planner, not a shell/mock Btrfs backend.
+    let root = env::temp_dir().join(format!(
+        "bgc-any-filesystem-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir(&root).unwrap();
+    let unknown = root.join("untouched.bin");
+    let input = b"asset planning must not write to the source";
+    fs::write(&unknown, input).unwrap();
+    let path = root.to_str().unwrap();
+    let output = run(&["asset-plan", "balanced", path]);
+    assert!(
+        output.status.success(),
+        "asset-plan should not require Btrfs: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("ASSETS|plan|Balanced (1080p)|0|"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(fs::read(&unknown).unwrap(), input);
+    assert!(!root.join(".bgc-assets-backup").exists());
+
+    // Neither dangling symlinks nor an aliased root are allowed to trigger a
+    // surprising write or incorrect scan.
+    let alias = root.with_extension("symlink");
+    symlink(&root, &alias).unwrap();
+    assert!(!run(&["asset-plan", "balanced", alias.to_str().unwrap()])
+        .status.success());
+    fs::remove_file(alias).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn no_backup_assets_replace_atomically_without_recovery_files() {
     let Some(parent) = env::var_os("BGC_TEST_BTRFS_DIR") else { return; };
     let root = std::path::PathBuf::from(parent).join(format!("bgc-no-backup-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
