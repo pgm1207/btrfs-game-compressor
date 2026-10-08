@@ -276,7 +276,7 @@ struct Prepared {
 /// Decode, downscale and re-encode one DDS texture in memory, then verify the
 /// container. The source is only read; the codec is preserved and the mip chain
 /// is regenerated. Nothing is written here.
-fn prepare(max_dim: u32, input: &Path) -> io::Result<Prepared> {
+fn prepare(max_dim: u32, input: &Path, guarded_apply: bool) -> io::Result<Prepared> {
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -305,6 +305,16 @@ fn prepare(max_dim: u32, input: &Path) -> io::Result<Prepared> {
     let base: RgbaImage = decoded.get_image(0, 0, 0).ok_or_else(|| bad("DDS texture has no base mip"))?;
     let (width, height) = base.dimensions();
     let (new_width, new_height) = scale_to(width, height, max_dim);
+    // Installed beta asset changes must actually reduce dimensions. Re-encoding
+    // a BCn texture at the same size can lose quality for no resolution gain.
+    // An explicit detached export remains an opt-in experiment.
+    if guarded_apply && (new_width, new_height) == (width, height) {
+        return Err(bad("texture fits this profile; skip lossy re-encoding"));
+    }
+    // Mirror the minimum short-edge guard used for non-DDS images.
+    if guarded_apply && crate::texture_policy::output_too_thin(new_width, new_height) {
+        return Err(bad("DDS downscale would create a too-thin texture"));
+    }
     let resized = if (new_width, new_height) == (width, height) {
         base
     } else {
@@ -375,8 +385,8 @@ pub fn prepare_asset(max_edge: u32, path: &Path) -> io::Result<Option<(Vec<u8>, 
     if !(16..=16384).contains(&max_edge) {
         return Ok(None);
     }
-    match prepare(max_edge, path) {
-        Ok(prepared) if prepared.outcome.after < prepared.outcome.before => {
+    match prepare(max_edge, path, true) {
+        Ok(prepared) if prepared.outcome.downscaled && prepared.outcome.after < prepared.outcome.before => {
             Ok(Some((prepared.bytes, prepared.outcome.width, prepared.outcome.height)))
         }
         Ok(_) => Ok(None),
@@ -391,7 +401,7 @@ pub fn compress(max_dim: u32, input: &Path, output: &Path) -> io::Result<()> {
     if !(16..=16384).contains(&max_dim) {
         return Err(bad("texture maximum dimension must be 16..=16384"));
     }
-    let prepared = prepare(max_dim, input)?;
+    let prepared = prepare(max_dim, input, false)?;
     write_output(output, &prepared.bytes)?;
     let outcome = prepared.outcome;
     println!(
@@ -453,7 +463,7 @@ pub fn compress_tree(max_dim: u32, input: &Path, output: &Path) -> io::Result<()
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        match prepare(max_dim, &path) {
+        match prepare(max_dim, &path, false) {
             Ok(prepared) => {
                 // Export only when the rebuilt texture is actually smaller. Adding
                 // a mip chain to an already-small single-mip texture would grow it.
@@ -641,6 +651,33 @@ mod tests {
         let other = root.join("other.bin");
         fs::write(&other, b"not a texture").unwrap();
         assert!(prepare_asset(512, &other).unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installed_dds_apply_skips_thin_results_but_export_still_works() {
+        let root = std::env::temp_dir().join(format!("bgc-texture-thin-{}", stamp()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.dds");
+        let destination = root.join("export.dds");
+        fs::write(&source, encoded_source(1024, 128, ImageFormat::BC3RgbaUnorm)).unwrap();
+        assert!(prepare_asset(256, &source).unwrap().is_none(), "256x32 is too thin for installed apply");
+        compress(256, &source, &destination).unwrap();
+        let exported = fs::read(&destination).unwrap();
+        let p = parse(&exported).unwrap();
+        assert_eq!((p.width, p.height), (256, 32));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installed_dds_apply_skips_already_at_cap() {
+        let root = std::env::temp_dir().join(format!("bgc-texture-at-cap-{}", stamp()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.dds");
+        let original = encoded_source(512, 512, ImageFormat::BC7RgbaUnorm);
+        fs::write(&source, &original).unwrap();
+        assert!(prepare_asset(640, &source).unwrap().is_none());
+        assert_eq!(fs::read(&source).unwrap(), original);
         fs::remove_dir_all(root).unwrap();
     }
 
