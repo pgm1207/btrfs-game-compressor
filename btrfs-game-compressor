@@ -1171,6 +1171,23 @@ discover_running_games() {
                 close(path)
             }
         }' 2>/dev/null)
+
+    # Not all game assets stay mapped. A process whose current working directory
+    # is within an installed game is also evidence that it is running. Refuse
+    # a write in that case. This is conservative, not an atomic process lock.
+    local cwd lib relative game
+    for pid in /proc/[0-9]*; do
+        cwd=$(readlink "$pid/cwd" 2>/dev/null) || continue
+        for lib in "${LIBS[@]}"; do
+            case "$cwd" in
+                "$lib"/*)
+                    relative="${cwd#"$lib"/}"
+                    game="${relative%%/*}"
+                    [ -n "$game" ] && RUNNING_DIRS["$lib/$game"]=1
+                    ;;
+            esac
+        done
+    done
     return 0
 }
 
