@@ -26,6 +26,25 @@ const NOFOLLOW: i32 = libc::O_NOFOLLOW;
 const MAX_INPUT: u64 = 512 * 1024 * 1024;
 const MAX_PIXELS: u64 = 80_000_000;
 
+/// Advisory per-game inode lock. Released automatically when the descriptor
+/// closes or the process exits, including SIGKILL. This only coordinates
+/// cooperating native asset commands, not Steam itself.
+fn lock_game_for_mutation(root: &Path) -> io::Result<File> {
+    let dir = OpenOptions::new()
+        .read(true)
+        .custom_flags(NOFOLLOW | libc::O_DIRECTORY)
+        .open(root)?;
+    if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::WouldBlock {
+            return Err(io::Error::new(io::ErrorKind::WouldBlock,
+                "another native asset operation is already modifying this game"));
+        }
+        return Err(error);
+    }
+    Ok(dir)
+}
+
 struct Profile {
     label: &'static str,
     max_edge: u32,
@@ -1402,6 +1421,7 @@ pub fn restore_file(root: &Path, relative: &Path) -> io::Result<()> {
     if !fs::symlink_metadata(root)?.file_type().is_dir() {
         return Err(bad("game path is not a real directory"));
     }
+    let _mutation_guard = lock_game_for_mutation(root)?;
     let backup = root.join(BACKUP).join(relative);
     let backups = walk_backups(root)?;
     if !backups.contains(&backup) { return Err(bad("no matching regular asset backup")); }
@@ -1570,6 +1590,7 @@ pub fn prune_apply(root: &Path, rels: &[PathBuf], debug: bool) -> io::Result<()>
     if !fs::symlink_metadata(root)?.file_type().is_dir() {
         return Err(bad("game path is not a real directory"));
     }
+    let _mutation_guard = lock_game_for_mutation(root)?;
     let files = prune_files(root, rels, debug)?;
     let (mut count, mut bytes) = (0u64, 0u64);
     for path in files {
@@ -1621,6 +1642,11 @@ fn run_internal(action: &str, target: &str, level: u8, root: &Path, prepare_cand
     if !fs::symlink_metadata(root)?.file_type().is_dir() {
         return Err(bad("game path is not a real directory"));
     }
+    let _mutation_guard = if action == "plan" {
+        None
+    } else {
+        Some(lock_game_for_mutation(root)?)
+    };
     if action == "restore" || action == "finalize" {
         let backups = walk_backups(root)?;
         for b in &backups {
@@ -2119,6 +2145,24 @@ mod tests {
         run("restore", "native", 0, &root).unwrap();
         assert_eq!(fs::read(&path).unwrap(), original);
         assert!(!backup.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_mutation_lock_rejects_overlapping_asset_operations() {
+        let root = fixture("native-lock");
+        let held = lock_game_for_mutation(&root).unwrap();
+        assert_eq!(lock_game_for_mutation(&root).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(run("apply", "balanced", 1, &root).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(run("restore", "native", 0, &root).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(run("finalize", "native", 0, &root).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(prune_apply(&root, &[], false).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(restore_file(&root, Path::new("no-file")).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        // Planning remains available even when a mutation is running.
+        run("plan", "balanced", 0, &root).unwrap();
+        drop(held);
+        run("restore", "native", 0, &root).unwrap();
+        prune_apply(&root, &[], false).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
