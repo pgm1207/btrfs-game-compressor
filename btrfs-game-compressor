@@ -3513,6 +3513,16 @@ cmd_variants() {
     printf '\nTotal potentially reclaimable: %s (logical). Confirm which member the engine actually loads before removing a suite; reuse --prune-assets/--restore-assets for a reversible change.\n' "$(bytes_human "$total")"
 }
 
+# Filesystem-wide available bytes reported by statvfs; accessible on ext4
+# and Btrfs without privileged extent inspection. Not an attribution metric.
+filesystem_available_bytes() {
+    local report available
+    report=$("$(native_backend)" fs-space "$1" 2>/dev/null) || return 1
+    IFS='|' read -r _ available _ <<< "$report"
+    [[ "$report" == FS_SPACE\|* && "$available" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$available"
+}
+
 asset_usage_bytes() {
     local line
     if [ "$EUID" -eq 0 ]; then
@@ -3540,7 +3550,7 @@ asset_scan_summary() {
 
 asset_workflow() {
     local query="$1" requested="$2" confirmed="${3:-0}" target="$VISUAL_TARGET" game="" matches=0 i
-    local action=plan result tag reported_target count before after retained packed audio images textures wavs raster total packed_bytes audio_bytes packages disk_before="" disk_after="" level=0
+    local action=plan result tag reported_target count before after retained packed audio images textures wavs raster total packed_bytes audio_bytes packages disk_before="" disk_after="" free_before="" free_after="" level=0
     for i in "${!GAMES_PATH[@]}"; do
         if [ "$query" = "${GAMES_PATH[$i]}" ] || [ "$query" = "${GAMES_NAME[$i]}" ]; then
             game="${GAMES_PATH[$i]}"
@@ -3600,6 +3610,7 @@ asset_workflow() {
         fi
         ensure_sudo
         disk_before=$(asset_usage_bytes "$game") || disk_before=""
+        free_before=$(filesystem_available_bytes "$game") || free_before=""
         if [ "$action" = apply ]; then level=$(effective_level "$game"); fi
         if [ "$action" = apply ] && [ "$target" = lossless ]; then
             lossless_guard_ready "$game" "$disk_before" || return 1
@@ -3638,11 +3649,21 @@ asset_workflow() {
             fi ;;
         apply|restore|finalize)
             disk_after=$(asset_usage_bytes "$game") || disk_after=""
+            free_after=$(filesystem_available_bytes "$game") || free_after=""
             if [ -n "$disk_before" ] && [ -n "$disk_after" ]; then
                 printf 'Live game data on disk (excludes restore copies): %s → %s · footprint reduction: %s\n' \
                     "$(bytes_human "$disk_before")" "$(bytes_human "$disk_after")" "$(bytes_human "$((disk_before-disk_after))")"
             else
                 printf 'Physical game measurement unavailable.\n'
+            fi
+            if [[ "$free_before" =~ ^[0-9]+$ && "$free_after" =~ ^[0-9]+$ ]]; then
+                if [ "$free_after" -ge "$free_before" ]; then
+                    printf 'Observed available filesystem space: +%s (filesystem-wide; other writes, snapshots and backups can affect this value).\n' "$(bytes_human "$((free_after-free_before))")"
+                else
+                    printf 'Observed available filesystem space: -%s (filesystem-wide; other writes, snapshots and backups can affect this value).\n' "$(bytes_human "$((free_before-free_after))")"
+                fi
+            else
+                printf 'Observed available filesystem space: unavailable (cannot measure statvfs).\n'
             fi
             if [ "$action" = apply ]; then
                 printf 'Changed %s asset file(s): logical bytes %s → %s · reduction %s (not net disk savings).\n' \

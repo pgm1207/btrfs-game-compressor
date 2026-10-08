@@ -743,6 +743,17 @@ place so restoration never has to recreate them. As with asset transforms, the
 backup relies on reflinks where available and falls back to a real copy on other
 filesystems.
 
+### Measuring observed filesystem-wide available space
+
+`bgc-native fs-space /path/to/game` emits `FS_SPACE|available|free|total|fragment_size`
+with byte counters from Linux `statvfs(2)`. Unlike Btrfs extent accounting, it
+works on ext4 too and needs no privileged measurement. The interactive asset
+workflow now reports the observed change in available space after apply, restore
+or finalize, alongside logical and extent-footprint reports. It is an
+**observed filesystem-wide delta**, not a causal proof that the game freed that
+many bytes: other writes, retained backups, snapshots, quotas and allocation
+metadata can affect it. Failure is reported as unavailable, never zero.
+
 ### Measuring filesystem level tradeoffs
 
 For developer experiments, `python3 test/storage-benchmark.py --scratch NEW_DIR
