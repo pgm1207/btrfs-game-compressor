@@ -1626,7 +1626,7 @@ fn run_internal(action: &str, target: &str, level: u8, root: &Path, prepare_cand
         eprintln!("Applying assets without persistent restore copies. Runtime compatibility is unverified; recover original assets with Steam verification.");
     }
     let tree = if action == "apply" {
-        Some(super::Tree::new(root)?)
+        Some(super::Tree::for_asset_writes(root)?)
     } else {
         None
     };
@@ -1698,7 +1698,7 @@ fn run_internal(action: &str, target: &str, level: u8, root: &Path, prepare_cand
                 .as_ref()
                 .ok_or_else(|| bad("Btrfs tree was not opened"))?
                 .open(rel_tmp, true)?;
-            super::compress_file(&writable, rel_tmp, level)?;
+            super::compress_file_best_effort(&writable, rel_tmp, level)?;
             // No-backup mode still uses a new, synced file and atomic rename.
             // The original remains live until the replacement is fully written.
             if retain_backup {
