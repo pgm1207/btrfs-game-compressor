@@ -1827,7 +1827,7 @@ fn run_internal(action: &str, target: &str, level: u8, root: &Path, prepare_cand
     Ok(())
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct PackedStats {
     count: u64,
     before: u64,
