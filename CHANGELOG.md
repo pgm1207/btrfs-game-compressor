@@ -50,6 +50,10 @@ and the release uploads complete; a merge to `main` alone does not ship them.
   codec-distortion metrics, with alpha-aware black/white PSNR and altered-alpha
   pixel count. These do not measure lost source resolution, game quality or
   runtime compatibility (#24).
+- Add a separate native-resolution DDS quality comparison: upsample the
+  candidate with Lanczos3 and compare against the original to expose spatial
+  downscaling losses distinct from codec-only PSNR. Pixel scores still do not
+  certify perceptual/gameplay quality (#42).
 - In installed beta DDS apply, skip same-size lossy recompression and reject
   too-thin downsized textures before expensive decoding. Detached DDS export is
   still explicit and separate. The half-original-dimension budget is not yet
