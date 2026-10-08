@@ -1,0 +1,58 @@
+name: Real Btrfs integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  btrfs-integration:
+    name: Linux Btrfs filesystem tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Btrfs utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y btrfs-progs
+
+      - name: Prepare disposable Btrfs image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="$RUNNER_TEMP/bgc-ci-btrfs.img"
+          mountpoint="$RUNNER_TEMP/bgc-ci-btrfs"
+          truncate -s 2G "$image"
+          sudo mkfs.btrfs -f "$image"
+          mkdir -p "$mountpoint"
+          sudo mount -o loop,compress=zstd "$image" "$mountpoint"
+          sudo chown "$(id -u):$(id -g)" "$mountpoint"
+          test "$(findmnt -T "$mountpoint" -no FSTYPE)" = btrfs
+          touch "$mountpoint/.bgc-ci-writable"
+          echo "BGC_TEST_BTRFS_DIR=$mountpoint" >> "$GITHUB_ENV"
+
+      # The native integration tests skip their Btrfs-only bodies when
+      # BGC_TEST_BTRFS_DIR is absent. This job MUST provide a real mount or fail.
+      - name: Run filesystem tests on Btrfs (no silent skips)
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${BGC_TEST_BTRFS_DIR:?Btrfs fixture is required}"
+          test "$(findmnt -T "$BGC_TEST_BTRFS_DIR" -no FSTYPE)" = btrfs
+          cargo test --locked --manifest-path native/Cargo.toml \
+            --test filesystem -- --test-threads=1 --nocapture
+
+      - name: Unmount disposable Btrfs
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${BGC_TEST_BTRFS_DIR:-}" ]; then
+            sudo umount "$BGC_TEST_BTRFS_DIR" || true
+          fi
