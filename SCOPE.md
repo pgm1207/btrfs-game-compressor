@@ -136,7 +136,8 @@ A read-only `--variants GAME` report detects redundant asset suites by
 directory shape alone (architecture/renderer builds, resolution tiers, platform
 folders, language packs), and `--slim GAME` acts on the unambiguous ones in a
 single offline, reversible pass (keep the highest resolution tier and the
-host-platform build). A `keep_languages` setting lets the same pass drop every
+all platform-specific builds, since the selected native/Proton runtime is not
+known). A `keep_languages` setting lets the same pass drop every
 language pack the user did not select (localized audio, subtitles, `locale/`
 data); a group is only touched when a kept language is present, so a language
 set is never emptied, and the user is warned to keep the startup language. Both
