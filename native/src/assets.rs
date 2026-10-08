@@ -149,6 +149,20 @@ fn matches_expected(path: &Path, side: &Path) -> io::Result<bool> {
     }
     Ok(expected.trim() == format!("{digest:016x}"))
 }
+// Match the existing sidecar checksum format while streaming large packs.
+fn checksum_file(path: &Path) -> io::Result<u64> {
+    let mut input = open_read(path)?;
+    let mut checksum = 0xcbf29ce484222325u64;
+    let mut buffer = [0u8; 65536];
+    loop {
+        super::cancelled()?;
+        let n = input.read(&mut buffer)?;
+        if n == 0 { break; }
+        checksum = hash_update(checksum, &buffer[..n]);
+    }
+    Ok(checksum)
+}
+
 fn same_contents(a: &Path, b: &Path) -> io::Result<bool> {
     // A pruned asset is intentionally absent from the game tree, so a missing
     // live file is never "the same" and never an error here.
@@ -1747,10 +1761,11 @@ fn run_internal(action: &str, target: &str, level: u8, root: &Path, prepare_cand
     // whole container rather than one stream, so they cannot ride the streaming
     // image/audio callback above.
     if action == "apply" || (action == "plan" && prepare_candidates) {
-        let packed = packed_asset_pass(root, target, &p, action, level)?;
+        let packed = packed_asset_pass(root, target, &p, action, level, retain_backup)?;
         count += packed.count;
         before += packed.before;
         after += packed.after;
+        retained += packed.retained;
         texture_count += packed.textures;
         audio_count += packed.audio;
     }
@@ -1767,17 +1782,17 @@ struct PackedStats {
     count: u64,
     before: u64,
     after: u64,
+    retained: u64,
     textures: u64,
     audio: u64,
 }
 
 /// Walk for Godot PCK files and apply the profile in place.
 ///
-/// No per-file backups are retained: this tool is aimed at Steam-managed games,
-/// where "Verify integrity of game files" restores the original pack. The
-/// savings gate is enforced by the transform itself, so a pack that would not
-/// shrink is left byte-for-byte untouched.
-fn packed_asset_pass(root: &Path, target: &str, p: &Profile, action: &str, level: u8) -> io::Result<PackedStats> {
+/// Normal apply stages a candidate independently and retains original packs for
+/// restore. Explicit apply-no-backup remains irreversible. Unsupported packs
+/// stay unchanged and never acquire a backup.
+fn packed_asset_pass(root: &Path, target: &str, p: &Profile, action: &str, level: u8, retain_backup: bool) -> io::Result<PackedStats> {
     let mut stats = PackedStats::default();
     if p.max_edge == u32::MAX {
         // Lossless never resizes textures.
@@ -1817,19 +1832,43 @@ fn packed_asset_pass(root: &Path, target: &str, p: &Profile, action: &str, level
                 stats.after += original_len;
                 continue;
             }
-            match packed_apply_one(&path, target, level) {
+            if retain_backup {
+                let rel = path.strip_prefix(root).map_err(|_| bad("packed asset escaped root"))?;
+                let backup = root.join(BACKUP).join(rel);
+                // An existing backup means this pack was already optimized, or
+                // needs manual recovery from a previously interrupted operation.
+                if backup.exists() || sidecar(&backup).exists() { continue; }
+            }
+            let result = if retain_backup {
+                packed_apply_with_backup(root, &path, target, level)
+            } else {
+                packed_apply_one(&path, target, level)
+            };
+            match result {
                 Ok((textures, audio)) => {
                     if textures + audio > 0 {
                         let after_len = fs::metadata(&path)?.len();
                         stats.count += 1;
                         stats.before += original_len;
                         stats.after += after_len;
+                        if retain_backup { stats.retained += original_len; }
                         stats.textures += textures;
                         stats.audio += audio;
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
                 Err(e) => {
+                    if retain_backup {
+                        let rel = path.strip_prefix(root).map_err(|_| bad("packed asset escaped root"))?;
+                        if root.join(BACKUP).join(rel).exists() {
+                            // Commit or directory-sync may have failed after
+                            // publishing the new file. Retained recovery state
+                            // makes this a failure, never a silent safe skip.
+                            return Err(io::Error::new(e.kind(), format!(
+                                "packed optimization needs recovery review: {e}"
+                            )));
+                        }
+                    }
                     if std::env::var_os("BGC_VERBOSE").is_some() {
                         eprintln!("Skipping packed asset {}: {e}", path.display());
                     }
@@ -1838,6 +1877,61 @@ fn packed_asset_pass(root: &Path, target: &str, p: &Profile, action: &str, level
         }
     }
     Ok(stats)
+}
+
+/// Prepare an optimized PCK on a separate inode and record a restorable original
+/// before publishing it. The checksum sidecar is durable before the commit, so
+/// interruption after rename leaves a recognizable backup for normal restore.
+/// This is one-file crash recovery, not yet a whole-game transaction.
+fn packed_apply_with_backup(root: &Path, path: &Path, target: &str, level: u8) -> io::Result<(u64, u64)> {
+    let rel = path.strip_prefix(root).map_err(|_| bad("packed asset escaped root"))?;
+    let backup = root.join(BACKUP).join(rel);
+    let check = sidecar(&backup);
+    if backup.exists() || check.exists() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "packed asset recovery data already exists"));
+    }
+    let staged = append_suffix(path, &format!(".bgc-packed-stage-{}", std::process::id()));
+    let mut backup_created = false;
+    let mut committed = false;
+    let outcome = (|| -> io::Result<(u64, u64)> {
+        clone_file(path, &staged)?;
+        if !same_contents(path, &staged)? {
+            return Err(bad("source pack changed during staging"));
+        }
+        let staged_source_hash = checksum_file(&staged)?;
+        let counts = packed_apply_one(&staged, target, level)?;
+        if counts.0 + counts.1 == 0 || fs::metadata(&staged)?.len() >= fs::metadata(path)?.len() {
+            return Ok((0, 0));
+        }
+        ensure_backup_dirs(root, rel.parent().unwrap_or(Path::new("")))?;
+        clone_file(path, &backup)?;
+        backup_created = true;
+        if !same_contents(path, &backup)? || checksum_file(&backup)? != staged_source_hash {
+            return Err(bad("source pack changed between staging and backup creation"));
+        }
+        let digest = checksum_file(&staged)?;
+        let mut side = OpenOptions::new().write(true).create_new(true).custom_flags(NOFOLLOW).open(&check)?;
+        writeln!(side, "{digest:016x}")?;
+        side.sync_all()?;
+        File::open(check.parent().ok_or_else(|| bad("missing backup parent"))?)?.sync_all()?;
+        // Refuse known source changes before the atomic replacement. This does
+        // not claim to prevent all hostile concurrent pathname substitutions.
+        if !same_contents(path, &backup)? {
+            return Err(bad("source pack changed before publication"));
+        }
+        fs::rename(&staged, path)?;
+        committed = true;
+        File::open(path.parent().ok_or_else(|| bad("missing game parent"))?)?.sync_all()?;
+        Ok(counts)
+    })();
+    let _ = fs::remove_file(&staged);
+    if outcome.is_err() && backup_created && !committed {
+        // Original still occupies the game path; only our newly created
+        // recovery data may be removed. Never discard backups after commit.
+        let _ = fs::remove_file(&check);
+        let _ = fs::remove_file(&backup);
+    }
+    outcome
 }
 
 /// Apply the profile to one standalone PCK, returning (textures, audio) counts.
@@ -2208,6 +2302,43 @@ mod tests {
         let (again, _) = packed_apply_one(&pack, "ultra-performance", 1).unwrap();
         assert_eq!(again, 0);
         assert_eq!(fs::read(&pack).unwrap(), rewritten);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn packed_apply_with_backup_restores_original_and_finalizes() {
+        let root = fixture("packed-recoverable");
+        let texture = crate::gdst::tests::fixture(1000, 600);
+        let name = "res://art.stex";
+        let mut bytes = b"GDPC".to_vec();
+        for v in [1u32, 3, 7, 0] { bytes.extend_from_slice(&v.to_le_bytes()); }
+        bytes.resize(84, 0);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        let offset = 88 + 4 + name.len() + 1 + 32;
+        bytes.extend_from_slice(&(name.len() as u32 + 1).to_le_bytes());
+        bytes.extend_from_slice(name.as_bytes()); bytes.push(0);
+        bytes.extend_from_slice(&(offset as u64).to_le_bytes());
+        bytes.extend_from_slice(&(texture.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&crate::md5::digest(&texture));
+        bytes.extend_from_slice(&texture);
+        let pack = root.join("game.pck");
+        fs::write(&pack, &bytes).unwrap();
+        let backup = root.join(BACKUP).join("game.pck");
+        let counts = packed_apply_with_backup(&root, &pack, "ultra-performance", 1).unwrap();
+        assert_eq!(counts.0, 1);
+        assert!(fs::metadata(&pack).unwrap().len() < bytes.len() as u64);
+        assert_eq!(fs::read(&backup).unwrap(), bytes);
+        assert!(known_version(&pack, &backup).unwrap());
+        finish_backups("restore", &root, vec![backup.clone()]).unwrap();
+        assert_eq!(fs::read(&pack).unwrap(), bytes);
+        assert!(!backup.exists());
+        packed_apply_with_backup(&root, &pack, "ultra-performance", 1).unwrap();
+        finish_backups("finalize", &root, vec![backup.clone()]).unwrap();
+        assert!(!backup.exists());
+        assert!(fs::metadata(&pack).unwrap().len() < bytes.len() as u64);
+        let no_gain = packed_apply_with_backup(&root, &pack, "ultra-performance", 1).unwrap();
+        assert_eq!(no_gain, (0, 0));
+        assert!(!backup.exists(), "no-gain pack must not retain a backup");
         fs::remove_dir_all(root).unwrap();
     }
 

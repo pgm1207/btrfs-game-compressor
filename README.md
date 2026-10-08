@@ -385,9 +385,11 @@ btrfs-game-compressor --finalize-assets Hades
 
 Choose a profile in TUI settings before applying. Files change only after
 confirmation, and the game must be closed. Changed loose sources are retained in
-`.bgc-assets-backup` until restored or finalized. Supported standalone Godot PCK
-packs are rewritten in place without a restore copy; recover them with Steam
-"Verify integrity of game files". That loose-file copy remains allocated,
+`.bgc-assets-backup` until restored or finalized. In normal apply mode,
+supported standalone Godot PCK packs are staged separately and their originals
+are retained in that same restore tree. The explicitly irreversible
+`--compact-all-no-backup` mode retains no new backups, and Steam verification
+may be required to recover originals. Restore copies remain allocated,
 so applying may shrink logical file sizes without increasing free disk space.
 Finalizing discards the restore copy; snapshots may still retain blocks. Steam
 verification can replace changed assets. Anti-cheat is not detected

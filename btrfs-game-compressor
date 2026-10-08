@@ -2493,11 +2493,11 @@ batch_compress_routine() {
         if [ "$BATCH_ASSET_FOOTPRINT_MEASURED" -gt 0 ]; then
             echo "  Live game data footprint after optimization: $(bytes_human "$BATCH_ASSET_FOOTPRINT_SAVED") lower in aggregate (restore data and snapshots can still occupy space)."
         else
-            echo "  Physical game-data footprint change: unavailable; loose originals remain in restore copies (packed PCK keeps none), so logical reduction is not free space."
+            echo "  Physical game-data footprint change: unavailable; originals remain in restore copies (including packed PCK), so logical reduction is not free space."
         fi
         echo "  Files identified: packed/media containers $BATCH_ASSET_PACKED · audio files $BATCH_ASSET_AUDIO (Hades v7 LZ4 and supported standalone FMOD are eligible; Bink and unknown formats stay unchanged)."
         echo "  WAV stays WAV. Converting to Opus needs explicit game/engine support and matching asset references; this tool does not rewrite those."
-        echo "  Changed files keep their original path and container. Loose assets keep restore copies; packed PCK is rewritten in place, so recover it with Steam verify. Asset size reductions are not free-space savings until loose restore copies are finalized."
+        echo "  Changed files keep their original path and container. Normal asset apply keeps restorable loose and packed PCK originals. Explicit no-backup mode relies on Steam verification. Logical asset reductions are not free-space savings until restore copies are finalized."
     fi
     if [ "$failed_count" -gt 0 ] || [ "$dedupe_failed" -eq 1 ] || [ "${BATCH_ASSET_FAILED:-0}" -gt 0 ]; then
         if [ "$all_mode" -eq 1 ]; then echo -e "${YELLOW}Asset batch finished with issue(s). Press any key to return...${RESET}"; else echo -e "${YELLOW}Batch finished with compression or deduplication issue(s). Press any key to return...${RESET}"; fi
@@ -3591,7 +3591,7 @@ asset_workflow() {
                 return 2
             fi
             if [ "$confirmed" != 1 ]; then
-                printf '[BETA] Images/DDS may lose detail; WAV may be resampled and standalone FMOD re-encoded. Anti-cheat is not detected automatically. Loose assets keep a restore copy; supported packed PCK files have no restore copy (recover with Steam "Verify integrity of game files"). Apply to %s? [y/N] ' "$query"
+                printf '[BETA] Images/DDS may lose detail; WAV may be resampled and standalone FMOD re-encoded. Anti-cheat is not detected automatically. Loose assets and supported packed PCK files keep restore copies in normal apply; explicit no-backup mode requires Steam verification. Apply to %s? [y/N] ' "$query"
             fi
         elif [ "$action" = finalize ]; then
             if [ ! -t 0 ]; then
@@ -3645,7 +3645,7 @@ asset_workflow() {
             else
                 printf 'Candidate asset bytes: %s → %s · possible logical reduction: %s\n' \
                     "$(bytes_human "$before")" "$(bytes_human "$after")" "$(bytes_human "$((before-after))")"
-                printf 'Loose images/DDS are resized; WAV may be resampled and standalone FMOD re-encoded; supported packed PCK audio/textures have no restore copy. Hades v7 LZ4 packages are recompressed without changing decoded assets. Bink, embedded FMOD and unknown packages remain unchanged. These are logical sizes, not net disk savings.\n'
+                printf 'Loose images/DDS are resized; WAV may be resampled and standalone FMOD re-encoded; normal apply keeps restore copies for supported packed PCK audio/textures. Hades v7 LZ4 packages are recompressed without changing decoded assets. Bink, embedded FMOD and unknown packages remain unchanged. These are logical sizes, not net disk savings.\n'
             fi ;;
         apply|restore|finalize)
             disk_after=$(asset_usage_bytes "$game") || disk_after=""
@@ -3897,7 +3897,7 @@ batch_asset_game() {
         BATCH_ASSET_CHANGED=0
         BATCH_ASSET_NONE=$((BATCH_ASSET_NONE+1)); return 0
     fi
-    printf '  [BETA] Assets: %s — images %s, textures %s, audio %s, lossless Hades packages %s; logical sizes %s → %s (reduction %s). Loose originals are retained, but packed PCK has no restore copy, so this is not a free-space figure.\n' \
+    printf '  [BETA] Assets: %s — images %s, textures %s, audio %s, lossless Hades packages %s; logical sizes %s → %s (reduction %s). Normal apply retains originals, including packed PCK, so this is not a free-space figure.\n' \
         "$reported" "${images:-0}" "${textures:-0}" "${wavs:-0}" "${packages:-0}" "$(bytes_human "$before")" "$(bytes_human "$after")" \
         "$(bytes_human "$((before-after))")"
     BATCH_ASSET_DONE=$((BATCH_ASSET_DONE+1))
@@ -5263,7 +5263,7 @@ while true; do
                 ASSET_PREVIEW_COUNT=0
                 asset_workflow "$cur_path" --assets
                 if [ "$VISUAL_TARGET" != native ] && [ "${ASSET_PREVIEW_COUNT:-0}" -gt 0 ]; then
-                    read -r -p "[BETA] Apply this profile to supported images, textures, audio and packed PCK? Loose files keep a restore copy; packed PCK is rewritten in place with no restore copy (recover via Steam verify); anti-cheat is not detected. [y/N] " asset_reply || asset_reply=""
+                    read -r -p "[BETA] Apply this profile to supported images, textures, audio and packed PCK? Normal apply keeps loose and packed PCK restore copies; explicit no-backup mode does not; anti-cheat is not detected. [y/N] " asset_reply || asset_reply=""
                     if [[ "$asset_reply" = y || "$asset_reply" = Y ]]; then
                         asset_workflow "$cur_path" --apply-assets 1
                         discover_data
