@@ -82,6 +82,35 @@ jobs:
       - name: Make check
         run: make check
 
+  # These tests otherwise return early when BGC_TEST_BTRFS_DIR is unset.
+  # Keep a dedicated privileged job so a green unit-test job cannot be mistaken
+  # for evidence that compression/dedupe/restore were exercised on real Btrfs.
+  btrfs-integration:
+    name: Real Btrfs integration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Btrfs utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y btrfs-progs
+      - name: Exercise actual Btrfs filesystem
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${RUNNER_TEMP}/bgc-test-btrfs.img"
+          mount_dir="${RUNNER_TEMP}/bgc-test-btrfs"
+          truncate -s 2G "$image"
+          sudo mkfs.btrfs -f "$image"
+          mkdir -p "$mount_dir"
+          cleanup() { sudo umount "$mount_dir" || true; }
+          trap cleanup EXIT
+          sudo mount -o loop,compress=zstd "$image" "$mount_dir"
+          sudo chown "$(id -u):$(id -g)" "$mount_dir"
+          test "$(stat -f -c %T "$mount_dir")" = "btrfs"
+          BGC_TEST_BTRFS_DIR="$mount_dir" cargo test --locked --manifest-path native/Cargo.toml --test filesystem -- --nocapture
+
   # The script must run on a stock Debian/Ubuntu, where /usr/bin/awk is mawk and
   # not gawk, and on minimal images where it is busybox awk. gawk extensions
   # such as asort() and strftime() therefore have to stay out of the code; this
