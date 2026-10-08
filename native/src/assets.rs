@@ -227,22 +227,27 @@ fn known_version(path: &Path, backup: &Path) -> io::Result<bool> {
     }
     Ok(same_contents(path, backup)? || matches_expected(path, &sidecar(backup))?)
 }
+fn validate_backup_dir(path: &Path, root_device: u64) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.file_type().is_dir() || meta.dev() != root_device {
+        return Err(bad("asset backup directory is a symlink or crosses a filesystem"));
+    }
+    Ok(())
+}
+
 fn ensure_backup_dirs(root: &Path, relative_parent: &Path) -> io::Result<PathBuf> {
+    let root_device = fs::symlink_metadata(root)?.dev();
     let mut p = root.join(BACKUP);
     if !p.exists() {
         fs::create_dir(&p)?;
     }
-    if !fs::symlink_metadata(&p)?.file_type().is_dir() {
-        return Err(bad("asset backup path is not a real directory"));
-    }
+    validate_backup_dir(&p, root_device)?;
     for c in relative_parent.components() {
         p.push(c);
         if !p.exists() {
             fs::create_dir(&p)?;
         }
-        if !fs::symlink_metadata(&p)?.file_type().is_dir() {
-            return Err(bad("asset backup path is not a real directory"));
-        }
+        validate_backup_dir(&p, root_device)?;
     }
     Ok(p)
 }
@@ -1806,7 +1811,7 @@ fn run_internal(action: &str, target: &str, level: u8, root: &Path, prepare_cand
     // whole container rather than one stream, so they cannot ride the streaming
     // image/audio callback above.
     if action == "apply" || (action == "plan" && prepare_candidates) {
-        let packed = packed_asset_pass(root, target, &p, action, level, retain_backup)?;
+        let packed = packed_asset_pass(root, target, &p, action, level, retain_backup, tree.as_ref())?;
         count += packed.count;
         before += packed.before;
         after += packed.after;
@@ -1837,8 +1842,9 @@ struct PackedStats {
 /// Normal apply stages a candidate independently and retains original packs for
 /// restore. Explicit apply-no-backup remains irreversible. Unsupported packs
 /// stay unchanged and never acquire a backup.
-fn packed_asset_pass(root: &Path, target: &str, p: &Profile, action: &str, level: u8, retain_backup: bool) -> io::Result<PackedStats> {
+fn packed_asset_pass(root: &Path, target: &str, p: &Profile, action: &str, level: u8, retain_backup: bool, tree: Option<&super::Tree>) -> io::Result<PackedStats> {
     let mut stats = PackedStats::default();
+    let root_device = fs::symlink_metadata(root)?.dev();
     if p.max_edge == u32::MAX {
         // Lossless never resizes textures.
         return Ok(stats);
@@ -1853,6 +1859,10 @@ fn packed_asset_pass(root: &Path, target: &str, p: &Profile, action: &str, level
                 continue;
             }
             let m = fs::symlink_metadata(&path)?;
+            // A separate mount inside a Steam library is not game content to
+            // rewrite. Unlike the loose-asset walker, this packed traversal
+            // previously omitted the device check.
+            if m.dev() != root_device { continue; }
             if m.file_type().is_dir() {
                 dirs.push(path);
                 continue;
@@ -1868,6 +1878,18 @@ fn packed_asset_pass(root: &Path, target: &str, p: &Profile, action: &str, level
                 continue;
             }
             let original_len = m.len();
+            if let Some(tree) = tree {
+                // Detect bind-mounted descendants even if they share a device
+                // ID. openat2 uses RESOLVE_NO_XDEV and RESOLVE_NO_SYMLINKS.
+                // Holding this fd also lets us reject a changed path target
+                // before a pathname-based Godot writer is invoked.
+                let rel = path.strip_prefix(root).map_err(|_| bad("packed asset escaped root"))?;
+                let pinned = tree.open(rel, false)?;
+                let current = pinned.metadata()?;
+                if !current.is_file() || current.dev() != m.dev() || current.ino() != m.ino() {
+                    return Err(bad("packed asset changed during traversal"));
+                }
+            }
             if action == "plan" {
                 // A packed pack is a real candidate, but its reduction can only
                 // be known after the in-place transform. Count it and report no
@@ -2374,6 +2396,20 @@ mod tests {
         fs::write(root.join("second.pkg"),b"user change").unwrap();
         assert!(restore_file(&root,Path::new("second.pkg")).is_err());
         assert_eq!(fs::read(root.join("second.pkg")).unwrap(),b"user change");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_directory_validation_rejects_wrong_device_and_symlinks() {
+        use std::os::unix::fs::symlink;
+        let root = fixture("backup-device-check");
+        let root_dev = fs::symlink_metadata(&root).unwrap().dev();
+        assert!(validate_backup_dir(&root.join(BACKUP), root_dev).is_ok());
+        assert!(validate_backup_dir(&root.join(BACKUP), root_dev ^ 1).is_err());
+        fs::create_dir_all(root.join("assets/nested")).unwrap();
+        assert!(ensure_backup_dirs(&root, Path::new("assets/nested")).is_ok());
+        symlink(root.join("assets"), root.join(BACKUP).join("redirect")).unwrap();
+        assert!(ensure_backup_dirs(&root, Path::new("redirect")).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
