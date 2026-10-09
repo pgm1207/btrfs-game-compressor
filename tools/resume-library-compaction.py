@@ -11,21 +11,31 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import time
 
 
 def atomic_json(path, value):
-    temporary = path.with_suffix('.tmp')
-    with temporary.open('w') as output:
-        json.dump(value, output, indent=2)
-        output.flush()
-        os.fsync(output.fileno())
-    temporary.replace(path)
-    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    """Durably replace *path* without using a predictable temporary name."""
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp')
+    temporary = Path(temporary_name)
     try:
-        os.fsync(directory)
+        with os.fdopen(descriptor, 'w') as output:
+            json.dump(value, output, indent=2)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
-        os.close(directory)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def running(root):
