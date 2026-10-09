@@ -43,6 +43,29 @@ class RecoveryTests(unittest.TestCase):
             runner.main()
         return json.loads((self.state_dir / 'results.json').read_text())
 
+    def test_atomic_json_ignores_predictable_foreign_temporary_file(self):
+        self.state_dir.mkdir()
+        journal = self.state_dir / 'results.json'
+        foreign = journal.with_suffix('.tmp')
+        foreign.write_text('foreign data')
+
+        runner.atomic_json(journal, {'safe': True})
+
+        self.assertEqual(json.loads(journal.read_text()), {'safe': True})
+        self.assertEqual(foreign.read_text(), 'foreign data')
+
+    def test_atomic_json_preserves_previous_checkpoint_and_cleans_failed_temp(self):
+        self.state_dir.mkdir()
+        journal = self.state_dir / 'results.json'
+        journal.write_text('{"previous": true}')
+
+        with patch.object(runner.os, 'replace', side_effect=OSError('injected failure')):
+            with self.assertRaisesRegex(OSError, 'injected failure'):
+                runner.atomic_json(journal, {'replacement': True})
+
+        self.assertEqual(json.loads(journal.read_text()), {'previous': True})
+        self.assertEqual(list(self.state_dir.glob('.results.json.*.tmp')), [])
+
     def test_asset_pipeline_checkpoints_and_never_repeats_completed_assets(self):
         self.run_job(assets=True)
         self.run_job(assets=True)
