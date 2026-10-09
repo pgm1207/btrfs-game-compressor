@@ -49,7 +49,9 @@ nulls, **not zero savings**.
 The tool emits signed integers, including negative results when space grows;
 unmeasured metrics remain null. JSON reports carry a `schema_version` and
 identify the game root and device. Comparing different game roots/devices is
-rejected. Use a quiescent system for serious benchmarks; concurrent Steam
+rejected. JSON output files are staged and atomically replaced, so failed
+writes do not truncate a previously saved baseline report. Avoid saving
+reports on the measured volume, where the report itself affects free space. Use a quiescent system for serious benchmarks; concurrent Steam
 downloads, caches, snapshots, backups, quotas and delayed allocation invalidate
 simple causal interpretations.
 
