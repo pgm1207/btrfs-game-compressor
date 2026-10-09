@@ -12,6 +12,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import tempfile
 
 SCHEMA = 1
 MEASURE_KEYS = ("disk_bytes", "raw_extent_bytes", "referenced_bytes")
@@ -129,12 +130,31 @@ def _write_json(output, obj):
     if output == "-":
         sys.stdout.write(serialized)
     else:
-        # Keep reports outside the measured filesystem when possible: report
-        # writes themselves otherwise perturb its free-space observation.
+        # Preserve existing reports when writing fails: first fsync a private
+        # sibling temporary file, then atomically replace the destination.
+        # Stage outside the measured filesystem when practical; writes there
+        # otherwise affect the reported free-space observation.
         target = Path(output)
         if target.is_symlink():
             raise ValueError("Refusing to overwrite a symlink output")
-        target.write_text(serialized)
+        fd, scratch_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as temporary:
+                temporary.write(serialized)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            # If an attacker swaps target for a symlink between the earlier
+            # check and here, os.replace replaces the link, never its target.
+            os.replace(scratch_name, target)
+            dir_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        finally:
+            if os.path.exists(scratch_name):
+                os.unlink(scratch_name)
 
 
 def main(argv=None):
