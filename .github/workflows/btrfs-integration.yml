@@ -49,6 +49,32 @@ jobs:
           cargo test --locked --manifest-path native/Cargo.toml \
             --test filesystem -- --test-threads=1 --nocapture
 
+      - name: Compare scratch Zstd levels on real Btrfs
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${BGC_TEST_BTRFS_DIR:?Btrfs fixture is required}"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          source = Path(os.environ["RUNNER_TEMP"]) / "bgc-ci-compression-source.bin"
+          source.write_bytes(b"repeatable-compression-fixture" * 16384)
+          PY
+          python3 test/measure-compressed.py \
+            --scratch-dir "$BGC_TEST_BTRFS_DIR" \
+            --zstd-level 1 --zstd-level 9 --repetitions 1 --json \
+            "$RUNNER_TEMP/bgc-ci-compression-source.bin" > "$RUNNER_TEMP/bgc-ci-compression-result.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = json.loads((Path(os.environ["RUNNER_TEMP"]) / "bgc-ci-compression-result.json").read_text())
+          assert report["kind"] == "compression_probe"
+          assert [row["compression"] for row in report["results"]] == ["zstd:1", "zstd:9"]
+          assert all(row["logical_bytes"] > 0 for row in report["results"])
+          assert not list(Path(os.environ["BGC_TEST_BTRFS_DIR"]).glob(".bgc-probe-*"))
+          PY
+
       - name: Unmount disposable Btrfs
         if: always()
         shell: bash
