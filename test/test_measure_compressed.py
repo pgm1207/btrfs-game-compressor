@@ -35,7 +35,7 @@ class MeasurementProbeTests(unittest.TestCase):
 
     def test_existing_probe_survives_and_each_trial_uses_unique_directory(self):
         destinations = []
-        real_copy = shutil.copy2
+        real_copy = shutil.copyfile
 
         def record_copy(source, destination):
             destinations.append(Path(destination).parent)
@@ -43,7 +43,7 @@ class MeasurementProbeTests(unittest.TestCase):
 
         with mock.patch.object(measure, "clear_cache_sync"), \
                 mock.patch.object(measure, "df_used", side_effect=[100, 125] * 3), \
-                mock.patch.object(measure.shutil, "copy2", side_effect=record_copy), \
+                mock.patch.object(measure.shutil, "copyfile", side_effect=record_copy), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(measure.measure_file(str(self.source), "sample"), (4, 25))
 
@@ -55,7 +55,7 @@ class MeasurementProbeTests(unittest.TestCase):
     def test_copy_failure_removes_only_its_own_temporary_directory(self):
         with mock.patch.object(measure, "clear_cache_sync"), \
                 mock.patch.object(measure, "df_used", return_value=100), \
-                mock.patch.object(measure.shutil, "copy2", side_effect=OSError("copy failed")):
+                mock.patch.object(measure.shutil, "copyfile", side_effect=OSError("copy failed")):
             with self.assertRaisesRegex(OSError, "copy failed"):
                 measure.measure_file(str(self.source), "sample")
 
@@ -76,7 +76,7 @@ class MeasurementProbeTests(unittest.TestCase):
     def test_zstd_property_is_set_only_on_owned_temporary_directories(self):
         probes = []
         copies = []
-        real_copy = shutil.copy2
+        real_copy = shutil.copyfile
 
         def check_property(command, **kwargs):
             self.assertEqual(command[:3], ["btrfs", "property", "set"])
@@ -94,7 +94,7 @@ class MeasurementProbeTests(unittest.TestCase):
         with mock.patch.object(measure, "clear_cache_sync"), \
                 mock.patch.object(measure, "df_used", side_effect=[100, 120] * 2), \
                 mock.patch.object(measure.subprocess, "run", side_effect=check_property), \
-                mock.patch.object(measure.shutil, "copy2", side_effect=check_copy), \
+                mock.patch.object(measure.shutil, "copyfile", side_effect=check_copy), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(measure.measure_file(str(self.source), "test",
                                                    level=6, repetitions=2), (4, 20))
@@ -107,7 +107,7 @@ class MeasurementProbeTests(unittest.TestCase):
     def test_failed_property_never_copies_and_cleans_its_probe(self):
         failure = subprocess.CalledProcessError(1, ["btrfs", "property", "set"])
         with mock.patch.object(measure.subprocess, "run", side_effect=failure), \
-                mock.patch.object(measure.shutil, "copy2") as copy:
+                mock.patch.object(measure.shutil, "copyfile") as copy:
             with self.assertRaises(subprocess.CalledProcessError):
                 measure.measure_file(str(self.source), "test", level=9)
         copy.assert_not_called()
