@@ -40,7 +40,9 @@ def measure_file(src, label, *, level=None, repetitions=3, emit=True):
                     check=True, capture_output=True, text=True)
             clear_cache_sync()
             before = df_used()
-            shutil.copy2(src, os.path.join(probe, os.path.basename(src)))
+            # Do not copy source xattrs: copy2 may transplant btrfs.compression
+            # and override the candidate policy inherited by this fresh file.
+            shutil.copyfile(src, os.path.join(probe, os.path.basename(src)))
             clear_cache_sync()
             after = df_used()
             deltas.append(after - before)
