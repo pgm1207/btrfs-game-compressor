@@ -122,5 +122,39 @@ class SpaceDeltaTests(unittest.TestCase):
             self.assertIsNone(report["game_extent_disk_reduction_bytes"])
 
 
+    def test_atomic_report_replaces_existing_file_without_residual_staging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "before.json"
+            path.write_text("preserve until ready")
+            space._write_json(str(path), {"kind": "snapshot", "version": 1})
+            self.assertEqual(json.loads(path.read_text())["version"], 1)
+            self.assertEqual([p.name for p in root.iterdir()], ["before.json"])
+
+    def test_atomic_report_preserves_previous_content_when_replace_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "baseline.json"
+            path.write_text("original baseline")
+            with mock.patch.object(space.os, "replace", side_effect=OSError("simulated rename failure")):
+                with self.assertRaisesRegex(OSError, "simulated rename failure"):
+                    space._write_json(str(path), {"kind": "snapshot"})
+            self.assertEqual(path.read_text(), "original baseline")
+            self.assertEqual([p.name for p in root.iterdir()], ["baseline.json"])
+
+    def test_existing_symlink_output_does_not_modify_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            protected = root / "private.txt"
+            protected.write_text("untouched")
+            output = root / "report.json"
+            output.symlink_to(protected)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                space._write_json(str(output), {"kind": "snapshot"})
+            self.assertEqual(protected.read_text(), "untouched")
+            self.assertTrue(output.is_symlink())
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ["private.txt", "report.json"])
+
+
 if __name__ == "__main__":
     unittest.main()
