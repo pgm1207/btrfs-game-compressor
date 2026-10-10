@@ -66,6 +66,40 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(json.loads(journal.read_text()), {'previous': True})
         self.assertEqual(list(self.state_dir.glob('.results.json.*.tmp')), [])
 
+    def test_atomic_json_never_follows_a_preexisting_symlink(self):
+        self.state_dir.mkdir()
+        journal = self.state_dir / 'results.json'
+        foreign = self.root / 'unrelated.json'
+        foreign.write_text('do not change this file')
+        journal.symlink_to(foreign)
+
+        runner.atomic_json(journal, {'safe': True})
+
+        self.assertFalse(journal.is_symlink())
+        self.assertEqual(json.loads(journal.read_text()), {'safe': True})
+        self.assertEqual(foreign.read_text(), 'do not change this file')
+
+    def test_atomic_json_serialization_error_preserves_previous_checkpoint(self):
+        self.state_dir.mkdir()
+        journal = self.state_dir / 'results.json'
+        journal.write_text('{"previous": true}')
+
+        with self.assertRaises(TypeError):
+            runner.atomic_json(journal, {'unserializable': object()})
+
+        self.assertEqual(json.loads(journal.read_text()), {'previous': True})
+        self.assertEqual(list(self.state_dir.glob('.results.json.*.tmp')), [])
+
+    def test_atomic_json_private_permissions(self):
+        import stat
+        self.state_dir.mkdir()
+        journal = self.state_dir / 'results.json'
+
+        runner.atomic_json(journal, {'safe': True})
+
+        self.assertEqual(stat.S_IMODE(journal.stat().st_mode), 0o600)
+        self.assertEqual(json.loads(journal.read_text()), {'safe': True})
+
     def test_asset_pipeline_checkpoints_and_never_repeats_completed_assets(self):
         self.run_job(assets=True)
         self.run_job(assets=True)
