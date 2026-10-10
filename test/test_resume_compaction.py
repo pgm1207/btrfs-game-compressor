@@ -54,17 +54,31 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(json.loads(journal.read_text()), {'safe': True})
         self.assertEqual(foreign.read_text(), 'foreign data')
 
-    def test_atomic_json_preserves_previous_checkpoint_and_cleans_failed_temp(self):
+    def test_atomic_json_does_not_unlink_reused_temp_name_before_publish(self):
         self.state_dir.mkdir()
         journal = self.state_dir / 'results.json'
         journal.write_text('{"previous": true}')
+        created = {}
+        real_mkstemp = tempfile.mkstemp
 
-        with patch.object(runner.os, 'replace', side_effect=OSError('injected failure')):
+        def tracked_mkstemp(*args, **kwargs):
+            descriptor, name = real_mkstemp(*args, **kwargs)
+            created['path'] = Path(name)
+            return descriptor, name
+
+        def replace_with_foreign_file(source, _destination):
+            self.assertEqual(Path(source), created['path'])
+            created['path'].unlink()
+            created['path'].write_text('foreign data')
+            raise OSError('injected failure')
+
+        with patch.object(runner.tempfile, 'mkstemp', side_effect=tracked_mkstemp), \
+                patch.object(runner.os, 'replace', side_effect=replace_with_foreign_file):
             with self.assertRaisesRegex(OSError, 'injected failure'):
                 runner.atomic_json(journal, {'replacement': True})
 
         self.assertEqual(json.loads(journal.read_text()), {'previous': True})
-        self.assertEqual(list(self.state_dir.glob('.results.json.*.tmp')), [])
+        self.assertEqual(created['path'].read_text(), 'foreign data')
 
     def test_atomic_json_never_follows_a_preexisting_symlink(self):
         self.state_dir.mkdir()
@@ -88,7 +102,9 @@ class RecoveryTests(unittest.TestCase):
             runner.atomic_json(journal, {'unserializable': object()})
 
         self.assertEqual(json.loads(journal.read_text()), {'previous': True})
-        self.assertEqual(list(self.state_dir.glob('.results.json.*.tmp')), [])
+        temporaries = list(self.state_dir.glob('.results.json.*.tmp'))
+        self.assertEqual(len(temporaries), 1)
+        self.assertEqual(temporaries[0].stat().st_mode & 0o777, 0o600)
 
     def test_atomic_json_private_permissions(self):
         import stat
