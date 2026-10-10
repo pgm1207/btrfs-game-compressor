@@ -20,22 +20,25 @@ def atomic_json(path, value):
     descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp')
     temporary = Path(temporary_name)
+    published = False
     try:
         with os.fdopen(descriptor, 'w') as output:
             json.dump(value, output, indent=2)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
+        published = True
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
         finally:
             os.close(directory)
     finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+        if not published:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def running(root):
