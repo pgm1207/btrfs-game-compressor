@@ -16,29 +16,25 @@ import time
 
 
 def atomic_json(path, value):
-    """Durably replace *path* without using a predictable temporary name."""
+    """Durably replace *path* without unsafe cleanup of temporary paths.
+
+    Failed temporaries are deliberately left in place. Once another process can
+    modify the state directory, unlinking by pathname could remove an unrelated
+    entry that replaced the file created here.
+    """
     descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp')
     temporary = Path(temporary_name)
-    published = False
+    with os.fdopen(descriptor, 'w') as output:
+        json.dump(value, output, indent=2)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        with os.fdopen(descriptor, 'w') as output:
-            json.dump(value, output, indent=2)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, path)
-        published = True
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        os.fsync(directory)
     finally:
-        if not published:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+        os.close(directory)
 
 
 def running(root):
