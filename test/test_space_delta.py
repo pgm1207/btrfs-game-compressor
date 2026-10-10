@@ -168,6 +168,32 @@ class SpaceDeltaTests(unittest.TestCase):
             self.assertTrue(json.loads(path.read_text())["safe"])
             self.assertEqual(replacement["foreign"].read_text(), "foreign data")
 
+    def test_atomic_report_refuses_staging_directory_replaced_before_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "baseline.json"
+            path.write_text("original baseline")
+            hidden = root / "created-staging"
+            real_open = os.open
+            replaced = False
+
+            def replace_before_open(name, flags, *args, **kwargs):
+                nonlocal replaced
+                if (not replaced and kwargs.get("dir_fd") is not None
+                        and str(name).startswith(".baseline.json.")):
+                    replaced = True
+                    public = root / name
+                    public.rename(hidden)
+                    public.mkdir()
+                return real_open(name, flags, *args, **kwargs)
+
+            with mock.patch.object(space.os, "open", side_effect=replace_before_open):
+                with self.assertRaisesRegex(OSError, "identity changed"):
+                    space._write_json(str(path), {"kind": "snapshot", "safe": True})
+
+            self.assertEqual(path.read_text(), "original baseline")
+            self.assertTrue(hidden.is_dir())
+
     def test_atomic_report_does_not_unlink_reused_temp_name_after_publish(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -181,11 +207,11 @@ class SpaceDeltaTests(unittest.TestCase):
                 if fsync_calls == 2:
                     staging = next(root.glob(".report.json.*.tmp"))
                     (staging / "report").write_text("foreign data")
-                    raise OSError("injected directory fsync failure")
+                    raise OSError("injected staging fsync failure")
                 return real_fsync(descriptor)
 
             with mock.patch.object(space.os, "fsync", side_effect=fail_directory_fsync):
-                with self.assertRaisesRegex(OSError, "injected directory fsync failure"):
+                with self.assertRaisesRegex(OSError, "injected staging fsync failure"):
                     space._write_json(str(path), {"kind": "snapshot", "safe": True})
 
             self.assertTrue(json.loads(path.read_text())["safe"])
