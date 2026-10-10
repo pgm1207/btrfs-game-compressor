@@ -100,6 +100,34 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(journal.stat().st_mode), 0o600)
         self.assertEqual(json.loads(journal.read_text()), {'safe': True})
 
+    def test_atomic_json_does_not_unlink_reused_temp_name_after_publish(self):
+        self.state_dir.mkdir()
+        journal = self.state_dir / 'results.json'
+        created = {}
+        real_mkstemp = tempfile.mkstemp
+
+        def tracked_mkstemp(*args, **kwargs):
+            descriptor, name = real_mkstemp(*args, **kwargs)
+            created['path'] = Path(name)
+            return descriptor, name
+
+        fsync_calls = 0
+
+        def fail_directory_fsync(_descriptor):
+            nonlocal fsync_calls
+            fsync_calls += 1
+            if fsync_calls == 2:
+                created['path'].write_text('foreign data')
+                raise OSError('injected directory fsync failure')
+
+        with patch.object(runner.tempfile, 'mkstemp', side_effect=tracked_mkstemp), \
+                patch.object(runner.os, 'fsync', side_effect=fail_directory_fsync):
+            with self.assertRaisesRegex(OSError, 'injected directory fsync failure'):
+                runner.atomic_json(journal, {'safe': True})
+
+        self.assertEqual(json.loads(journal.read_text()), {'safe': True})
+        self.assertEqual(created['path'].read_text(), 'foreign data')
+
     def test_asset_pipeline_checkpoints_and_never_repeats_completed_assets(self):
         self.run_job(assets=True)
         self.run_job(assets=True)
