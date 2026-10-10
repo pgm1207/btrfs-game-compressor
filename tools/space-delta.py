@@ -130,27 +130,46 @@ def _write_json(output, obj):
     if output == "-":
         sys.stdout.write(serialized)
     else:
-        # Preserve existing reports when writing fails: first fsync a private
-        # sibling temporary file, then atomically replace the destination.
-        # Failed temporaries are deliberately left in place: unlinking by
-        # pathname cannot prove that another process did not replace the entry.
+        # Preserve existing reports when writing fails: first fsync a file in a
+        # private sibling directory held open by descriptor, then atomically
+        # replace the destination from that descriptor. Failed staging
+        # directories are deliberately left in place: cleanup by pathname
+        # cannot prove that another process did not replace the entry.
         target = Path(output)
         if target.is_symlink():
             raise ValueError("Refusing to overwrite a symlink output")
-        fd, scratch_name = tempfile.mkstemp(
-            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
-        with os.fdopen(fd, "w", encoding="utf-8") as temporary:
-            temporary.write(serialized)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        # If an attacker swaps target for a symlink between the earlier check
-        # and here, os.replace replaces the link, never its target.
-        os.replace(scratch_name, target)
-        dir_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        parent_fd = os.open(target.parent, directory_flags)
+        staging_path = Path(tempfile.mkdtemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent))
+        staging_fd = os.open(
+            staging_path.name,
+            directory_flags | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
         try:
-            os.fsync(dir_fd)
+            descriptor = os.open(
+                "report", os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600, dir_fd=staging_fd)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+                temporary.write(serialized)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            # Both names are resolved from held directory descriptors. Replacing
+            # the public staging-directory name cannot substitute the source.
+            os.replace(
+                "report", target.name,
+                src_dir_fd=staging_fd, dst_dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            # Only remove an empty staging directory after successful
+            # publication. A substituted non-empty directory is preserved.
+            try:
+                os.rmdir(staging_path.name, dir_fd=parent_fd)
+            except OSError:
+                pass
         finally:
-            os.close(dir_fd)
+            os.close(staging_fd)
+            os.close(parent_fd)
 
 
 def main(argv=None):
