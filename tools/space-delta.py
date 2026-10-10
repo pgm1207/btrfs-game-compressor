@@ -130,31 +130,62 @@ def _write_json(output, obj):
     if output == "-":
         sys.stdout.write(serialized)
     else:
-        # Preserve existing reports when writing fails: first fsync a private
-        # sibling temporary file, then atomically replace the destination.
-        # Stage outside the measured filesystem when practical; writes there
-        # otherwise affect the reported free-space observation.
+        # Preserve existing reports when writing fails: first fsync a file in a
+        # private sibling directory held open by descriptor, then atomically
+        # replace the destination from that descriptor. Failed staging
+        # directories are deliberately left in place: cleanup by pathname
+        # cannot prove that another process did not replace the entry.
         target = Path(output)
         if target.is_symlink():
             raise ValueError("Refusing to overwrite a symlink output")
-        fd, scratch_name = tempfile.mkstemp(
-            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        parent_fd = os.open(target.parent, directory_flags)
+        staging_fd = None
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as temporary:
+            staging_path = Path(tempfile.mkdtemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=target.parent))
+            created = os.stat(staging_path, follow_symlinks=False)
+            staging_fd = os.open(
+                staging_path.name,
+                directory_flags | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            bound = os.fstat(staging_fd)
+            visible = os.stat(
+                staging_path.name, dir_fd=parent_fd, follow_symlinks=False)
+            identities = {
+                (created.st_dev, created.st_ino),
+                (bound.st_dev, bound.st_ino),
+                (visible.st_dev, visible.st_ino),
+            }
+            if len(identities) != 1 or not stat.S_ISDIR(bound.st_mode):
+                raise OSError("Staging directory identity changed during setup")
+            descriptor = os.open(
+                "report", os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600, dir_fd=staging_fd)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
                 temporary.write(serialized)
                 temporary.flush()
                 os.fsync(temporary.fileno())
-            # If an attacker swaps target for a symlink between the earlier
-            # check and here, os.replace replaces the link, never its target.
-            os.replace(scratch_name, target)
-            dir_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            # Both names are resolved from held directory descriptors. Replacing
+            # the public staging-directory name cannot substitute the source.
+            os.replace(
+                "report", target.name,
+                src_dir_fd=staging_fd, dst_dir_fd=parent_fd)
+            os.fsync(staging_fd)
+            os.fsync(parent_fd)
+            # Only remove an empty staging directory after successful
+            # publication. A substituted non-empty directory is preserved.
             try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+                os.rmdir(staging_path.name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            else:
+                os.fsync(parent_fd)
         finally:
-            if os.path.exists(scratch_name):
-                os.unlink(scratch_name)
+            if staging_fd is not None:
+                os.close(staging_fd)
+            os.close(parent_fd)
 
 
 def main(argv=None):

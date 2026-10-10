@@ -1,9 +1,10 @@
 """Regression tests for read-only space reporting; no Btrfs or privileges required."""
 import importlib.util
 import json
+import os
 from pathlib import Path
+import stat
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -121,7 +122,6 @@ class SpaceDeltaTests(unittest.TestCase):
             self.assertEqual(report["kind"], "comparison")
             self.assertIsNone(report["game_extent_disk_reduction_bytes"])
 
-
     def test_atomic_report_replaces_existing_file_without_residual_staging(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -140,7 +140,83 @@ class SpaceDeltaTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "simulated rename failure"):
                     space._write_json(str(path), {"kind": "snapshot"})
             self.assertEqual(path.read_text(), "original baseline")
-            self.assertEqual([p.name for p in root.iterdir()], ["baseline.json"])
+            staging = list(root.glob(".baseline.json.*.tmp/report"))
+            self.assertEqual(len(staging), 1)
+            self.assertEqual(stat.S_IMODE(staging[0].stat().st_mode), 0o600)
+
+    def test_atomic_report_binds_publish_to_created_staging_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "baseline.json"
+            path.write_text("original baseline")
+            hidden = root / "held-open-staging"
+            replacement = {}
+            real_replace = os.replace
+
+            def replace_public_staging_name(source, destination, **kwargs):
+                public = next(root.glob(".baseline.json.*.tmp"))
+                public.rename(hidden)
+                public.mkdir()
+                foreign = public / "report"
+                foreign.write_text("foreign data")
+                replacement["foreign"] = foreign
+                return real_replace(source, destination, **kwargs)
+
+            with mock.patch.object(space.os, "replace", side_effect=replace_public_staging_name):
+                space._write_json(str(path), {"kind": "snapshot", "safe": True})
+
+            self.assertTrue(json.loads(path.read_text())["safe"])
+            self.assertEqual(replacement["foreign"].read_text(), "foreign data")
+
+    def test_atomic_report_refuses_staging_directory_replaced_before_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "baseline.json"
+            path.write_text("original baseline")
+            hidden = root / "created-staging"
+            real_open = os.open
+            replaced = False
+
+            def replace_before_open(name, flags, *args, **kwargs):
+                nonlocal replaced
+                if (not replaced and kwargs.get("dir_fd") is not None
+                        and str(name).startswith(".baseline.json.")):
+                    replaced = True
+                    public = root / name
+                    public.rename(hidden)
+                    public.mkdir()
+                return real_open(name, flags, *args, **kwargs)
+
+            with mock.patch.object(space.os, "open", side_effect=replace_before_open):
+                with self.assertRaisesRegex(OSError, "identity changed"):
+                    space._write_json(str(path), {"kind": "snapshot", "safe": True})
+
+            self.assertEqual(path.read_text(), "original baseline")
+            self.assertTrue(hidden.is_dir())
+
+    def test_atomic_report_does_not_unlink_reused_temp_name_after_publish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "report.json"
+            real_fsync = os.fsync
+            fsync_calls = 0
+
+            def fail_directory_fsync(descriptor):
+                nonlocal fsync_calls
+                fsync_calls += 1
+                if fsync_calls == 2:
+                    staging = next(root.glob(".report.json.*.tmp"))
+                    (staging / "report").write_text("foreign data")
+                    raise OSError("injected staging fsync failure")
+                return real_fsync(descriptor)
+
+            with mock.patch.object(space.os, "fsync", side_effect=fail_directory_fsync):
+                with self.assertRaisesRegex(OSError, "injected staging fsync failure"):
+                    space._write_json(str(path), {"kind": "snapshot", "safe": True})
+
+            self.assertTrue(json.loads(path.read_text())["safe"])
+            staging = next(root.glob(".report.json.*.tmp"))
+            self.assertEqual((staging / "report").read_text(), "foreign data")
 
     def test_existing_symlink_output_does_not_modify_target(self):
         with tempfile.TemporaryDirectory() as directory:
