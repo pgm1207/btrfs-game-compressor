@@ -43,6 +43,107 @@ class RecoveryTests(unittest.TestCase):
             runner.main()
         return json.loads((self.state_dir / 'results.json').read_text())
 
+    def test_atomic_json_ignores_predictable_foreign_temporary_file(self):
+        self.state_dir.mkdir()
+        journal = self.state_dir / 'results.json'
+        foreign = journal.with_suffix('.tmp')
+        foreign.write_text('foreign data')
+
+        runner.atomic_json(journal, {'safe': True})
+
+        self.assertEqual(json.loads(journal.read_text()), {'safe': True})
+        self.assertEqual(foreign.read_text(), 'foreign data')
+
+    def test_atomic_json_does_not_unlink_reused_temp_name_before_publish(self):
+        self.state_dir.mkdir()
+        journal = self.state_dir / 'results.json'
+        journal.write_text('{"previous": true}')
+        created = {}
+        real_mkstemp = tempfile.mkstemp
+
+        def tracked_mkstemp(*args, **kwargs):
+            descriptor, name = real_mkstemp(*args, **kwargs)
+            created['path'] = Path(name)
+            return descriptor, name
+
+        def replace_with_foreign_file(source, _destination):
+            self.assertEqual(Path(source), created['path'])
+            created['path'].unlink()
+            created['path'].write_text('foreign data')
+            raise OSError('injected failure')
+
+        with patch.object(runner.tempfile, 'mkstemp', side_effect=tracked_mkstemp), \
+                patch.object(runner.os, 'replace', side_effect=replace_with_foreign_file):
+            with self.assertRaisesRegex(OSError, 'injected failure'):
+                runner.atomic_json(journal, {'replacement': True})
+
+        self.assertEqual(json.loads(journal.read_text()), {'previous': True})
+        self.assertEqual(created['path'].read_text(), 'foreign data')
+
+    def test_atomic_json_never_follows_a_preexisting_symlink(self):
+        self.state_dir.mkdir()
+        journal = self.state_dir / 'results.json'
+        foreign = self.root / 'unrelated.json'
+        foreign.write_text('do not change this file')
+        journal.symlink_to(foreign)
+
+        runner.atomic_json(journal, {'safe': True})
+
+        self.assertFalse(journal.is_symlink())
+        self.assertEqual(json.loads(journal.read_text()), {'safe': True})
+        self.assertEqual(foreign.read_text(), 'do not change this file')
+
+    def test_atomic_json_serialization_error_preserves_previous_checkpoint(self):
+        self.state_dir.mkdir()
+        journal = self.state_dir / 'results.json'
+        journal.write_text('{"previous": true}')
+
+        with self.assertRaises(TypeError):
+            runner.atomic_json(journal, {'unserializable': object()})
+
+        self.assertEqual(json.loads(journal.read_text()), {'previous': True})
+        temporaries = list(self.state_dir.glob('.results.json.*.tmp'))
+        self.assertEqual(len(temporaries), 1)
+        self.assertEqual(temporaries[0].stat().st_mode & 0o777, 0o600)
+
+    def test_atomic_json_private_permissions(self):
+        import stat
+        self.state_dir.mkdir()
+        journal = self.state_dir / 'results.json'
+
+        runner.atomic_json(journal, {'safe': True})
+
+        self.assertEqual(stat.S_IMODE(journal.stat().st_mode), 0o600)
+        self.assertEqual(json.loads(journal.read_text()), {'safe': True})
+
+    def test_atomic_json_does_not_unlink_reused_temp_name_after_publish(self):
+        self.state_dir.mkdir()
+        journal = self.state_dir / 'results.json'
+        created = {}
+        real_mkstemp = tempfile.mkstemp
+
+        def tracked_mkstemp(*args, **kwargs):
+            descriptor, name = real_mkstemp(*args, **kwargs)
+            created['path'] = Path(name)
+            return descriptor, name
+
+        fsync_calls = 0
+
+        def fail_directory_fsync(_descriptor):
+            nonlocal fsync_calls
+            fsync_calls += 1
+            if fsync_calls == 2:
+                created['path'].write_text('foreign data')
+                raise OSError('injected directory fsync failure')
+
+        with patch.object(runner.tempfile, 'mkstemp', side_effect=tracked_mkstemp), \
+                patch.object(runner.os, 'fsync', side_effect=fail_directory_fsync):
+            with self.assertRaisesRegex(OSError, 'injected directory fsync failure'):
+                runner.atomic_json(journal, {'safe': True})
+
+        self.assertEqual(json.loads(journal.read_text()), {'safe': True})
+        self.assertEqual(created['path'].read_text(), 'foreign data')
+
     def test_asset_pipeline_checkpoints_and_never_repeats_completed_assets(self):
         self.run_job(assets=True)
         self.run_job(assets=True)
