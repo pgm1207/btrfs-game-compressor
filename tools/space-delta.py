@@ -144,11 +144,22 @@ def _write_json(output, obj):
         try:
             staging_path = Path(tempfile.mkdtemp(
                 prefix=f".{target.name}.", suffix=".tmp", dir=target.parent))
+            created = os.stat(staging_path, follow_symlinks=False)
             staging_fd = os.open(
                 staging_path.name,
                 directory_flags | getattr(os, "O_NOFOLLOW", 0),
                 dir_fd=parent_fd,
             )
+            bound = os.fstat(staging_fd)
+            visible = os.stat(
+                staging_path.name, dir_fd=parent_fd, follow_symlinks=False)
+            identities = {
+                (created.st_dev, created.st_ino),
+                (bound.st_dev, bound.st_ino),
+                (visible.st_dev, visible.st_ino),
+            }
+            if len(identities) != 1 or not stat.S_ISDIR(bound.st_mode):
+                raise OSError("Staging directory identity changed during setup")
             descriptor = os.open(
                 "report", os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                 0o600, dir_fd=staging_fd)
@@ -161,6 +172,7 @@ def _write_json(output, obj):
             os.replace(
                 "report", target.name,
                 src_dir_fd=staging_fd, dst_dir_fd=parent_fd)
+            os.fsync(staging_fd)
             os.fsync(parent_fd)
             # Only remove an empty staging directory after successful
             # publication. A substituted non-empty directory is preserved.
@@ -168,6 +180,8 @@ def _write_json(output, obj):
                 os.rmdir(staging_path.name, dir_fd=parent_fd)
             except OSError:
                 pass
+            else:
+                os.fsync(parent_fd)
         finally:
             if staging_fd is not None:
                 os.close(staging_fd)
