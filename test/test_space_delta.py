@@ -1,9 +1,10 @@
 """Regression tests for read-only space reporting; no Btrfs or privileges required."""
 import importlib.util
 import json
+import os
 from pathlib import Path
+import stat
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -121,7 +122,6 @@ class SpaceDeltaTests(unittest.TestCase):
             self.assertEqual(report["kind"], "comparison")
             self.assertIsNone(report["game_extent_disk_reduction_bytes"])
 
-
     def test_atomic_report_replaces_existing_file_without_residual_staging(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -140,7 +140,67 @@ class SpaceDeltaTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "simulated rename failure"):
                     space._write_json(str(path), {"kind": "snapshot"})
             self.assertEqual(path.read_text(), "original baseline")
-            self.assertEqual([p.name for p in root.iterdir()], ["baseline.json"])
+            staging = list(root.glob(".baseline.json.*.tmp"))
+            self.assertEqual(len(staging), 1)
+            self.assertEqual(stat.S_IMODE(staging[0].stat().st_mode), 0o600)
+
+    def test_atomic_report_does_not_unlink_reused_temp_name_before_publish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "baseline.json"
+            path.write_text("original baseline")
+            created = {}
+            real_mkstemp = tempfile.mkstemp
+
+            def tracked_mkstemp(*args, **kwargs):
+                descriptor, name = real_mkstemp(*args, **kwargs)
+                created["path"] = Path(name)
+                return descriptor, name
+
+            def replace_with_foreign_file(source, _destination):
+                self.assertEqual(Path(source), created["path"])
+                created["path"].unlink()
+                created["path"].write_text("foreign data")
+                raise OSError("injected failure")
+
+            with mock.patch.object(space.tempfile, "mkstemp", side_effect=tracked_mkstemp), \
+                    mock.patch.object(space.os, "replace", side_effect=replace_with_foreign_file):
+                with self.assertRaisesRegex(OSError, "injected failure"):
+                    space._write_json(str(path), {"kind": "snapshot"})
+
+            self.assertEqual(path.read_text(), "original baseline")
+            self.assertEqual(created["path"].read_text(), "foreign data")
+
+    def test_atomic_report_does_not_unlink_reused_temp_name_after_publish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "report.json"
+            created = {}
+            real_mkstemp = tempfile.mkstemp
+
+            def tracked_mkstemp(*args, **kwargs):
+                descriptor, name = real_mkstemp(*args, **kwargs)
+                created["path"] = Path(name)
+                return descriptor, name
+
+            real_fsync = os.fsync
+            fsync_calls = 0
+
+            def fail_directory_fsync(descriptor):
+                nonlocal fsync_calls
+                fsync_calls += 1
+                if fsync_calls == 2:
+                    created["path"].write_text("foreign data")
+                    raise OSError("injected directory fsync failure")
+                return real_fsync(descriptor)
+
+            with mock.patch.object(space.tempfile, "mkstemp", side_effect=tracked_mkstemp), \
+                    mock.patch.object(space.os, "fsync", side_effect=fail_directory_fsync):
+                with self.assertRaisesRegex(OSError, "injected directory fsync failure"):
+                    space._write_json(str(path), {"kind": "snapshot", "safe": True})
+
+            self.assertTrue(json.loads(path.read_text())["safe"])
+            self.assertEqual(created["path"].read_text(), "foreign data")
 
     def test_existing_symlink_output_does_not_modify_target(self):
         with tempfile.TemporaryDirectory() as directory:
