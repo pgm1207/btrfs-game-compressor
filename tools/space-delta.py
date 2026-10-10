@@ -140,14 +140,15 @@ def _write_json(output, obj):
             raise ValueError("Refusing to overwrite a symlink output")
         directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
         parent_fd = os.open(target.parent, directory_flags)
-        staging_path = Path(tempfile.mkdtemp(
-            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent))
-        staging_fd = os.open(
-            staging_path.name,
-            directory_flags | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=parent_fd,
-        )
+        staging_fd = None
         try:
+            staging_path = Path(tempfile.mkdtemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=target.parent))
+            staging_fd = os.open(
+                staging_path.name,
+                directory_flags | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
             descriptor = os.open(
                 "report", os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                 0o600, dir_fd=staging_fd)
@@ -168,7 +169,8 @@ def _write_json(output, obj):
             except OSError:
                 pass
         finally:
-            os.close(staging_fd)
+            if staging_fd is not None:
+                os.close(staging_fd)
             os.close(parent_fd)
 
 
