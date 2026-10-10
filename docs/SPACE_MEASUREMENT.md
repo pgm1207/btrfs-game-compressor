@@ -88,6 +88,8 @@ Use small representative assets first and ensure the scratch filesystem has
 room for the copy. Avoid concurrent writes/downloads while sampling and do
 not extrapolate small-file sample results to an entire game. A higher Zstd
 level can increase CPU work, and the smallest sample result is not always
-the best setting for game launch times or resource usage. Disable automatic
-Steam game updates for affected games only if you understand Steam's update
-semantics; Steam may replace modified files when it verifies or updates them.
+the best setting for game launch times or resource usage. For optimized games,
+consider **Steam Library > Properties > Updates > Automatic Updates > Only
+update this game when I launch it**. This defers background updates; it does
+not disable launch-required patches. Steam verification or updates may replace
+modified files, so re-analyze and revalidate the affected game afterward.
