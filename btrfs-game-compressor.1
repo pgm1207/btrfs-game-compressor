@@ -432,6 +432,18 @@ Change detection is a recursive
 over the entire game directory, so updates deep inside a game's data tree are
 still detected. \fBProton*\fR, \fBSteamLinuxRuntime*\fR and the Steam shared
 folders are skipped automatically.
+.SH STEAM UPDATES
+Steam updates and file verification can replace files or create new extents that
+have not yet been compressed. The game will then be reported as updated, and
+its physical space usage may change. Re-run the tool after the update or
+verification completes.
+.PP
+To reduce unexpected background rewrites, consider setting the game's Steam
+.B Automatic Updates
+preference to
+.BR "Only update this game when I launch it" .
+This defers background updates; it does not disable updates, and Steam can still
+require a patch before launch.
 .SH FILES
 .TP
 .I ~/.config/btrfs\-game\-compressor/custom_libraries.txt
