@@ -434,9 +434,10 @@ still detected. \fBProton*\fR, \fBSteamLinuxRuntime*\fR and the Steam shared
 folders are skipped automatically.
 .SH STEAM UPDATES
 Steam updates and file verification can replace files or create new extents that
-have not yet been compressed. The game will then be reported as updated, and
-its physical space usage may change. Re-run the tool after the update or
-verification completes.
+have not yet been compressed. The game will normally be reported as updated,
+although a higher-priority state such as \\fBRUNNING\\fR or \\fBLOW YIELD\\fR
+can take precedence. Its physical space usage may change. Re-run the tool after
+the update or verification completes.
 .PP
 To reduce unexpected background rewrites, consider setting the game's Steam
 .B Automatic Updates
