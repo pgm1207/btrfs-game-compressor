@@ -2581,6 +2581,18 @@ status_color() {
     esac
 }
 
+# Keep every pending-only view aligned with the batch queue: games held back as
+# low-yield are actionable only when deduplication is still pending, and running
+# games are deliberately blocked rather than queued.
+game_has_pending_work() {
+    local i="$1"
+    case "${GAMES_STATUS[$i]}" in
+        COMPRESSED|UPDATED|UNCOMPRESSED) return 0 ;;
+        "LOW YIELD") [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] ;;
+        *) return 1 ;;
+    esac
+}
+
 cmd_status() {
     local i n_shown=0 n_total=0 n_pending=0 n_low=0 n_running=0
 
@@ -2603,7 +2615,7 @@ cmd_status() {
     printf '%s\n' "--------------------------------------------------------------------------------"
     for i in "${!GAMES_NAME[@]}"; do
         local st="${GAMES_STATUS[$i]}"
-        if [ "$OPT_PENDING_ONLY" -eq 1 ] && [[ "$st" == "COMPACTED" ]]; then
+        if [ "$OPT_PENDING_ONLY" -eq 1 ] && ! game_has_pending_work "$i"; then
             continue
         fi
         n_total=$(( n_total + 1 ))
@@ -2700,7 +2712,7 @@ cmd_status_json() {
     printf '],"games":['
     for i in "${!GAMES_NAME[@]}"; do
         local st="${GAMES_STATUS[$i]}"
-        if [ "$OPT_PENDING_ONLY" -eq 1 ] && [[ "$st" == "COMPACTED" ]]; then
+        if [ "$OPT_PENDING_ONLY" -eq 1 ] && ! game_has_pending_work "$i"; then
             continue
         fi
         case "$st" in
@@ -5053,7 +5065,7 @@ while true; do
         name="${GAMES_NAME[$i]}"
         st="${GAMES_STATUS[$i]}"
 
-        if [ "$VIEW_PENDING_ONLY" -eq 1 ] && [[ "$st" == "COMPACTED" ]]; then
+        if [ "$VIEW_PENDING_ONLY" -eq 1 ] && ! game_has_pending_work "$i"; then
             continue
         fi
 
