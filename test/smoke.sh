@@ -2032,6 +2032,49 @@ else
     bad "decimal zero threshold makes cached low-yield work actionable"
 fi
 
+# The row and both summaries must use the same predicate. Without this
+# regression, --pending could display the game while reporting pending: 0.
+out=$(
+    GAMES_NAME=("Cached low-yield game")
+    GAMES_PATH=("$WORK/cached-low-yield")
+    GAMES_STATUS=("LOW YIELD")
+    GAMES_DEDUPE_PENDING=(0)
+    GAMES_BYTES=(104857600)
+    GAMES_SIZE=("100M")
+    GAMES_PREDICT=(5)
+    GAMES_HINT=()
+    GAMES_HINT_LOW=()
+    LIBS=()
+    MIN_GAIN_PCT=0
+    OPT_PENDING_ONLY=1
+    STAT_COMPRESSED_ONLY_COUNT=0
+    SKIPPED_STUB_COUNT=0
+    PLATFORM=other
+    COMPSIZE_OK=1
+    cmd_status
+)
+check_contains "text pending summary counts zero-threshold low-yield work" \
+    "games: 1   pending: 1" "$out"
+out=$(
+    GAMES_NAME=("Cached low-yield game")
+    GAMES_PATH=("$WORK/cached-low-yield")
+    GAMES_STATUS=("LOW YIELD")
+    GAMES_DEDUPE_PENDING=(0)
+    GAMES_BYTES=(104857600)
+    GAMES_SIZE=("100M")
+    GAMES_PREDICT=(5)
+    GAMES_HINT=()
+    GAMES_HINT_LOW=()
+    LIBS=()
+    MIN_GAIN_PCT=0
+    OPT_PENDING_ONLY=1
+    STAT_COMPRESSED_ONLY_COUNT=0
+    SKIPPED_STUB_COUNT=0
+    cmd_status_json
+)
+check_contains "JSON pending summary counts zero-threshold low-yield work" \
+    '"summary":{"game_count":1,"pending":1' "$out"
+
 # Exercise the real batch loop with a fake compressor and the shared dedupe
 # runner. The event log proves each game is deduped immediately after defrag.
 DEDUP_EVENT_LOG="$WORK/dedupe-batch-events"
