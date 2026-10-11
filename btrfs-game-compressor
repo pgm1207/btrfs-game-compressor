@@ -2294,15 +2294,12 @@ batch_compress_routine() {
     local -a targets_idx=() skipped_low=()
     # Compression's only skip gate is the ratio (min_gain_pct), so LOW YIELD is
     # disabled exactly when that gate is off.
-    local low_disabled
-    low_disabled=$(awk -v p="$MIN_GAIN_PCT" \
-        'BEGIN { print (p + 0 == 0) ? 1 : 0 }')
     for i in "${!GAMES_STATUS[@]}"; do
         case "${GAMES_STATUS[$i]}" in
             "UNCOMPRESSED"|"UPDATED") targets_idx+=("$i") ;;
             "COMPRESSED") targets_idx+=("$i") ;; # compressed already; dedupe only
             "LOW YIELD")
-                if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] || [ "$low_disabled" -eq 1 ]; then
+                if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] || low_yield_filter_disabled; then
                     targets_idx+=("$i")
                 else
                     skipped_low+=("$i")
@@ -2581,14 +2578,20 @@ status_color() {
     esac
 }
 
+low_yield_filter_disabled() {
+    awk -v p="$MIN_GAIN_PCT" 'BEGIN { exit ! (p + 0 == 0) }'
+}
+
 # Keep every pending-only view aligned with the batch queue: games held back as
-# low-yield are actionable only when deduplication is still pending, and running
-# games are deliberately blocked rather than queued.
+# low-yield are actionable when deduplication is pending or the user explicitly
+# disables the ratio gate; running games remain blocked rather than queued.
 game_has_pending_work() {
     local i="$1"
     case "${GAMES_STATUS[$i]}" in
         COMPRESSED|UPDATED|UNCOMPRESSED) return 0 ;;
-        "LOW YIELD") [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] ;;
+        "LOW YIELD")
+            [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] || low_yield_filter_disabled
+            ;;
         *) return 1 ;;
     esac
 }
