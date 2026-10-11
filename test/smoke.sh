@@ -955,6 +955,18 @@ if command -v python3 >/dev/null 2>&1; then
     fi
 fi
 
+# Once dedupe is current, BadGame remains LOW YIELD but has no work waiting.
+# Pending-only views must keep GoodGame and remove BadGame consistently.
+D="$HOME/.local/state/btrfs-game-compressor/dedupe_completed.db"
+printf '%s|%s\n' "$(date +%s%N)" "$L/BadGame" > "$D"
+pending_out=$("$PROG" --status --pending --no-color 2>/dev/null)
+check_contains "pending status keeps actionable games" "GoodGame" "$pending_out"
+check_not_contains "pending status hides settled low-yield games" "BadGame" "$pending_out"
+pending_json=$("$PROG" --status --pending --json --no-color 2>/dev/null)
+check_contains "pending JSON keeps actionable games" '"name":"GoodGame"' "$pending_json"
+check_not_contains "pending JSON hides settled low-yield games" '"name":"BadGame"' "$pending_json"
+: > "$D"
+
 # --history and --stats read the same database, so a record seeded above must be
 # visible in both. This is what makes the numbers trustworthy: they come from the
 # file, not from a fresh guess.
@@ -1123,6 +1135,9 @@ else
     ok "a game with no live process is not reported as RUNNING"
 fi
 check_contains "--status counts the running games" "running: 1" "$out"
+pending_out=$("$PROG" --status --pending --no-color 2>/dev/null)
+check_not_contains "pending status hides blocked running games" "GoodGame" "$pending_out"
+check_contains "pending status keeps non-running work" "BadGame" "$pending_out"
 
 # A system binary with its working directory in the game tree must also be
 # detected even if none of its executable mappings live under that tree.
