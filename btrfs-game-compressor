@@ -197,7 +197,8 @@ OPTIONS
                           including ext4; no game changes, logical estimates only
         --apply-assets GAME
                           optimize supported assets and Hades LZ4 packages
-                          (Steam: consider Only update when launched)
+                          (Steam: "Only update this game when I launch it" defers
+                           background updates; it does not disable launch-required patches)
         --restore-assets GAME
                           restore original assets from the local copy
         --finalize-assets GAME
