@@ -2579,7 +2579,7 @@ status_color() {
 }
 
 low_yield_filter_disabled() {
-    awk -v p="$MIN_GAIN_PCT" 'BEGIN { exit ! (p + 0 == 0) }'
+    [[ "${MIN_GAIN_PCT:-}" =~ ^0+([.]0+)?$ ]]
 }
 
 # Keep every pending-only view aligned with the batch queue: games held back as
