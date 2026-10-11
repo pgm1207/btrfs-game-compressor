@@ -2025,6 +2025,12 @@ if game_has_pending_work 0; then
 else
     bad "zero threshold makes cached low-yield work actionable"
 fi
+MIN_GAIN_PCT=0.0
+if game_has_pending_work 0; then
+    ok "decimal zero threshold makes cached low-yield work actionable"
+else
+    bad "decimal zero threshold makes cached low-yield work actionable"
+fi
 
 # Exercise the real batch loop with a fake compressor and the shared dedupe
 # runner. The event log proves each game is deduped immediately after defrag.
