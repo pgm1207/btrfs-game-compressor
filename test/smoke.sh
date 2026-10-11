@@ -2075,6 +2075,23 @@ out=$(
 check_contains "JSON pending summary counts zero-threshold low-yield work" \
     '"summary":{"game_count":1,"pending":1' "$out"
 
+# Notifications are another pending-only view. A cached LOW YIELD row becomes
+# compression work again when the ratio gate is disabled, even if dedupe is current.
+out=$(
+    GAMES_NAME=("Cached low-yield game")
+    GAMES_STATUS=("LOW YIELD")
+    GAMES_DEDUPE_PENDING=(0)
+    GAMES_HINT=()
+    MIN_GAIN_PCT=0
+    maybe_auto_update() { :; }
+    notify-send() { printf '%s\n' "$*"; }
+    cmd_notify
+)
+check_contains "notification counts zero-threshold low-yield work" \
+    "1 game(s) need compression or deduplication" "$out"
+check_contains "notification explains zero-threshold compression work" \
+    "Cached low-yield game (compression pending)" "$out"
+
 # Exercise the real batch loop with a fake compressor and the shared dedupe
 # runner. The event log proves each game is deduped immediately after defrag.
 DEDUP_EVENT_LOG="$WORK/dedupe-batch-events"

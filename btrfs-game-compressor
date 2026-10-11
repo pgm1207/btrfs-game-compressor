@@ -2770,8 +2770,14 @@ cmd_notify() {
                 count=$((count + 1))
                 ;;
             "LOW YIELD")
-                if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ]; then
-                    pending_names+=("${GAMES_NAME[$i]} (dedupe pending)")
+                if game_has_pending_work "$i"; then
+                    entry="${GAMES_NAME[$i]}"
+                    if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ]; then
+                        entry="$entry (dedupe pending)"
+                    else
+                        entry="$entry (compression pending)"
+                    fi
+                    pending_names+=("$entry")
                     count=$((count + 1))
                 fi
                 ;;
