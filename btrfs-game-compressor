@@ -4748,7 +4748,7 @@ cmd_dry_run() {
         if [ "$st" = "COMPACTED" ]; then continue; fi
         if [ "$st" = "LOW YIELD" ]; then
             if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ]; then
-                n=$((n + 1)); n_low=$((n_low + 1))
+                n=$((n + 1))
                 fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
                 printf 'dedupe only    %-40s %-14s %10s (compression held: low yield)\n' "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}"
                 continue
