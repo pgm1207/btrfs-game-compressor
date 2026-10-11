@@ -2009,6 +2009,29 @@ check_contains "--dedupe explains another run holds the lock" "another process i
     || bad "locked pass never starts native backend"
 wait "$lock_pid" 2>/dev/null || true
 
+# A live TUI can change min_gain_pct before the next discovery pass, leaving a
+# cached LOW YIELD status. Pending views must still match the batch queue.
+GAMES_STATUS=("LOW YIELD")
+GAMES_DEDUPE_PENDING=(0)
+MIN_GAIN_PCT=5
+if game_has_pending_work 0; then
+    bad "pending predicate holds settled low-yield work at a positive threshold"
+else
+    ok "pending predicate holds settled low-yield work at a positive threshold"
+fi
+MIN_GAIN_PCT=0
+if game_has_pending_work 0; then
+    ok "zero threshold makes cached low-yield work actionable"
+else
+    bad "zero threshold makes cached low-yield work actionable"
+fi
+MIN_GAIN_PCT=0.0
+if game_has_pending_work 0; then
+    ok "decimal zero threshold makes cached low-yield work actionable"
+else
+    bad "decimal zero threshold makes cached low-yield work actionable"
+fi
+
 # Exercise the real batch loop with a fake compressor and the shared dedupe
 # runner. The event log proves each game is deduped immediately after defrag.
 DEDUP_EVENT_LOG="$WORK/dedupe-batch-events"
