@@ -197,7 +197,8 @@ OPTIONS
                           including ext4; no game changes, logical estimates only
         --apply-assets GAME
                           optimize supported assets and Hades LZ4 packages
-                          (Steam: consider Only update when launched)
+                          (Steam: "Only update this game when I launch it" defers
+                           background updates; it does not disable launch-required patches)
         --restore-assets GAME
                           restore original assets from the local copy
         --finalize-assets GAME
@@ -2293,15 +2294,12 @@ batch_compress_routine() {
     local -a targets_idx=() skipped_low=()
     # Compression's only skip gate is the ratio (min_gain_pct), so LOW YIELD is
     # disabled exactly when that gate is off.
-    local low_disabled
-    low_disabled=$(awk -v p="$MIN_GAIN_PCT" \
-        'BEGIN { print (p + 0 == 0) ? 1 : 0 }')
     for i in "${!GAMES_STATUS[@]}"; do
         case "${GAMES_STATUS[$i]}" in
             "UNCOMPRESSED"|"UPDATED") targets_idx+=("$i") ;;
             "COMPRESSED") targets_idx+=("$i") ;; # compressed already; dedupe only
             "LOW YIELD")
-                if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] || [ "$low_disabled" -eq 1 ]; then
+                if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] || low_yield_filter_disabled; then
                     targets_idx+=("$i")
                 else
                     skipped_low+=("$i")
@@ -2580,6 +2578,24 @@ status_color() {
     esac
 }
 
+low_yield_filter_disabled() {
+    [[ "${MIN_GAIN_PCT:-}" =~ ^0+([.]0+)?$ ]]
+}
+
+# Keep every pending-only view aligned with the batch queue: games held back as
+# low-yield are actionable when deduplication is pending or the user explicitly
+# disables the ratio gate; running games remain blocked rather than queued.
+game_has_pending_work() {
+    local i="$1"
+    case "${GAMES_STATUS[$i]}" in
+        COMPRESSED|UPDATED|UNCOMPRESSED) return 0 ;;
+        "LOW YIELD")
+            [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] || low_yield_filter_disabled
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 cmd_status() {
     local i n_shown=0 n_total=0 n_pending=0 n_low=0 n_running=0
 
@@ -2602,7 +2618,7 @@ cmd_status() {
     printf '%s\n' "--------------------------------------------------------------------------------"
     for i in "${!GAMES_NAME[@]}"; do
         local st="${GAMES_STATUS[$i]}"
-        if [ "$OPT_PENDING_ONLY" -eq 1 ] && [[ "$st" == "COMPACTED" ]]; then
+        if [ "$OPT_PENDING_ONLY" -eq 1 ] && ! game_has_pending_work "$i"; then
             continue
         fi
         n_total=$(( n_total + 1 ))
@@ -2628,6 +2644,9 @@ cmd_status() {
                 ;;
             "LOW YIELD")
                 n_low=$(( n_low + 1 ))
+                if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ]; then
+                    n_pending=$(( n_pending + 1 ))
+                fi
                 note=$(printf ' ~%s expected' "$(bytes_human "$(( ${GAMES_PREDICT[$i]:-0} * 1048576 ))")")
                 [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] && note="$note · dedupe pending"
                 ;;
@@ -2696,22 +2715,26 @@ cmd_status_json() {
     printf '],"games":['
     for i in "${!GAMES_NAME[@]}"; do
         local st="${GAMES_STATUS[$i]}"
-        if [ "$OPT_PENDING_ONLY" -eq 1 ] && [[ "$st" == "COMPACTED" ]]; then
+        if [ "$OPT_PENDING_ONLY" -eq 1 ] && ! game_has_pending_work "$i"; then
             continue
         fi
         case "$st" in
             COMPACTED) n_compressed=$((n_compressed + 1)); n_compacted=$((n_compacted + 1)) ;;
             COMPRESSED) n_compressed=$((n_compressed + 1)); n_pending=$((n_pending + 1)) ;;
             UPDATED|UNCOMPRESSED) n_pending=$((n_pending + 1)) ;;
-            "LOW YIELD") n_low=$((n_low + 1)) ;;
+            "LOW YIELD")
+                n_low=$((n_low + 1))
+                [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] && n_pending=$((n_pending + 1))
+                ;;
             RUNNING) n_running=$((n_running + 1)) ;;
         esac
         n_total=$((n_total + 1))
-        printf '%s{"name":%s,"path":%s,"status":%s,"size_bytes":%s,"size_display":%s,"expected_gain_mib":%s' \
+        printf '%s{"name":%s,"path":%s,"status":%s,"size_bytes":%s,"size_display":%s,"expected_gain_mib":%s,"dedupe_pending":%s' \
             "$comma" "$(json_quote "${GAMES_NAME[$i]}")" \
             "$(json_quote "${GAMES_PATH[$i]%/}")" "$(json_quote "$st")" \
             "${GAMES_BYTES[$i]:-0}" "$(json_quote "${GAMES_SIZE[$i]}")" \
-            "${GAMES_PREDICT[$i]:-0}"
+            "${GAMES_PREDICT[$i]:-0}" \
+            "$([ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] && printf true || printf false)"
         if [ -n "${GAMES_HINT[$i]:-}" ]; then
             printf ',"community_hint_pct":%s,"community_hint_level":%s,"community_hint_low_yield":%s' \
                 "${GAMES_HINT[$i]%%|*}" "$(json_quote "zstd${GAMES_HINT[$i]##*|}")" \
@@ -4727,6 +4750,9 @@ cmd_dry_run() {
     local i n=0 n_low=0 n_running=0 n_advised=0
     for i in "${!GAMES_NAME[@]}"; do
         local st="${GAMES_STATUS[$i]}"
+        if [ "$OPT_PENDING_ONLY" -eq 1 ] && ! game_has_pending_work "$i"; then
+            continue
+        fi
         if [[ "$st" == "COMPACTED" ]]; then
             continue
         fi
@@ -4746,7 +4772,7 @@ cmd_dry_run() {
         if [ "$st" = "COMPACTED" ]; then continue; fi
         if [ "$st" = "LOW YIELD" ]; then
             if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ]; then
-                n=$((n + 1)); n_low=$((n_low + 1))
+                n=$((n + 1))
                 fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
                 printf 'dedupe only    %-40s %-14s %10s (compression held: low yield)\n' "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}"
                 continue
@@ -5045,7 +5071,7 @@ while true; do
         name="${GAMES_NAME[$i]}"
         st="${GAMES_STATUS[$i]}"
 
-        if [ "$VIEW_PENDING_ONLY" -eq 1 ] && [[ "$st" == "COMPACTED" ]]; then
+        if [ "$VIEW_PENDING_ONLY" -eq 1 ] && ! game_has_pending_work "$i"; then
             continue
         fi
 

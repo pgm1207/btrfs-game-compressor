@@ -903,6 +903,7 @@ if printf '%s' "$out" | grep -q "^BadGame .*LOW YIELD"; then
 else
     bad "a 1%-ratio game is held back as low yield" "$out"
 fi
+check_contains "status summary counts low-yield pending dedupe" "pending: 2" "$out"
 
 # Raising the ratio floor must catch a game that passed at 5%.
 echo "80" > "$PC"
@@ -923,23 +924,29 @@ else
 fi
 echo "5" > "$PC"
 
-# And dry-run must exclude a low-yield game while saying why.
+# And dry-run must hold compression for a low-yield game while keeping its
+# pending dedupe pass actionable.
 out=$("$PROG" --dry-run --no-color 2>/dev/null)
 if printf '%s' "$out" | grep -q "^would compress.*BadGame"; then
-    bad "dry-run excludes low-yield games"
+    bad "dry-run excludes low-yield games from compression"
 else
-    ok "dry-run excludes low-yield games"
+    ok "dry-run excludes low-yield games from compression"
 fi
 if printf '%s' "$out" | grep -Eq "low yield|not expected to gain enough"; then
-    ok "dry-run explains why it skipped them"
+    ok "dry-run explains why compression was held"
 else
-    bad "dry-run explains why it skipped them"
+    bad "dry-run explains why compression was held"
 fi
+check_contains "dry-run keeps pending dedupe actionable" "dedupe only" "$out"
+check_not_contains "dry-run does not report pending dedupe as skipped" \
+    "game(s) skipped as low yield" "$out"
 
 json_out=$("$PROG" --status --json --no-color 2>/dev/null)
 check_contains "JSON status contains full game names" '"name":"GoodGame"' "$json_out"
 check_contains "JSON status preserves library paths with spaces" "\"path\":\"$L/GoodGame\"" "$json_out"
 check_contains "JSON status includes machine-sized byte counts" '"size_bytes":' "$json_out"
+check_contains "JSON status reports pending deduplication" '"dedupe_pending":true' "$json_out"
+check_contains "JSON summary counts low-yield pending dedupe" '"pending":2' "$json_out"
 if command -v python3 >/dev/null 2>&1; then
     if printf '%s\n' "$json_out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
         ok "JSON status parses as valid JSON"
@@ -947,6 +954,21 @@ if command -v python3 >/dev/null 2>&1; then
         bad "JSON status parses as valid JSON" "$json_out"
     fi
 fi
+
+# Once dedupe is current, BadGame remains LOW YIELD but has no work waiting.
+# Pending-only views must keep GoodGame and remove BadGame consistently.
+D="$HOME/.local/state/btrfs-game-compressor/dedupe_completed.db"
+printf '%s|%s\n' "$(date +%s%N)" "$L/BadGame" > "$D"
+pending_out=$("$PROG" --status --pending --no-color 2>/dev/null)
+check_contains "pending status keeps actionable games" "GoodGame" "$pending_out"
+check_not_contains "pending status hides settled low-yield games" "BadGame" "$pending_out"
+pending_json=$("$PROG" --status --pending --json --no-color 2>/dev/null)
+check_contains "pending JSON keeps actionable games" '"name":"GoodGame"' "$pending_json"
+check_not_contains "pending JSON hides settled low-yield games" '"name":"BadGame"' "$pending_json"
+pending_dry=$("$PROG" --dry-run --pending --no-color 2>/dev/null)
+check_contains "pending dry-run keeps actionable games" "GoodGame" "$pending_dry"
+check_not_contains "pending dry-run hides settled low-yield games" "BadGame" "$pending_dry"
+: > "$D"
 
 # --history and --stats read the same database, so a record seeded above must be
 # visible in both. This is what makes the numbers trustworthy: they come from the
@@ -1116,6 +1138,12 @@ else
     ok "a game with no live process is not reported as RUNNING"
 fi
 check_contains "--status counts the running games" "running: 1" "$out"
+pending_out=$("$PROG" --status --pending --no-color 2>/dev/null)
+check_not_contains "pending status hides blocked running games" "GoodGame" "$pending_out"
+check_contains "pending status keeps non-running work" "BadGame" "$pending_out"
+pending_dry=$("$PROG" --dry-run --pending --no-color 2>/dev/null)
+check_not_contains "pending dry-run hides blocked running games" "GoodGame" "$pending_dry"
+check_contains "pending dry-run keeps non-running work" "BadGame" "$pending_dry"
 
 # A system binary with its working directory in the game tree must also be
 # detected even if none of its executable mappings live under that tree.
@@ -1981,6 +2009,29 @@ check_contains "--dedupe explains another run holds the lock" "another process i
     || bad "locked pass never starts native backend"
 wait "$lock_pid" 2>/dev/null || true
 
+# A live TUI can change min_gain_pct before the next discovery pass, leaving a
+# cached LOW YIELD status. Pending views must still match the batch queue.
+GAMES_STATUS=("LOW YIELD")
+GAMES_DEDUPE_PENDING=(0)
+MIN_GAIN_PCT=5
+if game_has_pending_work 0; then
+    bad "pending predicate holds settled low-yield work at a positive threshold"
+else
+    ok "pending predicate holds settled low-yield work at a positive threshold"
+fi
+MIN_GAIN_PCT=0
+if game_has_pending_work 0; then
+    ok "zero threshold makes cached low-yield work actionable"
+else
+    bad "zero threshold makes cached low-yield work actionable"
+fi
+MIN_GAIN_PCT=0.0
+if game_has_pending_work 0; then
+    ok "decimal zero threshold makes cached low-yield work actionable"
+else
+    bad "decimal zero threshold makes cached low-yield work actionable"
+fi
+
 # Exercise the real batch loop with a fake compressor and the shared dedupe
 # runner. The event log proves each game is deduped immediately after defrag.
 DEDUP_EVENT_LOG="$WORK/dedupe-batch-events"
@@ -2317,7 +2368,8 @@ out=$(run --slim Hades --variants Hades 2>&1); rc=$?
 check_rc "slim cannot combine with the variant report" 2 "$rc"
 out=$(run --help)
 check_contains "help documents the one-shot slim command" "--slim GAME" "$out"
-check_contains "help suggests deferring updates on optimized assets" "Only update when launched" "$out"
+check_contains "help gives the exact Steam update setting" "Only update this game when I launch it" "$out"
+check_contains "help says the setting cannot block launch patches" "does not disable launch-required patches" "$out"
 cat > "$WORK/slim-empty" <<'SHIM'
 #!/bin/sh
 if [ "$1" = prune-plan ]; then printf 'PRUNE|plan|0|0\n'; fi
