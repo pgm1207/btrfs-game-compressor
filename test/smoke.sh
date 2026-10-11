@@ -965,6 +965,9 @@ check_not_contains "pending status hides settled low-yield games" "BadGame" "$pe
 pending_json=$("$PROG" --status --pending --json --no-color 2>/dev/null)
 check_contains "pending JSON keeps actionable games" '"name":"GoodGame"' "$pending_json"
 check_not_contains "pending JSON hides settled low-yield games" '"name":"BadGame"' "$pending_json"
+pending_dry=$("$PROG" --dry-run --pending --no-color 2>/dev/null)
+check_contains "pending dry-run keeps actionable games" "GoodGame" "$pending_dry"
+check_not_contains "pending dry-run hides settled low-yield games" "BadGame" "$pending_dry"
 : > "$D"
 
 # --history and --stats read the same database, so a record seeded above must be
@@ -1138,6 +1141,9 @@ check_contains "--status counts the running games" "running: 1" "$out"
 pending_out=$("$PROG" --status --pending --no-color 2>/dev/null)
 check_not_contains "pending status hides blocked running games" "GoodGame" "$pending_out"
 check_contains "pending status keeps non-running work" "BadGame" "$pending_out"
+pending_dry=$("$PROG" --dry-run --pending --no-color 2>/dev/null)
+check_not_contains "pending dry-run hides blocked running games" "GoodGame" "$pending_dry"
+check_contains "pending dry-run keeps non-running work" "BadGame" "$pending_dry"
 
 # A system binary with its working directory in the game tree must also be
 # detected even if none of its executable mappings live under that tree.
