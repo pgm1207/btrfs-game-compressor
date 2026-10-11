@@ -2708,11 +2708,12 @@ cmd_status_json() {
             RUNNING) n_running=$((n_running + 1)) ;;
         esac
         n_total=$((n_total + 1))
-        printf '%s{"name":%s,"path":%s,"status":%s,"size_bytes":%s,"size_display":%s,"expected_gain_mib":%s' \
+        printf '%s{"name":%s,"path":%s,"status":%s,"size_bytes":%s,"size_display":%s,"expected_gain_mib":%s,"dedupe_pending":%s' \
             "$comma" "$(json_quote "${GAMES_NAME[$i]}")" \
             "$(json_quote "${GAMES_PATH[$i]%/}")" "$(json_quote "$st")" \
             "${GAMES_BYTES[$i]:-0}" "$(json_quote "${GAMES_SIZE[$i]}")" \
-            "${GAMES_PREDICT[$i]:-0}"
+            "${GAMES_PREDICT[$i]:-0}" \
+            "$([ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] && printf true || printf false)"
         if [ -n "${GAMES_HINT[$i]:-}" ]; then
             printf ',"community_hint_pct":%s,"community_hint_level":%s,"community_hint_low_yield":%s' \
                 "${GAMES_HINT[$i]%%|*}" "$(json_quote "zstd${GAMES_HINT[$i]##*|}")" \
