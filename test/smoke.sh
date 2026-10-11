@@ -940,6 +940,7 @@ json_out=$("$PROG" --status --json --no-color 2>/dev/null)
 check_contains "JSON status contains full game names" '"name":"GoodGame"' "$json_out"
 check_contains "JSON status preserves library paths with spaces" "\"path\":\"$L/GoodGame\"" "$json_out"
 check_contains "JSON status includes machine-sized byte counts" '"size_bytes":' "$json_out"
+check_contains "JSON status reports pending deduplication" '"dedupe_pending":true' "$json_out"
 if command -v python3 >/dev/null 2>&1; then
     if printf '%s\n' "$json_out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
         ok "JSON status parses as valid JSON"
