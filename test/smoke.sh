@@ -2317,7 +2317,8 @@ out=$(run --slim Hades --variants Hades 2>&1); rc=$?
 check_rc "slim cannot combine with the variant report" 2 "$rc"
 out=$(run --help)
 check_contains "help documents the one-shot slim command" "--slim GAME" "$out"
-check_contains "help suggests deferring updates on optimized assets" "Only update when launched" "$out"
+check_contains "help gives the exact Steam update setting" "Only update this game when I launch it" "$out"
+check_contains "help says the setting cannot block launch patches" "does not disable launch-required patches" "$out"
 cat > "$WORK/slim-empty" <<'SHIM'
 #!/bin/sh
 if [ "$1" = prune-plan ]; then printf 'PRUNE|plan|0|0\n'; fi
