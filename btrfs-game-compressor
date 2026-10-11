@@ -4747,6 +4747,9 @@ cmd_dry_run() {
     local i n=0 n_low=0 n_running=0 n_advised=0
     for i in "${!GAMES_NAME[@]}"; do
         local st="${GAMES_STATUS[$i]}"
+        if [ "$OPT_PENDING_ONLY" -eq 1 ] && ! game_has_pending_work "$i"; then
+            continue
+        fi
         if [[ "$st" == "COMPACTED" ]]; then
             continue
         fi
