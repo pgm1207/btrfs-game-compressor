@@ -923,18 +923,22 @@ else
 fi
 echo "5" > "$PC"
 
-# And dry-run must exclude a low-yield game while saying why.
+# And dry-run must hold compression for a low-yield game while keeping its
+# pending dedupe pass actionable.
 out=$("$PROG" --dry-run --no-color 2>/dev/null)
 if printf '%s' "$out" | grep -q "^would compress.*BadGame"; then
-    bad "dry-run excludes low-yield games"
+    bad "dry-run excludes low-yield games from compression"
 else
-    ok "dry-run excludes low-yield games"
+    ok "dry-run excludes low-yield games from compression"
 fi
 if printf '%s' "$out" | grep -Eq "low yield|not expected to gain enough"; then
-    ok "dry-run explains why it skipped them"
+    ok "dry-run explains why compression was held"
 else
-    bad "dry-run explains why it skipped them"
+    bad "dry-run explains why compression was held"
 fi
+check_contains "dry-run keeps pending dedupe actionable" "dedupe only" "$out"
+check_not_contains "dry-run does not report pending dedupe as skipped" \
+    "game(s) skipped as low yield" "$out"
 
 json_out=$("$PROG" --status --json --no-color 2>/dev/null)
 check_contains "JSON status contains full game names" '"name":"GoodGame"' "$json_out"
