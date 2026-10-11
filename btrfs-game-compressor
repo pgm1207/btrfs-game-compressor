@@ -2629,6 +2629,9 @@ cmd_status() {
                 ;;
             "LOW YIELD")
                 n_low=$(( n_low + 1 ))
+                if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ]; then
+                    n_pending=$(( n_pending + 1 ))
+                fi
                 note=$(printf ' ~%s expected' "$(bytes_human "$(( ${GAMES_PREDICT[$i]:-0} * 1048576 ))")")
                 [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] && note="$note · dedupe pending"
                 ;;
@@ -2704,7 +2707,10 @@ cmd_status_json() {
             COMPACTED) n_compressed=$((n_compressed + 1)); n_compacted=$((n_compacted + 1)) ;;
             COMPRESSED) n_compressed=$((n_compressed + 1)); n_pending=$((n_pending + 1)) ;;
             UPDATED|UNCOMPRESSED) n_pending=$((n_pending + 1)) ;;
-            "LOW YIELD") n_low=$((n_low + 1)) ;;
+            "LOW YIELD")
+                n_low=$((n_low + 1))
+                [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] && n_pending=$((n_pending + 1))
+                ;;
             RUNNING) n_running=$((n_running + 1)) ;;
         esac
         n_total=$((n_total + 1))

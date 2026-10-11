@@ -903,6 +903,7 @@ if printf '%s' "$out" | grep -q "^BadGame .*LOW YIELD"; then
 else
     bad "a 1%-ratio game is held back as low yield" "$out"
 fi
+check_contains "status summary counts low-yield pending dedupe" "pending: 2" "$out"
 
 # Raising the ratio floor must catch a game that passed at 5%.
 echo "80" > "$PC"
@@ -945,6 +946,7 @@ check_contains "JSON status contains full game names" '"name":"GoodGame"' "$json
 check_contains "JSON status preserves library paths with spaces" "\"path\":\"$L/GoodGame\"" "$json_out"
 check_contains "JSON status includes machine-sized byte counts" '"size_bytes":' "$json_out"
 check_contains "JSON status reports pending deduplication" '"dedupe_pending":true' "$json_out"
+check_contains "JSON summary counts low-yield pending dedupe" '"pending":2' "$json_out"
 if command -v python3 >/dev/null 2>&1; then
     if printf '%s\n' "$json_out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
         ok "JSON status parses as valid JSON"
