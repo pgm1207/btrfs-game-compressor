@@ -962,6 +962,13 @@ has not measured a general change in load times or FPS, so judge runtime effects
 on your own device. Higher configured ZSTD levels spend more CPU time during
 the single rewrite and do not themselves promise faster play.
 
+The asset scan decodes candidate images and audio to estimate savings before it
+touches anything. That decode now runs on a bounded worker pool while the
+filesystem walk and the single-threaded apply writer stay on the main thread, so
+games that ship gigabytes of standalone FMOD `.bank`/`.fsb` audio no longer stall
+the scan. Set `BGC_ASSET_WORKERS` to change the worker count; the default is
+capped at 8 to bound peak decode memory (each worker holds one decoded asset).
+
 ## What makes it safe
 
 The reason a tool like this is worth trusting is not the compression — that is one

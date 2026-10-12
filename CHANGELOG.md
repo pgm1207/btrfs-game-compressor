@@ -20,6 +20,15 @@
   512x1024 DXT1 streamed, source sha256-unchanged); runtime/atlas compatibility is
   not claimed and stream ownership stays unproven.
 
+- Parallelize the asset candidate scan. Loose image/DDS, WAV, Hades package and
+  standalone FMOD bank candidates are now decoded on a bounded worker pool while
+  the filesystem walk and the single-threaded apply writer stay on the main
+  thread. This removes the practical stall on games shipping gigabytes of FMOD
+  audio: a single 136 MiB bank took ~78 s to decode, and a real-library sweep had
+  `Hades`, `Hades II` and `Dispatch` exceed a 10-minute plan timeout on one
+  thread. `BGC_ASSET_WORKERS` overrides the worker count; the default is capped
+  at 8 to bound peak decode memory. Aggregate plan/apply output is unchanged.
+
 ## 0.3.1 — 2026-10-08 — Recovery hardening, measurement and DDS quality
 
 This maintenance release contains the changes listed below. The release artifacts
