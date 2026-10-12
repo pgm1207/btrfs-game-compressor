@@ -2092,6 +2092,26 @@ check_contains "notification counts zero-threshold low-yield work" \
 check_contains "notification explains zero-threshold compression work" \
     "Cached low-yield game (compression pending)" "$out"
 
+# Dry-run must describe the same cached row as compression work. The batch
+# queue would process it after the user disables the ratio gate, so reporting a
+# skip here would make the safety preview contradict the action it previews.
+out=$(
+    GAMES_NAME=("Cached low-yield game")
+    GAMES_STATUS=("LOW YIELD")
+    GAMES_DEDUPE_PENDING=(0)
+    GAMES_SIZE=("100M")
+    GAMES_PREDICT=(5)
+    GAMES_HINT=()
+    GAMES_HINT_LOW=()
+    MIN_GAIN_PCT=0
+    OPT_PENDING_ONLY=1
+    cmd_dry_run
+)
+check_contains "dry-run queues zero-threshold cached low-yield work" \
+    "would compress  Cached low-yield game" "$out"
+check_not_contains "dry-run does not call zero-threshold work skipped" \
+    "skipped as low yield" "$out"
+
 # A COMPRESSED row has finished its rewrite and only needs deduplication.
 # Do not attach a compression-ratio hint to that different kind of work.
 out=$(
