@@ -727,8 +727,17 @@ fn dedupe(tree: &Tree, parent: &Path) -> io::Result<()> {
     let block = tree.sector as usize;
     let mut data = vec![0u8; block];
     let mut hashed = 0u64;
+    let mut skipped = 0u64;
     tree.walk(|path, file| {
         let meta = file.metadata()?;
+        // A read-only file (for example a Steam Proton compat tool shipped mode
+        // 0444) can never be a dedupe destination: its read-write open fails
+        // with EACCES and, before this guard, aborted the entire library pass.
+        // Skip it and report the count instead.
+        if tree.open(path, true).is_err() {
+            skipped += 1;
+            return Ok(());
+        }
         let id = files.len() as u64;
         files.push(Indexed::new(path, &meta));
         if env::var_os("BGC_VERBOSE").is_some() {
@@ -764,6 +773,9 @@ fn dedupe(tree: &Tree, parent: &Path) -> io::Result<()> {
             Ok(())
         })
     })?;
+    if skipped != 0 {
+        eprintln!("Skipped {skipped} read-only file(s) that cannot be deduplicated.");
+    }
     if !records.is_empty() {
         runs.push(scratch.flush(&mut records)?);
     }

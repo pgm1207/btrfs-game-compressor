@@ -1,7 +1,7 @@
 //! Opt-in, destructive only to newly created fixtures: BGC_TEST_BTRFS_DIR=/path cargo test.
 use std::{
     env, fs,
-    os::unix::fs::{symlink, MetadataExt},
+    os::unix::fs::{symlink, MetadataExt, PermissionsExt},
     path::Path,
     process::{Command, Output},
     time::{SystemTime, UNIX_EPOCH},
@@ -325,6 +325,42 @@ fn real_btrfs_preserves_data_and_shares_blocks() {
     assert_eq!(child.wait().unwrap().code(), Some(130));
     assert_eq!(fs::read_dir(&scratch).unwrap().count(), 0);
     fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn read_only_files_are_skipped_not_fatal_to_dedupe() {
+    // Regression: a read-only duplicate (e.g. a Steam Proton compat tool at
+    // mode 0444) made the read-write open fail with EACCES and aborted the
+    // whole dedupe pass instead of being skipped.
+    let Some(parent) = env::var_os("BGC_TEST_BTRFS_DIR") else {
+        return;
+    };
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = Path::new(&parent).join(format!("bgc-ro-dedupe-{stamp}"));
+    let scratch = Path::new(&parent).join(format!("bgc-ro-dedupe-scratch-{stamp}"));
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&scratch).unwrap();
+    let data: Vec<u8> = std::iter::repeat(b'A').take(4 * 1024 * 1024).collect();
+    for name in ["a", "b", "c"] {
+        fs::write(root.join(name), &data).unwrap();
+    }
+    let mut perms = fs::metadata(root.join("c")).unwrap().permissions();
+    perms.set_mode(0o444);
+    fs::set_permissions(root.join("c"), perms).unwrap();
+    let output = success(&["dedupe", root.to_str().unwrap(), scratch.to_str().unwrap()]);
+    assert!(output.contains("rejected"), "{output}");
+    // The read-only duplicate is byte-identical and still read-only; the pass
+    // completed and shared the writable pair.
+    assert_eq!(fs::read(root.join("c")).unwrap(), data);
+    assert_eq!(fs::metadata(root.join("c")).unwrap().permissions().mode() & 0o777, 0o444);
+    let usage = success(&["usage", root.to_str().unwrap()]);
+    let shared: u64 = usage.trim().split('|').nth(2).unwrap().parse().unwrap();
+    assert!(shared > 0, "writable duplicates were not shared: {usage}");
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_dir_all(&scratch).unwrap();
 }
 
 #[test]

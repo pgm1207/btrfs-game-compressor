@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Deduplication no longer aborts on a read-only file. Opening a read-only
+  duplicate (for example a Steam Proton compat tool shipped mode 0444) with the
+  write access `FIDEDUPERANGE` requires returned `EACCES`, and a single rejected
+  range failed the entire pass. Read-only files are now skipped and counted
+  (`Skipped N read-only file(s) that cannot be deduplicated.`), so a
+  library-wide `--dedupe` can complete on a library that contains Proton.
+  Genuine rejected ranges still fail the pass.
+
 ## 0.3.1 — 2026-10-08 — Recovery hardening, measurement and DDS quality
 
 This maintenance release contains the changes listed below. The release artifacts
