@@ -185,6 +185,16 @@ sharing. Compression remains recorded if the subsequent dedupe pass fails.
 Rejected requests are reported as errors; a failed pass is not recorded as a
 success. Ctrl+C stops the operation and preserves completed work.
 
+The dedupe that follows a single game only sees that game: it restores
+duplicates inside it but cannot see cross-game duplicates. Compressing an
+individual game therefore breaks sharing that a previous library-wide
+`--dedupe` created, so run a library `--dedupe` again after compressing games to
+re-share across them. Read-only files (for example Steam Proton compat tools
+shipped mode 0444) cannot be a dedupe destination; they are skipped and counted
+instead of failing the pass. Files shared with a Btrfs snapshot are the one case
+where defragmentation can increase physical usage, because the snapshot keeps
+the old blocks while the live file is rewritten.
+
 The final report measures unique Btrfs data extents before and after deduplication.
 It shows the decrease in the physical game-data footprint by compression, by deduplication, and
 overall, using the on-disk size before this run as the baseline. Negative savings mean growth; unavailable measurements are shown as unknown. Old logical-sharing records remain in `dedupe_history.db` and are excluded from the new physical-savings history. These measurements require root permission and exclude filesystem
