@@ -11,6 +11,7 @@ const COMMANDS: &[&str] = &[
 ];
 const XNB_EXPORT: &str = "xnb-texture-export";
 const UNITYFS_TEXTURE_EXPORT: &str = "unityfs-texture-export";
+const UNREAL_PAK_ENTRY_EXPORT: &str = "unreal-pak-entry-export";
 
 pub fn dispatch(args: &[OsString]) -> Option<io::Result<()>> {
     let command = args.first()?.to_str()?;
@@ -23,13 +24,14 @@ pub fn dispatch(args: &[OsString]) -> Option<io::Result<()>> {
         for name in COMMANDS { println!("  {name} FILE"); }
         println!("  {XNB_EXPORT} MAX_EDGE INPUT OUTPUT (detached experimental export)");
         println!("  {UNITYFS_TEXTURE_EXPORT} NODE_INDEX:PATH_ID INPUT OUTPUT (detached experimental export)");
+        println!("  {UNREAL_PAK_ENTRY_EXPORT} ENTRY_PATH INPUT OUTPUT (detached experimental export)");
         println!("Draft routes require the development-audits Cargo feature; no installed apply or automatic routing.");
         println!("The XNB export decodes and re-encodes BC pixels; audits do not certify runtime compatibility.");
         println!("Detached XNB publication requires O_TMPFILE and /proc/self/fd; use a trusted research output directory.");
         return Some(Ok(()));
     }
-    if !COMMANDS.contains(&command) && command != XNB_EXPORT && command != UNITYFS_TEXTURE_EXPORT { return None; }
-    let arity = if command == XNB_EXPORT || command == UNITYFS_TEXTURE_EXPORT { 4 } else { 2 };
+    if !COMMANDS.contains(&command) && command != XNB_EXPORT && command != UNITYFS_TEXTURE_EXPORT && command != UNREAL_PAK_ENTRY_EXPORT { return None; }
+    let arity = if command == XNB_EXPORT || command == UNITYFS_TEXTURE_EXPORT || command == UNREAL_PAK_ENTRY_EXPORT { 4 } else { 2 };
     if args.len() != arity {
         return Some(Err(super::invalid("invalid development command arguments; use --development-audits for the draft command list")));
     }
@@ -54,6 +56,21 @@ pub fn dispatch(args: &[OsString]) -> Option<io::Result<()>> {
                     .ok_or_else(|| super::invalid("invalid XNB maximum edge"));
                 edge.and_then(|edge| super::xnb::texture_export(edge, Path::new(&args[2]), Path::new(&args[3])))
             }
+            UNREAL_PAK_ENTRY_EXPORT => (|| -> io::Result<()> {
+                let entry = args[1].to_str().ok_or_else(|| super::invalid("invalid Unreal Pak entry path"))?;
+                let input = Path::new(&args[2]);
+                let output = Path::new(&args[3]);
+                match std::fs::symlink_metadata(output) {
+                    Ok(_) => return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Unreal entry export destination exists")),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error),
+                }
+                let bytes = super::containers::stored_entry(input, entry, 64 * 1024 * 1024)?;
+                super::detached_export::publish(output, &bytes, || Ok(()))?;
+                println!("UNREAL_PAK_ENTRY|{entry}|{}|EXPORTED", bytes.len());
+                eprintln!("Experimental detached Unreal Pak entry extraction: stored legacy entries only, source unchanged. No cooked Texture2D parsing, decompression, signer check or runtime validation.");
+                Ok(())
+            })(),
             UNITYFS_TEXTURE_EXPORT => (|| -> io::Result<()> {
                 let key = args[1].to_str().ok_or_else(|| super::invalid("invalid Unity texture key"))?;
                 let (node, id) = key.split_once(':')
@@ -75,7 +92,7 @@ mod tests {
     fn argument_checks_and_unknown_commands_do_not_route_to_sources() {
         assert!(dispatch(&[]).is_none());
         assert!(dispatch(&[OsString::from("not-a-development-command")]).is_none());
-        for command in COMMANDS.iter().copied().chain([XNB_EXPORT, UNITYFS_TEXTURE_EXPORT]) {
+        for command in COMMANDS.iter().copied().chain([XNB_EXPORT, UNITYFS_TEXTURE_EXPORT, UNREAL_PAK_ENTRY_EXPORT]) {
             let error = dispatch(&[OsString::from(command)]).unwrap().unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
@@ -95,6 +112,9 @@ mod tests {
             OsString::from("/nonexistent-bgc-guard-input"), OsString::from("/nonexistent-bgc-guard-output")];
         assert_eq!(dispatch(&args).unwrap().unwrap_err().kind(), io::ErrorKind::Unsupported);
         let args = [OsString::from(UNITYFS_TEXTURE_EXPORT), OsString::from("0:1"),
+            OsString::from("/nonexistent-bgc-guard-input"), OsString::from("/nonexistent-bgc-guard-output")];
+        assert_eq!(dispatch(&args).unwrap().unwrap_err().kind(), io::ErrorKind::Unsupported);
+        let args = [OsString::from(UNREAL_PAK_ENTRY_EXPORT), OsString::from("a.b"),
             OsString::from("/nonexistent-bgc-guard-input"), OsString::from("/nonexistent-bgc-guard-output")];
         assert_eq!(dispatch(&args).unwrap().unwrap_err().kind(), io::ErrorKind::Unsupported);
     }

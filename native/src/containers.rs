@@ -425,6 +425,81 @@ fn verify_unreal_index<R: Read + Seek>(file: &mut R, footer: &Footer) -> io::Res
     Ok(("VERIFIED_PRIMARY_SHA1", Some(bytes)))
 }
 
+/// Development-only: extract one stored, unencrypted legacy Pak (v1-9) entry by
+/// its exact index path. Compressed, encrypted, deleted, duplicate and modern
+/// (v10/v11) entries are refused. The indexed data header and payload SHA1 are
+/// re-verified before returning, and the source is never modified. This is raw
+/// extraction, not cooked-package parsing or decompression.
+pub(crate) fn stored_entry(pak: &Path, wanted: &str, budget: u64) -> io::Result<Vec<u8>> {
+    use sha1::{Digest, Sha1};
+    if wanted.is_empty() || wanted.chars().any(|c| c.is_control() || c == '|') {
+        return Err(invalid("unsupported Pak entry path"));
+    }
+    let (mut file, meta) = open(pak)?;
+    let n = meta.len().min(1024) as usize;
+    file.seek(SeekFrom::End(-(n as i64)))?;
+    let mut tail = vec![0; n];
+    file.read_exact(&mut tail)?;
+    let f = footer(&tail, meta.len())?;
+    if f.version > 9 {
+        return Err(invalid("Unreal entry extraction requires a legacy v1-9 Pak index"));
+    }
+    if f.encrypted {
+        return Err(invalid("Unreal Pak index is encrypted"));
+    }
+    let (_, index) = verify_unreal_index(&mut file, &f)?;
+    let index = index.ok_or_else(|| invalid("Unreal Pak index is unavailable"))?;
+    let compression_u8 = f.version == 8 && f.codec_slots == 4;
+    let mut c = super::unreal_legacy::Cursor::new(&index);
+    c.string()?; // mount point, never followed
+    let count = c.u32()? as usize;
+    if count > 2_000_000 {
+        return Err(invalid("Pak entry count exceeds limit"));
+    }
+    let mut chosen: Option<super::unreal_legacy::Entry> = None;
+    for _ in 0..count {
+        super::cancelled()?;
+        let name = c.string()?;
+        let e = super::unreal_legacy::entry(&mut c, f.version, f.offset, compression_u8)?;
+        if name != wanted {
+            continue;
+        }
+        if chosen.is_some() {
+            return Err(invalid("duplicate Pak entry name"));
+        }
+        chosen = Some(e);
+    }
+    let e = chosen.ok_or_else(|| invalid("requested Pak entry was not found"))?;
+    if e.flags & 2 != 0 {
+        return Err(invalid("requested Pak entry is deleted"));
+    }
+    if e.flags & 1 != 0 {
+        return Err(invalid("requested Pak entry is encrypted"));
+    }
+    if e.method != 0 {
+        return Err(invalid("requested Pak entry is compressed; only stored entries are supported"));
+    }
+    if e.stored > budget {
+        return Err(invalid("requested Pak entry exceeds the extraction budget"));
+    }
+    file.seek(SeekFrom::Start(e.offset))?;
+    let mut header = vec![0; e.raw.len()];
+    file.read_exact(&mut header)?;
+    if u64::from_le_bytes(header[..8].try_into().unwrap()) != 0 || header[8..] != e.raw[8..] {
+        return Err(invalid("Pak data header differs from the indexed entry"));
+    }
+    let mut out = vec![0; e.stored as usize];
+    file.read_exact(&mut out)?;
+    let mut hash = Sha1::new();
+    hash.update(&out);
+    let digest: [u8; 20] = hash.finalize().into();
+    if digest != e.hash {
+        return Err(invalid("Pak extracted payload SHA1 mismatch"));
+    }
+    unchanged(&meta, &file.metadata()?)?;
+    Ok(out)
+}
+
 // A stored MD5 is only a grouping hint. Every shared payload is compared byte
 // for byte; a collision, corrupt hash, or different path never justifies removal.
 fn equal_ranges<R: Read + Seek>(file: &mut R, a: u64, b: u64, size: u64, budget: &mut u64) -> io::Result<bool> {
@@ -1751,5 +1826,54 @@ mod tests {
             assert_eq!(fs::read(&pack).unwrap(), rewritten);
             fs::remove_dir_all(root).unwrap();
         }
+    }
+    fn v3_stored_pak(name: &str, payload: &[u8]) -> Vec<u8> {
+        use sha1::{Digest, Sha1};
+        let mut rec = Vec::new();
+        rec.extend(0u64.to_le_bytes());
+        rec.extend((payload.len() as u64).to_le_bytes());
+        rec.extend((payload.len() as u64).to_le_bytes());
+        rec.extend(0u32.to_le_bytes());
+        rec.extend(Sha1::digest(payload));
+        rec.push(0);
+        rec.extend(0u32.to_le_bytes());
+        let mount = "../../../Project/Content/";
+        let mut index = Vec::new();
+        index.extend(((mount.len() + 1) as u32).to_le_bytes());
+        index.extend(mount.as_bytes());
+        index.push(0);
+        index.extend(1u32.to_le_bytes());
+        index.extend(((name.len() + 1) as u32).to_le_bytes());
+        index.extend(name.as_bytes());
+        index.push(0);
+        index.extend(&rec);
+        let mut file = rec.clone();
+        file.extend(payload);
+        let index_offset = file.len() as u64;
+        file.extend(&index);
+        file.extend(0x5a6f12e1u32.to_le_bytes());
+        file.extend(3u32.to_le_bytes());
+        file.extend(index_offset.to_le_bytes());
+        file.extend((index.len() as u64).to_le_bytes());
+        file.extend(Sha1::digest(&index));
+        file
+    }
+    #[test]
+    fn stored_pak_entry_extraction_verifies_header_and_hash() {
+        let root = std::env::temp_dir().join(format!("bgc-pak-entry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let payload = b"cooked-bytes-not-parsed".to_vec();
+        let pak = root.join("game.pak");
+        fs::write(&pak, v3_stored_pak("Textures/example.uasset", &payload)).unwrap();
+        assert_eq!(stored_entry(&pak, "Textures/example.uasset", 64).unwrap(), payload);
+        assert!(stored_entry(&pak, "Textures/missing.uasset", 64).is_err());
+        assert!(stored_entry(&pak, "Textures/example.uasset", 4).is_err(), "budget must be enforced");
+        // A tampered data header/payload is refused by the indexed SHA1.
+        let mut bytes = fs::read(&pak).unwrap();
+        bytes[0] ^= 1;
+        fs::write(&pak, &bytes).unwrap();
+        assert!(stored_entry(&pak, "Textures/example.uasset", 64).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }
