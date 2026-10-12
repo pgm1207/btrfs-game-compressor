@@ -2092,6 +2092,21 @@ check_contains "notification counts zero-threshold low-yield work" \
 check_contains "notification explains zero-threshold compression work" \
     "Cached low-yield game (compression pending)" "$out"
 
+# A COMPRESSED row has finished its rewrite and only needs deduplication.
+# Do not attach a compression-ratio hint to that different kind of work.
+out=$(
+    GAMES_NAME=("Already compressed game")
+    GAMES_STATUS=("COMPRESSED")
+    GAMES_HINT=("75|6")
+    maybe_auto_update() { :; }
+    notify-send() { printf '%s\n' "$*"; }
+    cmd_notify
+)
+check_contains "notification labels compressed rows as dedupe work" \
+    "Already compressed game (dedupe pending)" "$out"
+check_not_contains "notification omits compression hints from dedupe-only work" \
+    "~75% at zstd6" "$out"
+
 # Exercise the real batch loop with a fake compressor and the shared dedupe
 # runner. The event log proves each game is deduped immediately after defrag.
 DEDUP_EVENT_LOG="$WORK/dedupe-batch-events"
