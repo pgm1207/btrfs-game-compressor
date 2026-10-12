@@ -8,6 +8,7 @@ use std::path::Path;
 const COMMANDS: &[&str] = &[
     "xnb-texture-audit", "vtf-audit", "vpk-audit", "gamemaker-audit",
     "unityfs-texture-inventory", "iostore-index-audit", "godot4-audio-audit",
+    "unreal-package-audit",
 ];
 const XNB_EXPORT: &str = "xnb-texture-export";
 const UNITYFS_TEXTURE_EXPORT: &str = "unityfs-texture-export";
@@ -51,6 +52,7 @@ pub fn dispatch(args: &[OsString]) -> Option<io::Result<()>> {
             "unityfs-texture-inventory" => super::unityfs::texture_inventory(path),
             "iostore-index-audit" => super::iostore_index::audit(path),
             "godot4-audio-audit" => super::godot4_audio::audit(path),
+            "unreal-package-audit" => super::unreal_package::audit(path),
             XNB_EXPORT => {
                 let edge = args[1].to_str().and_then(|s| s.parse::<u32>().ok())
                     .ok_or_else(|| super::invalid("invalid XNB maximum edge"));

@@ -26,6 +26,8 @@ mod unreal_modern;
 mod unreal_iostore;
 #[cfg(feature = "development-audits")]
 mod iostore_index;
+#[cfg(feature = "development-audits")]
+mod unreal_package;
 mod containers;
 mod gst2;
 mod texture_policy;
