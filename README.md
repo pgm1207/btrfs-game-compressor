@@ -1187,6 +1187,10 @@ btrfs-game-compressor --notify
 btrfs-game-compressor --asset-plan-dir /path/to/game
 ```
 
+In JSON status output, `expected_gain_mib` is `null` when no pending compression
+estimate is available or applicable. A measured zero remains the number `0`, so
+consumers do not have to guess whether zero means “none” or “unknown”.
+
 | Flag | |
 |---|---|
 | `-h, --help` | usage |

@@ -1943,7 +1943,10 @@ discover_data() {
             GAMES_BYTES+=("${g_bytes:-0}")
             GAMES_SIZE+=("${g_human:-0B}")
 
-            local st ratio="" predicted=0
+            # Keep an unavailable or inapplicable prediction distinct from a
+            # measured zero. The latter means a local pass found no expected
+            # gain; the former must remain unknown in machine-readable output.
+            local st ratio="" predicted=""
             if [ -n "$comp_time" ]; then
                 if [ "${g_newer:-0}" -eq 1 ]; then
                     st="UPDATED"
@@ -2729,11 +2732,13 @@ cmd_status_json() {
             RUNNING) n_running=$((n_running + 1)) ;;
         esac
         n_total=$((n_total + 1))
+        local expected_gain_json=null
+        [ -n "${GAMES_PREDICT[$i]:-}" ] && expected_gain_json="${GAMES_PREDICT[$i]}"
         printf '%s{"name":%s,"path":%s,"status":%s,"size_bytes":%s,"size_display":%s,"expected_gain_mib":%s,"dedupe_pending":%s' \
             "$comma" "$(json_quote "${GAMES_NAME[$i]}")" \
             "$(json_quote "${GAMES_PATH[$i]%/}")" "$(json_quote "$st")" \
             "${GAMES_BYTES[$i]:-0}" "$(json_quote "${GAMES_SIZE[$i]}")" \
-            "${GAMES_PREDICT[$i]:-0}" \
+            "$expected_gain_json" \
             "$([ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ] && printf true || printf false)"
         if [ -n "${GAMES_HINT[$i]:-}" ]; then
             printf ',"community_hint_pct":%s,"community_hint_level":%s,"community_hint_low_yield":%s' \

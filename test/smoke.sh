@@ -582,6 +582,26 @@ if declare -f state_upsert >/dev/null 2>&1; then
         bad "JSON quoting: quotes, slashes and control characters are escaped" "$quoted"
     fi
 
+    status_json=$(
+        GAMES_NAME=("Unmeasured" "Measured zero")
+        GAMES_PATH=("/games/unmeasured" "/games/measured-zero")
+        GAMES_STATUS=("UNCOMPRESSED" "UPDATED")
+        GAMES_BYTES=(1048576 1048576)
+        GAMES_SIZE=("1.0M" "1.0M")
+        GAMES_PREDICT=("" 0)
+        GAMES_HINT=("" "")
+        GAMES_HINT_LOW=(0 0)
+        GAMES_DEDUPE_PENDING=(1 1)
+        LIBS=()
+        OPT_PENDING_ONLY=0
+        SKIPPED_STUB_COUNT=0
+        cmd_status_json
+    )
+    check_contains "JSON status keeps an unavailable gain unknown" \
+        '"name":"Unmeasured","path":"/games/unmeasured","status":"UNCOMPRESSED","size_bytes":1048576,"size_display":"1.0M","expected_gain_mib":null' "$status_json"
+    check_contains "JSON status preserves a measured zero gain" \
+        '"name":"Measured zero","path":"/games/measured-zero","status":"UPDATED","size_bytes":1048576,"size_display":"1.0M","expected_gain_mib":0' "$status_json"
+
     # Migration from the old name-keyed formats. This is the regression that cost
     # a whole library its history: records keyed by name were silently discarded,
     # so every game looked uncompressed again. They are now matched to a path.
@@ -945,6 +965,7 @@ json_out=$("$PROG" --status --json --no-color 2>/dev/null)
 check_contains "JSON status contains full game names" '"name":"GoodGame"' "$json_out"
 check_contains "JSON status preserves library paths with spaces" "\"path\":\"$L/GoodGame\"" "$json_out"
 check_contains "JSON status includes machine-sized byte counts" '"size_bytes":' "$json_out"
+check_contains "JSON status reports a locally predicted gain" '"expected_gain_mib":25' "$json_out"
 check_contains "JSON status reports pending deduplication" '"dedupe_pending":true' "$json_out"
 check_contains "JSON summary counts low-yield pending dedupe" '"pending":2' "$json_out"
 if command -v python3 >/dev/null 2>&1; then
