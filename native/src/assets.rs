@@ -18,6 +18,11 @@ use std::{
         unix::fs::{MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc::sync_channel,
+    },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -1196,6 +1201,126 @@ fn is_unity_tree_container(path: &Path) -> bool {
     })
 }
 
+/// Decode and transform a single candidate file. Returns the replacement bytes
+/// and its asset kind, or `None` when the file is not a supported or reducible
+/// candidate. This only reads the file and touches no shared state, so it can
+/// run on multiple worker threads. `BGC_ASSET_WORKERS` overrides the thread
+/// count; the default is capped to bound peak decode memory.
+fn prepare_candidate(path: &Path, p: &Profile) -> io::Result<Option<(AssetKind, Vec<u8>)>> {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("fsb") | Some("bank") => {
+            // Unlike embedded .resource slices, standalone FMOD banks can be
+            // rebuilt without touching Unity/Unreal serialized offsets. Keep
+            // per-file work bounded; no unsafe signature scanning.
+            let m = fs::symlink_metadata(path)?;
+            if m.len() <= 256 * 1024 * 1024 {
+                return Ok(super::fmod::prepare(path, p.audio_target)?
+                    .map(|new| (AssetKind::Audio, new)));
+            }
+            Ok(None)
+        }
+        Some("pkg") => Ok(super::packages::prepare(path)?
+            .map(|new| (AssetKind::Package, new))),
+        Some("wav") => Ok(resample_wav(path, p)?.map(|new| (AssetKind::Audio, new))),
+        _ => Ok(prepare(path, p)?.map(|new| {
+            let kind = if extension.as_deref() == Some("dds") {
+                AssetKind::Texture
+            } else {
+                AssetKind::Image
+            };
+            (kind, new)
+        })),
+    }
+}
+
+fn worker_count() -> usize {
+    if let Some(requested) = std::env::var_os("BGC_ASSET_WORKERS") {
+        if let Some(n) = requested.to_str().and_then(|s| s.parse::<usize>().ok()) {
+            if n > 0 {
+                return n.min(64);
+            }
+        }
+    }
+    thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 8)
+}
+
+/// Decode candidates on a bounded worker pool while the visitor runs on this
+/// thread, preserving apply's single-writer ordering. The result channel is
+/// bounded so decoded buffers cannot accumulate without limit.
+fn process_candidates(
+    candidates: &[PathBuf],
+    p: &Profile,
+    visit: &mut impl FnMut(PathBuf, Vec<u8>, AssetKind) -> io::Result<()>,
+) -> io::Result<()> {
+    let workers = worker_count().min(candidates.len().max(1));
+    let next = AtomicUsize::new(0);
+    let (result_tx, result_rx) =
+        sync_channel::<(usize, io::Result<Option<(AssetKind, Vec<u8>)>>)>(workers);
+    let verbose = std::env::var_os("BGC_VERBOSE").is_some();
+    let mut failure: Option<io::Error> = None;
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            let result_tx = result_tx.clone();
+            let next = &next;
+            scope.spawn(move || loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(path) = candidates.get(index) else {
+                    break;
+                };
+                if super::cancelled().is_err() {
+                    let _ = result_tx.send((
+                        index,
+                        Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "operation interrupted",
+                        )),
+                    ));
+                    break;
+                }
+                if result_tx.send((index, prepare_candidate(path, p))).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(result_tx);
+        while let Ok((index, outcome)) = result_rx.recv() {
+            let path = &candidates[index];
+            match outcome {
+                Ok(Some((kind, bytes))) => {
+                    if let Err(e) = visit(path.clone(), bytes, kind) {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                    failure = Some(e);
+                    break;
+                }
+                Err(e) => {
+                    if verbose {
+                        eprintln!("Skipping {}: {e}", path.display());
+                    }
+                }
+            }
+        }
+        // On early exit, close the receiver so workers blocked on send observe
+        // the closed channel and finish instead of deadlocking the join.
+        drop(result_rx);
+    });
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 fn collect(
     root: &Path,
     p: &Profile,
@@ -1209,6 +1334,7 @@ fn collect(
     let mut last_progress = Instant::now();
     let show_progress = std::env::var_os("BGC_ASSET_PROGRESS").is_some();
     let mut progress_entries = 0u64;
+    let mut candidates: Vec<PathBuf> = Vec::new();
     while let Some(dir) = dirs.pop() {
         super::cancelled()?;
         for entry in fs::read_dir(&dir)? {
@@ -1266,78 +1392,18 @@ fn collect(
             if root.join(BACKUP).join(rel).exists() {
                 continue;
             }
-            if !prepare_candidates || is_unity_tree_container(&path) { continue; }
-            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fsb") || e.eq_ignore_ascii_case("bank")) {
-                // Unlike embedded .resource slices, standalone FMOD banks can
-                // be rebuilt without touching Unity/Unreal serialized offsets.
-                // Keep per-file work bounded; no unsafe signature scanning.
-                if m.len() <= 256 * 1024 * 1024 {
-                    match super::fmod::prepare(&path, p.audio_target) {
-                        Ok(Some(new)) => visit(path, new, AssetKind::Audio)?,
-                        Ok(None) => {},
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
-                        Err(e) => {
-                            if std::env::var_os("BGC_VERBOSE").is_some() {
-                                eprintln!("Skipping standalone FMOD audio {}: {e}", path.display());
-                            }
-                        }
-                    }
-                }
+            if !prepare_candidates || is_unity_tree_container(&path) {
                 continue;
             }
-            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pkg")) {
-                match super::packages::prepare(&path) {
-                    Ok(Some(new)) => visit(path, new, AssetKind::Package)?,
-                    Ok(None) => {}
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
-                    Err(e) => {
-                        if std::env::var_os("BGC_VERBOSE").is_some() {
-                            eprintln!("Skipping package {}: {e}", path.display());
-                        }
-                    }
-                }
-                continue;
-            }
-            if path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
-            {
-                match resample_wav(&path, p) {
-                    Ok(Some(new)) => visit(path, new, AssetKind::Audio)?,
-                    Ok(None) => {}
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
-                    Err(e) if std::env::var_os("BGC_VERBOSE").is_some() => {
-                        eprintln!("Skipping WAV {}: {e}", path.display())
-                    }
-                    Err(_) => {}
-                }
-                continue;
-            }
-            match prepare(&path, p) {
-                Ok(Some(new)) => {
-                    let kind = if path
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("dds"))
-                    {
-                        AssetKind::Texture
-                    } else {
-                        AssetKind::Image
-                    };
-                    visit(path, new, kind)?;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    if e.kind() == io::ErrorKind::Interrupted {
-                        return Err(e);
-                    }
-                    if std::env::var_os("BGC_VERBOSE").is_some() {
-                        eprintln!("Skipping image {}: {e}", path.display());
-                    }
-                }
-            }
+            // Decoding is deferred to the bounded worker pool below so one
+            // expensive candidate cannot stall the whole scan.
+            candidates.push(path);
         }
     }
+    if candidates.is_empty() {
+        return Ok(inventory);
+    }
+    process_candidates(&candidates, p, &mut visit)?;
     Ok(inventory)
 }
 fn walk_backups(root: &Path) -> io::Result<Vec<PathBuf>> {
