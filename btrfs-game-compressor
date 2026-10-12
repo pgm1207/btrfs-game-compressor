@@ -4790,6 +4790,13 @@ cmd_dry_run() {
                 printf 'dedupe only    %-40s %-14s %10s (compression held: low yield)\n' "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}"
                 continue
             fi
+            if low_yield_filter_disabled; then
+                n=$((n + 1))
+                fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
+                printf 'would compress  %-40s %-14s %10s (low-yield gate disabled)\n' \
+                    "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}"
+                continue
+            fi
             n_low=$(( n_low + 1 ))
             fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
             printf 'skipping       %-40s %-14s %10s ~%s expected\n' \
