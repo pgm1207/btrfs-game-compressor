@@ -326,6 +326,35 @@ fn inspect_fields(nodes: &[Node], bytes: &[u8], big: bool, spans: bool) -> io::R
         spans: r.spans.unwrap_or_default(), image_count, dimension })
 }
 
+/// Borrow the inline image payload bytes a captured `image data` span points at.
+/// The span's `payload` offset is object-relative; the returned slice only
+/// borrows already-decoded object bytes. This never copies, decodes, re-encodes
+/// or writes, and it refuses a span whose declared length disagrees with the
+/// parsed texture, a missing span or an out-of-bounds extent. It does not imply
+/// the payload is a valid image or that the object is safe to edit.
+pub fn inline_image<'a>(fields: &TextureFields, object: &'a [u8]) -> io::Result<&'a [u8]> {
+    let span = fields
+        .spans
+        .get("image data")
+        .or_else(|| fields.spans.get("image data/Array"))
+        .ok_or_else(|| bad("missing Unity inline image span"))?;
+    if span.kind != "LENGTH_PREFIXED_BYTES" {
+        return Err(bad("Unity inline image span has an unexpected kind"));
+    }
+    let (offset, len) = span
+        .payload
+        .ok_or_else(|| bad("Unity inline image span has no payload"))?;
+    if len == 0 || len != fields.texture.inline_bytes {
+        return Err(bad("Unity inline image span disagrees with the texture length"));
+    }
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| bad("Unity inline image extent overflow"))?;
+    object
+        .get(offset..end)
+        .ok_or_else(|| bad("Unity inline image payload is out of bounds"))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -442,5 +471,43 @@ pub(crate) mod tests {
         inline[32..36].copy_from_slice(&0u32.to_le_bytes()); // external size after four bytes of inline storage
         assert_eq!(inspect_texture(&tree, &inline, false).unwrap().inline_bytes, 3);
         inline[16..20].copy_from_slice(&u32::MAX.to_le_bytes()); assert!(inspect_texture(&tree, &inline, false).is_err());
+    }
+    #[test]
+    fn inline_image_borrows_only_the_declared_payload_and_fails_closed() {
+        let (raw, strings, bytes) = fixture(false);
+        let mut tree = parse(&raw, &strings, 32, false).unwrap();
+        tree[5].kind = "vector".to_owned(); tree[5].align = false;
+        tree.splice(6..6, [
+            Node { kind: "Array".into(), name: "Array".into(), size: -1, align: true, level: 2, end: 0 },
+            Node { kind: "int".into(), name: "size".into(), size: 4, align: false, level: 3, end: 0 },
+            Node { kind: "UInt8".into(), name: "data".into(), size: 1, align: false, level: 3, end: 0 },
+        ]);
+        for i in 0..tree.len() { tree[i].end = (i + 1..tree.len()).find(|&j| tree[j].level <= tree[i].level).unwrap_or(tree.len()); }
+        let mut object = bytes[..16].to_vec();
+        object.extend(3u32.to_le_bytes());
+        object.extend([7, 8, 9, 0]);
+        object.extend(&bytes[20..]);
+        object[32..36].copy_from_slice(&0u32.to_le_bytes());
+        let fields = inspect_texture_fields(&tree, &object, false).unwrap();
+        assert_eq!(fields.texture.inline_bytes, 3);
+        assert_eq!(inline_image(&fields, &object).unwrap(), &[7, 8, 9]);
+        // Metadata-only inspection captures no span, so the payload cannot be located.
+        let metadata_only = TextureFields { texture: inspect_texture(&tree, &object, false).unwrap(),
+            spans: BTreeMap::new(), image_count: None, dimension: None };
+        assert!(inline_image(&metadata_only, &object).is_err());
+        // A truncated object that cuts into the payload is refused, not read past its end.
+        assert!(inline_image(&fields, &object[..21]).is_err());
+        // A declared length larger than the remaining object is refused.
+        let mut oversized = object.clone();
+        oversized[16..20].copy_from_slice(&(object.len() as u32).to_le_bytes());
+        assert!(inspect_texture_fields(&tree, &oversized, false).is_err());
+        // A span whose declared payload length disagrees with the texture is refused
+        // rather than silently borrowing a different extent.
+        let mut spans = BTreeMap::new();
+        spans.insert("image data".to_owned(), FieldSpan {
+            start: 16, end: 24, kind: "LENGTH_PREFIXED_BYTES", payload: Some((20, 5)) });
+        let disagreeing = TextureFields { texture: inspect_texture(&tree, &object, false).unwrap(),
+            spans, image_count: None, dimension: None };
+        assert!(inline_image(&disagreeing, &object).is_err());
     }
 }

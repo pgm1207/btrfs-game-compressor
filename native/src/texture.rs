@@ -134,15 +134,15 @@ fn legacy_fourcc(format: ImageFormat) -> Option<[u8; 4]> {
     })
 }
 
-struct Parsed {
-    format: ImageFormat,
-    width: u32,
-    height: u32,
-    mipmaps: u32,
-    data_start: usize,
+pub(crate) struct Parsed {
+    pub(crate) format: ImageFormat,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) mipmaps: u32,
+    pub(crate) data_start: usize,
 }
 
-fn parse(bytes: &[u8]) -> io::Result<Parsed> {
+pub(crate) fn parse(bytes: &[u8]) -> io::Result<Parsed> {
     if bytes.len() < 128 || &bytes[..4] != b"DDS " || u32_at(bytes, 4) != 124 {
         return Err(bad("not a DDS file"));
     }
@@ -204,7 +204,7 @@ fn parse(bytes: &[u8]) -> io::Result<Parsed> {
 
 /// Build a DDS container from an encoded surface. Legacy fourcc is used where it
 /// exists; everything else is written as a DX10 2D texture.
-fn build_dds<T: AsRef<[u8]>>(surface: &Surface<T>) -> io::Result<Vec<u8>> {
+pub(crate) fn build_dds<T: AsRef<[u8]>>(surface: &Surface<T>) -> io::Result<Vec<u8>> {
     let mip0 = mip_size(surface.image_format, surface.width, surface.height)
         .ok_or_else(|| bad("cannot size the encoded texture"))?;
     if mip0 > u32::MAX as u64 {

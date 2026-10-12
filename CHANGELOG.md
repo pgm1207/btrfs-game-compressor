@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Development routes
+
+- Add the gated, export-only `unityfs-texture-export NODE_INDEX:PATH_ID INPUT
+  OUTPUT` route. It writes a standalone DDS from one ordinary **inline** Unity
+  SerializedFile Texture2D (RGBA32/BGRA32/DXT1/DXT5/BC4/BC5/BC7) selected by an
+  explicit bundle node index plus the original 64-bit path ID. The inline payload
+  is copied verbatim; the artifact is published atomically (no-replace) and
+  re-parsed with the same DDS parser, then its base mip is decoded as a
+  self-consistency check. Streamed `.resS` textures, cubes/arrays/volumes,
+  unknown formats and ambiguous identities are refused rather than guessed; the
+  source is never modified and no bundle/object table/catalogue/CRC is rebuilt.
+  Requires the `development-audits` Cargo feature; no installed apply and no
+  automatic routing. Verified on a real game bundle (1024x1024 DXT1, source
+  sha256-unchanged); runtime/atlas compatibility is not claimed.
+
 ## 0.3.1 — 2026-10-08 — Recovery hardening, measurement and DDS quality
 
 This maintenance release contains the changes listed below. The release artifacts

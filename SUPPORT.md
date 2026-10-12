@@ -78,7 +78,8 @@ no new containment guarantee is claimed until its deferred validation passes.
 **Local development note:** native-only readers for XNB textures, VTF/VPK,
 GameMaker FORM, Godot 4 audio, richer Unity bundle fields/references and IoStore
 addressing have isolated build, fixture and selected copied-file checks. A
-bounded XNB v5 Texture2D **detached lossy exporter** is also available in local
+bounded XNB v5 Texture2D **detached lossy exporter** and a bounded **detached
+inline Unity Texture2D exporter** are also available in local
 `development-audits` builds. It has no installed apply route or runtime
 compatibility claim. These routes are disabled in normal builds, are not
 automatic, and are not included in the tested support table.

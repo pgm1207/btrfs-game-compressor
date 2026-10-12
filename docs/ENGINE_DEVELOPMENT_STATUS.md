@@ -49,6 +49,7 @@ The tested guard is a local development result, not a release guarantee.
 | `vpk-audit FILE` | `native/src/vpk.rs` | Standard Valve v1/v2 tree, preload extents, embedded data bounds, declared numbered-archive requirements and extension totals | Numbered archive bytes, CRC/MD5/signatures, entry payloads, custom Respawn VPK, Source 2 compiled resources, repacking |
 | `gamemaker-audit FILE` | `native/src/gamemaker.rs` | Exact FORM chunk framing; GEN8/STRG markers as a candidate, TXTR/TPAG candidate count/pointer bounds and alias/null/cross-chunk risks | Runtime/version detection, pointer-object schemas, page pixels, atlas coordinates, external texture groups, sprites/fonts/code/audio |
 | `unityfs-texture-inventory FILE` | `native/src/unityfs.rs`, `unity_serialized.rs`, `unity_tree.rs` | Supported bundle directory/blocks; selected SerializedFile nodes; bounded Texture2D values and selected original field spans; retained external identities, object table/ranges, same-bundle stream bounds and alias/overlap summaries | Stripped/unknown trees, unresolved external PPtrs, Sprite/SpriteAtlas/mesh ownership, purpose/color/alpha checks, texture decode, object/bundle rebuilding and catalog/provider integrity |
+| `unityfs-texture-export NODE_INDEX:PATH_ID INPUT OUTPUT` | `native/src/unityfs.rs`, `unity_tree.rs`, `texture.rs` | Development-only detached export of one ordinary inline 2D Texture2D (RGBA32/BGRA32/DXT1/DXT5/BC4/BC5/BC7) into a standalone DDS; explicit bundle node index plus the original 64-bit path ID; the inline payload is copied verbatim; the written DDS is re-parsed with the same parser and its base mip decoded as a self-consistency check | Streamed `.resS` textures, cubes/arrays/volumes, unknown formats, other codecs, Sprite/atlas ownership, bundle/object-table/catalogue/CRC rebuild, installed apply and runtime compatibility |
 | `iostore-index-audit FILE` | `native/src/iostore_index.rs` | Unsigned/unencrypted v3–8 addressing tables, chunk IDs, block/method/partition declarations, perfect-hash table framing and directory/metadata section bounds | Perfect-hash lookup verification, directory contents, chunk hashes, `.ucas` opening, decompression, Zen/package schemas, proprietary codecs and repacking |
 | `godot4-audio-audit FILE` | `native/src/godot4_audio.rs` | Standalone little-endian Godot 4.3 RSRC format 6 tables/identities; one reference-free AudioStreamWAV; allowlisted property variants, PCM frame alignment and loop bounds | RSCC, other versions, big-endian/real64, unknown properties, scripts/external/multiple resources, Vorbis packet sequences, ADPCM/QOA frame parsing, audio decode and PCK audio writing |
 
@@ -143,7 +144,8 @@ provisional and untested, and does not prove that an opaque object is safe.
 - Godot ADPCM/QOA data sizes are not inferred decoded frames. Even PCM byte/frame
   arithmetic does not establish waveform validity or loop playback semantics.
 
-Only the bounded XNB subset has a **detached development export**. No draft has
+Only the bounded XNB and inline Unity Texture2D subsets have **detached
+development exports**. No draft has
 an installed writer or automatic routing. Existing beta writers, support levels,
 release numbers and the paused compaction journal are unchanged.
 The local package recipe now includes `SUPPORT.md` and `docs/` alongside the

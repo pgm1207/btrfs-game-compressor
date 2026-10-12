@@ -10,6 +10,7 @@ const COMMANDS: &[&str] = &[
     "unityfs-texture-inventory", "iostore-index-audit", "godot4-audio-audit",
 ];
 const XNB_EXPORT: &str = "xnb-texture-export";
+const UNITYFS_TEXTURE_EXPORT: &str = "unityfs-texture-export";
 
 pub fn dispatch(args: &[OsString]) -> Option<io::Result<()>> {
     let command = args.first()?.to_str()?;
@@ -21,13 +22,15 @@ pub fn dispatch(args: &[OsString]) -> Option<io::Result<()>> {
         println!("Development reader routes: {}", if cfg!(feature = "development-audits") { "compiled in" } else { "disabled" });
         for name in COMMANDS { println!("  {name} FILE"); }
         println!("  {XNB_EXPORT} MAX_EDGE INPUT OUTPUT (detached experimental export)");
+        println!("  {UNITYFS_TEXTURE_EXPORT} NODE_INDEX:PATH_ID INPUT OUTPUT (detached experimental export)");
         println!("Draft routes require the development-audits Cargo feature; no installed apply or automatic routing.");
         println!("The XNB export decodes and re-encodes BC pixels; audits do not certify runtime compatibility.");
         println!("Detached XNB publication requires O_TMPFILE and /proc/self/fd; use a trusted research output directory.");
         return Some(Ok(()));
     }
-    if !COMMANDS.contains(&command) && command != XNB_EXPORT { return None; }
-    if args.len() != if command == XNB_EXPORT { 4 } else { 2 } {
+    if !COMMANDS.contains(&command) && command != XNB_EXPORT && command != UNITYFS_TEXTURE_EXPORT { return None; }
+    let arity = if command == XNB_EXPORT || command == UNITYFS_TEXTURE_EXPORT { 4 } else { 2 };
+    if args.len() != arity {
         return Some(Err(super::invalid("invalid development command arguments; use --development-audits for the draft command list")));
     }
     #[cfg(not(feature = "development-audits"))]
@@ -51,6 +54,14 @@ pub fn dispatch(args: &[OsString]) -> Option<io::Result<()>> {
                     .ok_or_else(|| super::invalid("invalid XNB maximum edge"));
                 edge.and_then(|edge| super::xnb::texture_export(edge, Path::new(&args[2]), Path::new(&args[3])))
             }
+            UNITYFS_TEXTURE_EXPORT => (|| -> io::Result<()> {
+                let key = args[1].to_str().ok_or_else(|| super::invalid("invalid Unity texture key"))?;
+                let (node, id) = key.split_once(':')
+                    .ok_or_else(|| super::invalid("Unity texture key must be NODE_INDEX:PATH_ID"))?;
+                let node = node.parse::<usize>().map_err(|_| super::invalid("invalid Unity bundle node index"))?;
+                let id = id.parse::<u64>().map_err(|_| super::invalid("invalid Unity path ID"))?;
+                super::unityfs::texture_export(node, id, Path::new(&args[2]), Path::new(&args[3]))
+            })(),
             _ => Err(super::invalid("unknown development reader command")),
         })
     }
@@ -64,7 +75,7 @@ mod tests {
     fn argument_checks_and_unknown_commands_do_not_route_to_sources() {
         assert!(dispatch(&[]).is_none());
         assert!(dispatch(&[OsString::from("not-a-development-command")]).is_none());
-        for command in COMMANDS.iter().copied().chain(std::iter::once(XNB_EXPORT)) {
+        for command in COMMANDS.iter().copied().chain([XNB_EXPORT, UNITYFS_TEXTURE_EXPORT]) {
             let error = dispatch(&[OsString::from(command)]).unwrap().unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
@@ -81,6 +92,9 @@ mod tests {
             assert_eq!(dispatch(&args).unwrap().unwrap_err().kind(), io::ErrorKind::Unsupported);
         }
         let args = [OsString::from(XNB_EXPORT), OsString::from("not-a-number"),
+            OsString::from("/nonexistent-bgc-guard-input"), OsString::from("/nonexistent-bgc-guard-output")];
+        assert_eq!(dispatch(&args).unwrap().unwrap_err().kind(), io::ErrorKind::Unsupported);
+        let args = [OsString::from(UNITYFS_TEXTURE_EXPORT), OsString::from("0:1"),
             OsString::from("/nonexistent-bgc-guard-input"), OsString::from("/nonexistent-bgc-guard-output")];
         assert_eq!(dispatch(&args).unwrap().unwrap_err().kind(), io::ErrorKind::Unsupported);
     }

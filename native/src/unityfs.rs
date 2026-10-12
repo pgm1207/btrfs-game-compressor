@@ -313,6 +313,123 @@ fn texture_bytes(t: &crate::unity_tree::Texture) -> io::Result<Option<u64>> {
     Ok(Some(total))
 }
 
+/// Development-only detached export of one inline Unity SerializedFile
+/// Texture2D into a standalone DDS. Selection is explicit: `node_index` is the
+/// bundle directory node index and `path_id` the original 64-bit object path ID.
+/// Only an ordinary 2D image (`m_ImageCount` 1, `m_TextureDimension` 2) with
+/// inline storage and a known codec/mip shape is accepted. Streamed textures,
+/// unknown formats, ambiguous identities and non-SerializedFile nodes are
+/// refused rather than guessed. The source is never modified, and no bundle,
+/// object table, atlas reference or catalogue/CRC integrity is rebuilt or
+/// claimed. The inline payload is copied verbatim; no decode/re-encode occurs.
+#[cfg(any(test, feature = "development-audits"))]
+pub fn texture_export(node_index: usize, path_id: u64, input: &Path, output: &Path) -> io::Result<()> {
+    use crate::audit_io::Source;
+    use image_dds::Surface;
+    match std::fs::symlink_metadata(output) {
+        Ok(_) => return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Unity texture export destination exists")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error),
+    }
+    let mut source = Source::open(input, MAX_TEXTURE_BUNDLE, MAX_TEXTURE_BUNDLE + 64 * 1024 * 1024)?;
+    let bytes = source.read_at(0, source.len() as usize)?;
+    let bundle = parse(&bytes)?;
+    if bundle.decoded > MAX_TEXTURE_BUNDLE || bundle.nodes.len() > MAX_TEXTURE_NODES {
+        return Err(invalid("Unity texture export exceeds its 128 MiB/4096-node work limit"));
+    }
+    let mut node_extents = Vec::new();
+    for node in &bundle.nodes {
+        if node.size != 0 { node_extents.push((node.offset, node.offset + node.size)); }
+    }
+    node_extents.sort_unstable();
+    if node_extents.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+        return Err(invalid("Unity texture export refuses aliased/overlapping bundle nodes"));
+    }
+    let Some(node) = bundle.nodes.get(node_index) else {
+        return Err(invalid("Unity bundle node index is out of range"));
+    };
+    // Directory flag 4 (1 << 2) designates SerializedFiles in this subset.
+    if node.flags != 4 { return Err(invalid("selected Unity node is not a SerializedFile (flags != 4)")); }
+    if node.size > 64 * 1024 * 1024 { return Err(invalid("selected Unity SerializedFile exceeds the 64 MiB node limit")); }
+    let mut decoder = NodeDecoder::new(&bytes, &bundle);
+    let slice = decoder.read(node.offset, node.size)?;
+    if !crate::unity_serialized::plausible(&slice) {
+        return Err(invalid("selected Unity node is not a supported SerializedFile header"));
+    }
+    let mut metadata_budget = 32u64 * 1024 * 1024;
+    let mut object_budget = 64u64 * 1024 * 1024;
+    let mut report_budget = 10000u64;
+    let inventory = crate::unity_serialized::bundle_texture_inventory(
+        &slice, &mut metadata_budget, &mut object_budget, &mut report_budget)?;
+    let mut matched = inventory.details.iter().filter(|(id, _)| *id == path_id);
+    let Some((_, fields)) = matched.next() else {
+        let reason = inventory.opaque.iter().find(|(id, _)| *id == path_id)
+            .map(|(_, status)| *status)
+            .unwrap_or("NOT_A_RETAINED_METADATA_TEXTURE_OBJECT");
+        return Err(invalid(&format!("Unity path ID {path_id} has no supported inline texture ({reason})")));
+    };
+    if matched.next().is_some() {
+        return Err(invalid("Unity path ID matches more than one retained texture object"));
+    }
+    let record = inventory.object_records.iter().find(|record| record.id == path_id)
+        .ok_or_else(|| invalid("Unity texture object record was not retained"))?;
+    let texture = &fields.texture;
+    if fields.image_count != Some(1) || fields.dimension != Some(2) {
+        return Err(invalid("Unity texture export requires m_ImageCount 1 and m_TextureDimension 2"));
+    }
+    if texture.stream_size != 0 {
+        return Err(invalid("Unity texture export supports only inline storage, not .resS streams"));
+    }
+    if texture.inline_bytes == 0 { return Err(invalid("Unity texture has no inline payload")); }
+    let format = match texture.format {
+        4 => image_dds::ImageFormat::Rgba8Unorm,
+        14 => image_dds::ImageFormat::Bgra8Unorm,
+        10 => image_dds::ImageFormat::BC1RgbaUnorm,
+        12 => image_dds::ImageFormat::BC3RgbaUnorm,
+        26 => image_dds::ImageFormat::BC4RUnorm,
+        25 => image_dds::ImageFormat::BC7RgbaUnorm,
+        27 => image_dds::ImageFormat::BC5RgUnorm,
+        other => return Err(invalid(&format!("Unity texture format {other} is outside the export subset"))),
+    };
+    match texture_bytes(texture)? {
+        Some(expected) if expected == texture.inline_bytes as u64 => {}
+        _ => return Err(invalid("Unity inline payload length disagrees with its known mip shape")),
+    }
+    let start = record.start as usize;
+    let end = start.checked_add(record.size as usize).ok_or_else(|| invalid("Unity object extent overflow"))?;
+    let object = slice.get(start..end)
+        .ok_or_else(|| invalid("Unity texture object is outside its SerializedFile node"))?;
+    let payload = crate::unity_tree::inline_image(fields, object)?;
+    let surface = Surface { width: texture.width, height: texture.height, depth: 1,
+        layers: 1, mipmaps: texture.mips, image_format: format, data: payload };
+    let candidate = crate::texture::build_dds(&surface)?;
+    // Re-parse the immutable candidate with the same DDS parser, then decode its
+    // base mip. This checks internal self-consistency only, not independent
+    // parser agreement, atlas references or runtime compatibility.
+    let check = crate::texture::parse(&candidate)?;
+    if check.width != texture.width || check.height != texture.height || check.mipmaps != texture.mips
+        || check.format != format || &candidate[check.data_start..] != payload {
+        return Err(invalid("Unity DDS export failed its self-check"));
+    }
+    {
+        let decoded = Surface { width: texture.width, height: texture.height, depth: 1,
+            layers: 1, mipmaps: texture.mips, image_format: format, data: &candidate[check.data_start..] }
+            .decode_rgba8()
+            .map_err(|error| invalid(&format!("Unity exported texture decode failed: {error}")))?;
+        if decoded.width != texture.width || decoded.height != texture.height
+            || decoded.depth != 1 || decoded.layers != 1 {
+            return Err(invalid("Unity exported texture decoded to an unexpected shape"));
+        }
+    }
+    super::detached_export::publish(output, &candidate, || source.unchanged())?;
+    println!("UNITYFS_TEXTURE_EXPORT|{node_index}|{path_id}|{}|{}|{}|{}|{}|{}|{}|EXPORTED",
+        texture.width, texture.height, texture.format,
+        crate::unity_tree::format_name(texture.format), texture.mips,
+        payload.len(), candidate.len());
+    eprintln!("Experimental detached Unity texture export: source unchanged; verbatim inline payload only. Streamed/atlas/catalogue/CRC rebuild and runtime compatibility are unverified.");
+    Ok(())
+}
+
 /// Resolve only exact same-bundle names and one explicitly constrained archive
 /// namespace. Never strip a basename, consult the host filesystem or infer that
 /// a missing companion belongs to a different bundle/player directory.
@@ -754,6 +871,123 @@ mod tests {
             format: 28, mips: 2, inline_bytes: 0, stream_offset: 0, stream_size: 0,
             stream_path: String::new() };
         assert_eq!(texture_bytes(&unknown).unwrap(), None); // Crunch is not ordinary BC1 data.
+    }
+    fn put32(b: &mut Vec<u8>, v: u32) { b.extend_from_slice(&v.to_le_bytes()); }
+    fn put64(b: &mut Vec<u8>, v: u64) { b.extend_from_slice(&v.to_le_bytes()); }
+    /// A Texture2D type tree with explicit single-image/2D shape metadata.
+    fn texture_tree() -> (Vec<u8>, Vec<u8>) {
+        let specs = [
+            (0, "Texture2D", "Base", -1, 0),
+            (1, "int", "m_Width", 4, 0), (1, "int", "m_Height", 4, 0),
+            (1, "int", "m_TextureFormat", 4, 0), (1, "int", "m_MipCount", 4, 0),
+            (1, "int", "m_ImageCount", 4, 0), (1, "int", "m_TextureDimension", 4, 0),
+            (1, "TypelessData", "image data", -1, 0x4000),
+            (1, "StreamingInfo", "m_StreamData", -1, 0),
+            (2, "UInt64", "offset", 8, 0), (2, "UInt32", "size", 4, 0),
+            (2, "string", "path", -1, 0x4000),
+        ];
+        let mut strings = Vec::new(); let mut raw = Vec::new();
+        for (level, kind, name, size, flags) in specs {
+            let k = strings.len() as u32; strings.extend(kind.as_bytes()); strings.push(0);
+            let n = strings.len() as u32; strings.extend(name.as_bytes()); strings.push(0);
+            let mut node = vec![0; 32]; node[2] = level;
+            for (off, value) in [(4, k), (8, n), (12, size as u32), (20, flags)] {
+                node[off..off + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            raw.extend(node);
+        }
+        (raw, strings)
+    }
+    fn inline_object(width: u32, height: u32, format: u32, mips: u32, payload: &[u8]) -> Vec<u8> {
+        let mut o = Vec::new();
+        for v in [width, height, format, mips, 1, 2] { o.extend_from_slice(&v.to_le_bytes()); }
+        o.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        o.extend_from_slice(payload);
+        o.extend_from_slice(&0u64.to_le_bytes()); // stream offset
+        o.extend_from_slice(&0u32.to_le_bytes()); // stream size (inline only)
+        o.extend_from_slice(&0u32.to_le_bytes()); // stream path length
+        while o.len() % 4 != 0 { o.push(0); }
+        o
+    }
+    /// One v22 little-endian SerializedFile with a single Texture2D object (id 123).
+    fn serialized_inline_texture(object: &[u8]) -> Vec<u8> {
+        let (raw, strings) = texture_tree();
+        let mut m = b"2022.3.0f1\0".to_vec();
+        put32(&mut m, 19); m.push(1); put32(&mut m, 1);
+        put32(&mut m, 28); m.push(0); m.extend([255; 2]); m.extend([0; 16]);
+        put32(&mut m, (raw.len() / 32) as u32); put32(&mut m, strings.len() as u32);
+        m.extend(&raw); m.extend(&strings);
+        put32(&mut m, 0); // dependencies
+        put32(&mut m, 1); while m.len() % 4 != 0 { m.push(0); }
+        put64(&mut m, 123); put64(&mut m, 0); put32(&mut m, object.len() as u32); put32(&mut m, 0);
+        for _ in 0..3 { put32(&mut m, 0); } m.push(0);
+        let data = (48 + m.len() as u64).div_ceil(16) * 16;
+        let mut sf = vec![0u8; 48];
+        sf[8..12].copy_from_slice(&22u32.to_be_bytes());
+        sf[20..24].copy_from_slice(&(m.len() as u32).to_be_bytes());
+        sf[24..32].copy_from_slice(&(data + object.len() as u64).to_be_bytes());
+        sf[32..40].copy_from_slice(&data.to_be_bytes());
+        sf.extend(&m); sf.resize(data as usize, 0); sf.extend(object);
+        sf
+    }
+    /// A stored UnityFS bundle whose single node is a flag-4 SerializedFile.
+    fn bundle_with_serialized(data: &[u8]) -> Vec<u8> {
+        let mut info = vec![0; 16];
+        info.extend_from_slice(&1u32.to_be_bytes());
+        info.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        info.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        info.extend_from_slice(&0u16.to_be_bytes()); // stored block
+        info.extend_from_slice(&1u32.to_be_bytes());
+        info.extend_from_slice(&0u64.to_be_bytes());
+        info.extend_from_slice(&(data.len() as u64).to_be_bytes());
+        info.extend_from_slice(&4u32.to_be_bytes()); // SerializedFile directory flag
+        info.extend_from_slice(b"CAB-test\0");
+        let mut b = b"UnityFS\0".to_vec();
+        b.extend_from_slice(&8u32.to_be_bytes());
+        b.extend_from_slice(b"5.x.x\02021.3.45f1\0"); let fields = b.len();
+        b.extend_from_slice(&0u64.to_be_bytes()); b.extend_from_slice(&(info.len() as u32).to_be_bytes());
+        b.extend_from_slice(&(info.len() as u32).to_be_bytes()); b.extend_from_slice(&0x40u32.to_be_bytes());
+        b.resize(align(b.len()).unwrap(), 0);
+        b.extend_from_slice(&info);
+        b.extend_from_slice(data);
+        let size = b.len() as u64; b[fields..fields + 8].copy_from_slice(&size.to_be_bytes()); b
+    }
+    #[test]
+    fn inline_texture_exports_verbatim_payload_to_verified_dds() {
+        let payload: Vec<u8> = (0..256u32).map(|i| (i * 7 % 251) as u8).collect();
+        let object = inline_object(8, 8, 4, 1, &payload);
+        let bundle = bundle_with_serialized(&serialized_inline_texture(&object));
+        let root = std::env::temp_dir().join(format!("bgc-unitytex-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&root).unwrap();
+        let input = root.join("bundle"); fs::write(&input, &bundle).unwrap();
+        let output = root.join("texture.dds");
+        texture_export(0, 123, &input, &output).unwrap();
+        // The source bundle is never rewritten, and the artifact is a valid DDS
+        // whose payload is the verbatim inline bytes.
+        assert_eq!(fs::read(&input).unwrap(), bundle);
+        let dds = fs::read(&output).unwrap();
+        let parsed = crate::texture::parse(&dds).unwrap();
+        assert_eq!((parsed.width, parsed.height, parsed.mipmaps), (8, 8, 1));
+        assert_eq!(&dds[parsed.data_start..], &payload[..]);
+        // Never overwrites an existing destination, and refuses unknown identity
+        // or a non-SerializedFile node instead of guessing.
+        assert!(texture_export(0, 123, &input, &output).is_err());
+        assert!(texture_export(0, 999, &input, &root.join("other.dds")).is_err());
+        assert!(texture_export(1, 123, &input, &root.join("other2.dds")).is_err());
+        // A streamed variant (no inline payload, non-empty stream extent) is refused.
+        let mut streamed = Vec::new();
+        for v in [8u32, 8, 4, 1, 1, 2] { streamed.extend_from_slice(&v.to_le_bytes()); }
+        streamed.extend_from_slice(&0u32.to_le_bytes()); // inline length 0
+        streamed.extend_from_slice(&0u64.to_le_bytes()); // stream offset
+        streamed.extend_from_slice(&4u32.to_le_bytes()); // stream size
+        streamed.extend_from_slice(&3u32.to_le_bytes()); // path length
+        streamed.extend_from_slice(b"a.b");
+        while streamed.len() % 4 != 0 { streamed.push(0); }
+        let streamed_bundle = bundle_with_serialized(&serialized_inline_texture(&streamed));
+        let streamed_input = root.join("streamed"); fs::write(&streamed_input, &streamed_bundle).unwrap();
+        assert!(texture_export(0, 123, &streamed_input, &root.join("streamed.dds")).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn beneficial_export_preserves_source_and_refuses_symlinks() {
