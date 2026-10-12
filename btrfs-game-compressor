@@ -2759,7 +2759,14 @@ cmd_notify() {
     fi
     for i in "${!GAMES_NAME[@]}"; do
         case "${GAMES_STATUS[$i]}" in
-            COMPRESSED|UPDATED|UNCOMPRESSED)
+            COMPRESSED)
+                # Compression is already current; only the dedupe pass remains.
+                # A compression-ratio hint would be irrelevant and misleading here.
+                entry="${GAMES_NAME[$i]} (dedupe pending)"
+                pending_names+=("$entry")
+                count=$((count + 1))
+                ;;
+            UPDATED|UNCOMPRESSED)
                 # A community hint rides along with the name so the notice says
                 # what to expect, but only at the level the library actually uses.
                 entry="${GAMES_NAME[$i]}"
