@@ -2414,7 +2414,9 @@ batch_compress_routine() {
         if [ "$all_mode" -eq 1 ]; then
             : # Explicit asset-only mode: never whole-game compress or baseline-dedupe.
         elif [ "$game_status" = "COMPACTED" ] || \
-            { [ "$game_status" = "LOW YIELD" ] && [ "${GAMES_DEDUPE_PENDING[$idx]:-0}" -ne 1 ]; }; then
+            { [ "$game_status" = "LOW YIELD" ] &&
+              [ "${GAMES_DEDUPE_PENDING[$idx]:-0}" -ne 1 ] &&
+              ! low_yield_filter_disabled; }; then
             : # The all-games mode is checking assets only for this game.
         elif [ "$game_status" = "COMPRESSED" ] || \
             { [ "$game_status" = "LOW YIELD" ] && [ "${GAMES_DEDUPE_PENDING[$idx]:-0}" -eq 1 ]; }; then
