@@ -122,6 +122,29 @@ class SpaceDeltaTests(unittest.TestCase):
             self.assertIsNone(report["game_extent_disk_reduction_bytes"])
 
 
+    def test_cli_resolves_documented_relative_backend_path(self):
+        # Regression: argparse type=Path normalized "./fake-native" to the bare
+        # name "fake-native", so subprocess searched $PATH and reported
+        # FileNotFoundError instead of running the documented relative backend.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backend = root / "fake-native"
+            backend.write_text("#!/bin/sh\nprintf '11|22|33\\n'\n")
+            backend.chmod(0o755)
+            game = root / "game"
+            game.mkdir()
+            completed = subprocess.run(
+                [sys.executable,
+                 str(Path(__file__).resolve().parents[1] / "tools" / "space-delta.py"),
+                 "capture", str(game), "--backend", "./fake-native", "--output", "-"],
+                cwd=root, capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["extent_measurement"]["status"], "measured")
+            self.assertEqual(report["extent_measurement"]["disk_bytes"], 11)
+            self.assertEqual(report["extent_measurement"]["referenced_bytes"], 33)
+
+
     def test_atomic_report_replaces_existing_file_without_residual_staging(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -27,7 +27,7 @@ def _measure(root, backend):
         return {"status": "unavailable", "reason": "no backend supplied",
                 **{key: None for key in MEASURE_KEYS}}
     try:
-        child = subprocess.run([str(backend), "measure-bytes", str(root)],
+        child = subprocess.run([os.fspath(backend), "measure-bytes", str(root)],
                                capture_output=True, text=True, timeout=120, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
         return {"status": "unavailable", "reason": type(error).__name__,
@@ -162,7 +162,11 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     snap = commands.add_parser("capture", help="Take a read-only filesystem and optional Btrfs extent snapshot")
     snap.add_argument("game", type=Path)
-    snap.add_argument("--backend", type=Path, default=None, help="Optional bgc-native binary; no sudo escalation")
+    # Deliberately a string, not Path: argparse's Path conversion rewrites
+    # "./bgc-native" to the bare name "bgc-native", which subprocess then
+    # resolves through $PATH and fails to find. Keeping the literal text
+    # preserves the documented relative-path invocation.
+    snap.add_argument("--backend", default=None, help="Optional bgc-native binary; no sudo escalation")
     snap.add_argument("--output", default="-", help="JSON filename or - for stdout")
     diff = commands.add_parser("compare", help="Compare two prior snapshots without touching games")
     diff.add_argument("before", type=Path)
