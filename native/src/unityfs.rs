@@ -345,6 +345,12 @@ pub fn texture_export(node_index: usize, path_id: u64, input: &Path, output: &Pa
     if node_extents.windows(2).any(|pair| pair[0].1 > pair[1].0) {
         return Err(invalid("Unity texture export refuses aliased/overlapping bundle nodes"));
     }
+    let mut names = std::collections::BTreeMap::<Vec<u8>, usize>::new();
+    for (index, node) in bundle.nodes.iter().enumerate() {
+        if names.insert(node.path.clone(), index).is_some() {
+            return Err(invalid("Unity texture export refuses ambiguous duplicate node names"));
+        }
+    }
     let Some(node) = bundle.nodes.get(node_index) else {
         return Err(invalid("Unity bundle node index is out of range"));
     };
@@ -366,7 +372,7 @@ pub fn texture_export(node_index: usize, path_id: u64, input: &Path, output: &Pa
         let reason = inventory.opaque.iter().find(|(id, _)| *id == path_id)
             .map(|(_, status)| *status)
             .unwrap_or("NOT_A_RETAINED_METADATA_TEXTURE_OBJECT");
-        return Err(invalid(&format!("Unity path ID {path_id} has no supported inline texture ({reason})")));
+        return Err(invalid(&format!("Unity path ID {path_id} has no supported texture ({reason})")));
     };
     if matched.next().is_some() {
         return Err(invalid("Unity path ID matches more than one retained texture object"));
@@ -377,10 +383,6 @@ pub fn texture_export(node_index: usize, path_id: u64, input: &Path, output: &Pa
     if fields.image_count != Some(1) || fields.dimension != Some(2) {
         return Err(invalid("Unity texture export requires m_ImageCount 1 and m_TextureDimension 2"));
     }
-    if texture.stream_size != 0 {
-        return Err(invalid("Unity texture export supports only inline storage, not .resS streams"));
-    }
-    if texture.inline_bytes == 0 { return Err(invalid("Unity texture has no inline payload")); }
     let format = match texture.format {
         4 => image_dds::ImageFormat::Rgba8Unorm,
         14 => image_dds::ImageFormat::Bgra8Unorm,
@@ -391,24 +393,66 @@ pub fn texture_export(node_index: usize, path_id: u64, input: &Path, output: &Pa
         27 => image_dds::ImageFormat::BC5RgUnorm,
         other => return Err(invalid(&format!("Unity texture format {other} is outside the export subset"))),
     };
-    match texture_bytes(texture)? {
-        Some(expected) if expected == texture.inline_bytes as u64 => {}
-        _ => return Err(invalid("Unity inline payload length disagrees with its known mip shape")),
+    let expected = match texture_bytes(texture)? {
+        Some(expected) if expected > 0 => expected,
+        _ => return Err(invalid("Unity texture codec/mip shape is outside the export subset")),
+    };
+    if texture.inline_bytes != 0 && texture.stream_size != 0 {
+        return Err(invalid("Unity texture declares both inline and streamed storage"));
     }
-    let start = record.start as usize;
-    let end = start.checked_add(record.size as usize).ok_or_else(|| invalid("Unity object extent overflow"))?;
-    let object = slice.get(start..end)
-        .ok_or_else(|| invalid("Unity texture object is outside its SerializedFile node"))?;
-    let payload = crate::unity_tree::inline_image(fields, object)?;
+    let (payload, origin) = if texture.inline_bytes != 0 {
+        if texture.inline_bytes as u64 != expected {
+            return Err(invalid("Unity inline payload length disagrees with its known mip shape"));
+        }
+        let start = record.start as usize;
+        let end = start.checked_add(record.size as usize).ok_or_else(|| invalid("Unity object extent overflow"))?;
+        let object = slice.get(start..end)
+            .ok_or_else(|| invalid("Unity texture object is outside its SerializedFile node"))?;
+        (std::borrow::Cow::Borrowed(crate::unity_tree::inline_image(fields, object)?), "INLINE")
+    } else if texture.stream_size != 0 {
+        if texture.stream_size != expected {
+            return Err(invalid("Unity streamed extent length disagrees with its known mip shape"));
+        }
+        let name = stream_node(&node.path, &texture.stream_path)
+            .ok_or_else(|| invalid("Unity stream path is outside the supported same-bundle namespace"))?;
+        let Some(&target) = names.get(name) else {
+            return Err(invalid("Unity stream target node is not present in this bundle"));
+        };
+        if target == node_index { return Err(invalid("Unity stream target is the SerializedFile itself")); }
+        let target_node = &bundle.nodes[target];
+        if target_node.flags != 0 { return Err(invalid("Unity stream target is not a resource node")); }
+        let end = texture.stream_offset.checked_add(texture.stream_size)
+            .ok_or_else(|| invalid("Unity stream extent overflow"))?;
+        if end > target_node.size { return Err(invalid("Unity stream extent is outside its target node")); }
+        // Require a unique claim: no other retained texture object may declare an
+        // overlapping range into the same target node. Stream ownership stays
+        // unproven even then; this only rejects known aliases.
+        for (other_id, other) in inventory.details.iter() {
+            if *other_id == path_id || other.texture.stream_size == 0 { continue; }
+            let Some(other_name) = stream_node(&node.path, &other.texture.stream_path) else { continue; };
+            if names.get(other_name) != Some(&target) { continue; }
+            let other_end = other.texture.stream_offset.saturating_add(other.texture.stream_size);
+            if other.texture.stream_offset < end && texture.stream_offset < other_end {
+                return Err(invalid("Unity stream extent aliases another retained texture object"));
+            }
+        }
+        let bytes = decoder.read(target_node.offset + texture.stream_offset, texture.stream_size)?;
+        if bytes.len() as u64 != expected {
+            return Err(invalid("Unity streamed payload read a different length"));
+        }
+        (std::borrow::Cow::Owned(bytes), "STREAM_BOUNDS_ONLY_OWNERSHIP_UNPROVEN")
+    } else {
+        return Err(invalid("Unity texture has no inline or streamed payload"));
+    };
     let surface = Surface { width: texture.width, height: texture.height, depth: 1,
-        layers: 1, mipmaps: texture.mips, image_format: format, data: payload };
+        layers: 1, mipmaps: texture.mips, image_format: format, data: payload.as_ref() };
     let candidate = crate::texture::build_dds(&surface)?;
     // Re-parse the immutable candidate with the same DDS parser, then decode its
     // base mip. This checks internal self-consistency only, not independent
     // parser agreement, atlas references or runtime compatibility.
     let check = crate::texture::parse(&candidate)?;
     if check.width != texture.width || check.height != texture.height || check.mipmaps != texture.mips
-        || check.format != format || &candidate[check.data_start..] != payload {
+        || check.format != format || &candidate[check.data_start..] != payload.as_ref() {
         return Err(invalid("Unity DDS export failed its self-check"));
     }
     {
@@ -422,11 +466,11 @@ pub fn texture_export(node_index: usize, path_id: u64, input: &Path, output: &Pa
         }
     }
     super::detached_export::publish(output, &candidate, || source.unchanged())?;
-    println!("UNITYFS_TEXTURE_EXPORT|{node_index}|{path_id}|{}|{}|{}|{}|{}|{}|{}|EXPORTED",
+    println!("UNITYFS_TEXTURE_EXPORT|{node_index}|{path_id}|{}|{}|{}|{}|{}|{}|{}|{origin}|EXPORTED",
         texture.width, texture.height, texture.format,
         crate::unity_tree::format_name(texture.format), texture.mips,
         payload.len(), candidate.len());
-    eprintln!("Experimental detached Unity texture export: source unchanged; verbatim inline payload only. Streamed/atlas/catalogue/CRC rebuild and runtime compatibility are unverified.");
+    eprintln!("Experimental detached Unity texture export: source unchanged; verbatim payload only. Streamed ranges are bounds-checked and non-aliasing but stream ownership is unproven; atlas/catalogue/CRC rebuild and runtime compatibility are unverified.");
     Ok(())
 }
 
@@ -952,6 +996,45 @@ mod tests {
         b.extend_from_slice(data);
         let size = b.len() as u64; b[fields..fields + 8].copy_from_slice(&size.to_be_bytes()); b
     }
+    /// One v22 SerializedFile plus a same-bundle resource node holding `stream`.
+    fn bundle_with_serialized_and_stream(sf: &[u8], stream: &[u8]) -> Vec<u8> {
+        let mut data = sf.to_vec();
+        data.extend_from_slice(stream);
+        let mut info = vec![0; 16];
+        info.extend_from_slice(&1u32.to_be_bytes());
+        info.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        info.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        info.extend_from_slice(&0u16.to_be_bytes());
+        info.extend_from_slice(&2u32.to_be_bytes());
+        info.extend_from_slice(&0u64.to_be_bytes());
+        info.extend_from_slice(&(sf.len() as u64).to_be_bytes());
+        info.extend_from_slice(&4u32.to_be_bytes());
+        info.extend_from_slice(b"CAB-test\0");
+        info.extend_from_slice(&(sf.len() as u64).to_be_bytes());
+        info.extend_from_slice(&(stream.len() as u64).to_be_bytes());
+        info.extend_from_slice(&0u32.to_be_bytes());
+        info.extend_from_slice(b"CAB-test.resS\0");
+        let mut b = b"UnityFS\0".to_vec();
+        b.extend_from_slice(&8u32.to_be_bytes());
+        b.extend_from_slice(b"5.x.x\02021.3.45f1\0"); let fields = b.len();
+        b.extend_from_slice(&0u64.to_be_bytes()); b.extend_from_slice(&(info.len() as u32).to_be_bytes());
+        b.extend_from_slice(&(info.len() as u32).to_be_bytes()); b.extend_from_slice(&0x40u32.to_be_bytes());
+        b.resize(align(b.len()).unwrap(), 0);
+        b.extend_from_slice(&info);
+        b.extend_from_slice(&data);
+        let size = b.len() as u64; b[fields..fields + 8].copy_from_slice(&size.to_be_bytes()); b
+    }
+    fn streamed_object(path: &str, size: u32) -> Vec<u8> {
+        let mut o = Vec::new();
+        for v in [8u32, 8, 4, 1, 1, 2] { o.extend_from_slice(&v.to_le_bytes()); }
+        o.extend_from_slice(&0u32.to_le_bytes()); // inline length 0
+        o.extend_from_slice(&0u64.to_le_bytes()); // stream offset 0
+        o.extend_from_slice(&size.to_le_bytes()); // stream size
+        o.extend_from_slice(&(path.len() as u32).to_le_bytes());
+        o.extend_from_slice(path.as_bytes());
+        while o.len() % 4 != 0 { o.push(0); }
+        o
+    }
     #[test]
     fn inline_texture_exports_verbatim_payload_to_verified_dds() {
         let payload: Vec<u8> = (0..256u32).map(|i| (i * 7 % 251) as u8).collect();
@@ -987,6 +1070,32 @@ mod tests {
         let streamed_bundle = bundle_with_serialized(&serialized_inline_texture(&streamed));
         let streamed_input = root.join("streamed"); fs::write(&streamed_input, &streamed_bundle).unwrap();
         assert!(texture_export(0, 123, &streamed_input, &root.join("streamed.dds")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn streamed_extent_exports_when_uniquely_claimed() {
+        let payload: Vec<u8> = (0..256u32).map(|i| (i * 5 % 251) as u8).collect();
+        let object = streamed_object("CAB-test.resS", payload.len() as u32);
+        let sf = serialized_inline_texture(&object);
+        let bundle = bundle_with_serialized_and_stream(&sf, &payload);
+        let root = std::env::temp_dir().join(format!("bgc-unitystream-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&root).unwrap();
+        let input = root.join("bundle"); fs::write(&input, &bundle).unwrap();
+        let output = root.join("streamed.dds");
+        texture_export(0, 123, &input, &output).unwrap();
+        // The source bundle is never rewritten and the artifact holds the exact
+        // declared stream extent.
+        assert_eq!(fs::read(&input).unwrap(), bundle, "source must stay unchanged");
+        let dds = fs::read(&output).unwrap();
+        let parsed = crate::texture::parse(&dds).unwrap();
+        assert_eq!((parsed.width, parsed.height, parsed.mipmaps), (8, 8, 1));
+        assert_eq!(&dds[parsed.data_start..], &payload[..]);
+        // A stream path with no matching same-bundle node is refused, not guessed.
+        let missing = streamed_object("missing.resS", 256);
+        let missing_bundle = bundle_with_serialized(&serialized_inline_texture(&missing));
+        let missing_input = root.join("missing"); fs::write(&missing_input, &missing_bundle).unwrap();
+        assert!(texture_export(0, 123, &missing_input, &root.join("missing.dds")).is_err());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
