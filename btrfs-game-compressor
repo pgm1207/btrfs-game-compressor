@@ -2419,7 +2419,9 @@ batch_compress_routine() {
               ! low_yield_filter_disabled; }; then
             : # The all-games mode is checking assets only for this game.
         elif [ "$game_status" = "COMPRESSED" ] || \
-            { [ "$game_status" = "LOW YIELD" ] && [ "${GAMES_DEDUPE_PENDING[$idx]:-0}" -eq 1 ]; }; then
+            { [ "$game_status" = "LOW YIELD" ] &&
+              [ "${GAMES_DEDUPE_PENDING[$idx]:-0}" -eq 1 ] &&
+              ! low_yield_filter_disabled; }; then
             needs_dedupe=1
         else
             echo -e "${BOLD}[$((done_count + 1))/$pending] Compressing: ${CYAN}$g_name${RESET}..."
@@ -4786,17 +4788,17 @@ cmd_dry_run() {
         fi
         if [ "$st" = "COMPACTED" ]; then continue; fi
         if [ "$st" = "LOW YIELD" ]; then
-            if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ]; then
-                n=$((n + 1))
-                fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
-                printf 'dedupe only    %-40s %-14s %10s (compression held: low yield)\n' "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}"
-                continue
-            fi
             if low_yield_filter_disabled; then
                 n=$((n + 1))
                 fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
                 printf 'would compress  %-40s %-14s %10s (low-yield gate disabled)\n' \
                     "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}"
+                continue
+            fi
+            if [ "${GAMES_DEDUPE_PENDING[$i]:-0}" -eq 1 ]; then
+                n=$((n + 1))
+                fit_name "${GAMES_NAME[$i]}" "$STATUS_NAME_WIDTH"
+                printf 'dedupe only    %-40s %-14s %10s (compression held: low yield)\n' "$NAME_FIT" "$st" "${GAMES_SIZE[$i]}"
                 continue
             fi
             n_low=$(( n_low + 1 ))
