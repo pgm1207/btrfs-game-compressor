@@ -2183,6 +2183,33 @@ compressed_only_events=$(awk '/^compress:/ {c++} /^dedupe:/ {d++} END {printf "%
     ok "batch deduplicates compressed-only games and marks them compacted" || \
     bad "batch deduplicates compressed-only games and marks them compacted" "$compressed_only_events ${GAMES_STATUS[0]}"
 
+# A cached LOW YIELD result becomes compression work when the ratio gate is
+# disabled. Exercise the real batch branch so previews cannot promise work
+# that execution silently skips.
+: > "$DEDUP_EVENT_LOG"
+GAMES_STATUS=("LOW YIELD")
+GAMES_NAME=("CachedLowYield")
+GAMES_PATH=("$DEDUP_COMMON/CachedLowYield")
+GAMES_SIZE=(100M)
+GAMES_PREDICT=(5)
+GAMES_DEDUPE_PENDING=(0)
+MIN_GAIN_PCT=0
+compress_and_record() {
+    printf 'compress:%s\n' "$2" >> "$DEDUP_EVENT_LOG"
+    printf '100M|50M|50M|50%%\n'
+}
+dedupe_game() {
+    printf 'dedupe:%s\n' "$1" >> "$DEDUP_EVENT_LOG"
+    DEDUPE_RESULT=done; DEDUPE_COMPLETION_RECORDED=1; DEDUPE_SAVED_BYTES=0
+    DEDUPE_BEFORE_PHYSICAL=''; DEDUPE_AFTER_PHYSICAL=''
+    return 0
+}
+batch_compress_routine >/dev/null 2>&1
+low_yield_events=$(awk '/^compress:/ {c++} /^dedupe:/ {d++} END {printf "%d|%d", c+0, d+0}' "$DEDUP_EVENT_LOG")
+[ "$low_yield_events" = '1|1' ] && [ "${GAMES_STATUS[0]}" = COMPACTED ] && \
+    ok "batch compresses cached low-yield work when its ratio gate is disabled" || \
+    bad "batch compresses cached low-yield work when its ratio gate is disabled" "$low_yield_events ${GAMES_STATUS[0]}"
+
 # Backend-only interruption must stop the whole batch, even without a shell signal.
 : > "$DEDUP_EVENT_LOG"
 GAMES_STATUS=(UNCOMPRESSED UNCOMPRESSED)
