@@ -2112,6 +2112,23 @@ check_contains "dry-run queues zero-threshold cached low-yield work" \
 check_not_contains "dry-run does not call zero-threshold work skipped" \
     "skipped as low yield" "$out"
 
+out=$(
+    GAMES_NAME=("Cached low-yield game")
+    GAMES_STATUS=("LOW YIELD")
+    GAMES_DEDUPE_PENDING=(1)
+    GAMES_SIZE=("100M")
+    GAMES_PREDICT=(5)
+    GAMES_HINT=()
+    GAMES_HINT_LOW=()
+    MIN_GAIN_PCT=0
+    OPT_PENDING_ONLY=1
+    cmd_dry_run
+)
+check_contains "dry-run prioritizes disabled gate over stale pending dedupe" \
+    "would compress  Cached low-yield game" "$out"
+check_not_contains "dry-run does not reduce zero-threshold work to dedupe only" \
+    "dedupe only" "$out"
+
 # A COMPRESSED row has finished its rewrite and only needs deduplication.
 # Do not attach a compression-ratio hint to that different kind of work.
 out=$(
@@ -2187,12 +2204,12 @@ compressed_only_events=$(awk '/^compress:/ {c++} /^dedupe:/ {d++} END {printf "%
 # disabled. Exercise the real batch branch so previews cannot promise work
 # that execution silently skips.
 : > "$DEDUP_EVENT_LOG"
-GAMES_STATUS=("LOW YIELD")
-GAMES_NAME=("CachedLowYield")
-GAMES_PATH=("$DEDUP_COMMON/CachedLowYield")
-GAMES_SIZE=(100M)
-GAMES_PREDICT=(5)
-GAMES_DEDUPE_PENDING=(0)
+GAMES_STATUS=("LOW YIELD" "LOW YIELD")
+GAMES_NAME=("CachedLowYield" "CachedLowYieldPendingDedupe")
+GAMES_PATH=("$DEDUP_COMMON/CachedLowYield" "$DEDUP_COMMON/CachedLowYieldPendingDedupe")
+GAMES_SIZE=(100M 100M)
+GAMES_PREDICT=(5 5)
+GAMES_DEDUPE_PENDING=(0 1)
 MIN_GAIN_PCT=0
 compress_and_record() {
     printf 'compress:%s\n' "$2" >> "$DEDUP_EVENT_LOG"
@@ -2206,9 +2223,11 @@ dedupe_game() {
 }
 batch_compress_routine >/dev/null 2>&1
 low_yield_events=$(awk '/^compress:/ {c++} /^dedupe:/ {d++} END {printf "%d|%d", c+0, d+0}' "$DEDUP_EVENT_LOG")
-[ "$low_yield_events" = '1|1' ] && [ "${GAMES_STATUS[0]}" = COMPACTED ] && \
-    ok "batch compresses cached low-yield work when its ratio gate is disabled" || \
-    bad "batch compresses cached low-yield work when its ratio gate is disabled" "$low_yield_events ${GAMES_STATUS[0]}"
+[ "$low_yield_events" = '2|2' ] && [ "${GAMES_STATUS[0]}" = COMPACTED ] && \
+    [ "${GAMES_STATUS[1]}" = COMPACTED ] && \
+    ok "batch compresses all cached low-yield work when its ratio gate is disabled" || \
+    bad "batch compresses all cached low-yield work when its ratio gate is disabled" \
+        "$low_yield_events ${GAMES_STATUS[0]} ${GAMES_STATUS[1]}"
 
 # Backend-only interruption must stop the whole batch, even without a shell signal.
 : > "$DEDUP_EVENT_LOG"
