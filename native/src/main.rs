@@ -787,13 +787,22 @@ fn dedupe(tree: &Tree, parent: &Path) -> io::Result<()> {
     eprintln!("Comparing duplicate data in {} files...", files.len());
     let mut source: Option<Record> = None;
     let mut source_fd: Option<File> = None;
-    let (mut matched, mut errors, mut candidates) = (0u64, 0u64, 0u64);
+    let (mut matched, mut errors, mut candidates, mut skipped) = (0u64, 0u64, 0u64, 0u64);
     merge(&runs, |rec| {
         if let Some(ref first) = source {
             if (first.hash, first.len) == (rec.hash, rec.len) {
                 candidates += 1;
                 if source_fd.is_none() {
-                    source_fd = Some(files[first.file as usize].open(tree)?);
+                    match files[first.file as usize].open(tree) {
+                        Ok(file) => source_fd = Some(file),
+                        // A source that vanished or became unreadable during the
+                        // scan is a filesystem race, not a rejected request.
+                        Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied) => {
+                            skipped += 1;
+                            return Ok(());
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
                 let result = files[rec.file as usize].open(tree).and_then(|dst| {
                     share(
@@ -806,6 +815,12 @@ fn dedupe(tree: &Tree, parent: &Path) -> io::Result<()> {
                 });
                 match result {
                     Ok(n) => matched += n,
+                    // Missing or unreadable destinations (files replaced while the
+                    // scan runs) are skipped rather than failed; genuine dedupe
+                    // rejections still count as errors.
+                    Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied) => {
+                        skipped += 1;
+                    }
                     Err(e) => {
                         errors += 1;
                         if errors <= 20 {
@@ -831,9 +846,9 @@ fn dedupe(tree: &Tree, parent: &Path) -> io::Result<()> {
         Ok(())
     })?;
     if env::var_os("BGC_VERBOSE").is_some() {
-        println!("Deduplication: {candidates} duplicate ranges, {matched} logical bytes accepted, {errors} rejected. Accepted bytes include already-shared data; they are not disk savings.");
+        println!("Deduplication: {candidates} duplicate ranges, {matched} logical bytes accepted, {errors} rejected, {skipped} skipped (missing or unreadable). Accepted bytes include already-shared data; they are not disk savings.");
     } else {
-        println!("Deduplication: {candidates} candidate ranges checked, {errors} rejected.");
+        println!("Deduplication: {candidates} candidate ranges checked, {errors} rejected, {skipped} skipped (missing or unreadable).");
     }
     if errors != 0 {
         return Err(invalid(

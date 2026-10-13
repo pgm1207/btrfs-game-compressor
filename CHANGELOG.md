@@ -50,6 +50,13 @@
   Honest limit: the file gain tracks the *compressed* size of the removed region,
   so heavily compressible data barely shrinks the bundle.
 
+- Deduplication no longer fails on files that vanish or become unreadable while
+  a library scan runs (for example a Steam Linux Runtime unpacking into
+  `var/tmp-*` mid-pass). `ENOENT`/`EACCES`/`EPERM` on a source or destination
+  now count as `skipped (missing or unreadable)` instead of rejected requests;
+  genuine `FIDEDUPERANGE` rejections still fail the pass. On the same machine
+  this let the `/mnt` library complete at 13,586,341 ranges with 0 rejected.
+
 ## 0.3.1 — 2026-10-08 — Recovery hardening, measurement and DDS quality
 
 This maintenance release contains the changes listed below. The release artifacts
