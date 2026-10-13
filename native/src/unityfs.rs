@@ -1,6 +1,10 @@
-//! Export-only, lossless UnityFS LZ4 recompression. No resource extraction,
-//! codec changes, mip removal, or edits to Addressables catalogs/CRC records.
-//! Layout reference: AssetStudio BundleFile.cs (format documentation only).
+//! UnityFS container work. The recompression route is export-only and lossless:
+//! no resource extraction, codec changes, mip removal or edits to Addressables
+//! catalogs/CRC records. The gated development routes below add a detached,
+//! research-only Texture2D export and a verified in-place payload replace, which
+//! can shrink a mip chain inside the object's unchanged serialized extent (see
+//! `texture_replace`). Layout reference: AssetStudio BundleFile.cs (format
+//! documentation only).
 use lz4::block::{compress, decompress, CompressionMode};
 use std::{fs, io::{self, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt}, path::Path};
 use super::invalid;
@@ -620,19 +624,152 @@ pub fn texture_export(node_index: usize, path_id: u64, input: &Path, output: &Pa
     Ok(())
 }
 
-/// Development-only detached replacement of one inline Unity SerializedFile
+/// Full mip-chain level count for one declared dimension pair: every level down
+/// to 1x1, which is exactly the bound the tree inspector already enforces for a
+/// retained texture. A shrink payload must be the complete chain of its new
+/// shape, so its byte length is a function of (width, height, format) alone.
+#[cfg(any(test, feature = "development-audits"))]
+fn full_mip_levels(width: u32, height: u32) -> u32 {
+    32 - width.max(height).leading_zeros()
+}
+
+/// Known-codec chain length for one declared shape, from the same layout table
+/// the selection helper uses. Unknown codecs and empty chains fail closed.
+#[cfg(any(test, feature = "development-audits"))]
+fn texture_shape_bytes(format: u32, width: u32, height: u32, mips: u32) -> io::Result<u64> {
+    let texture = crate::unity_tree::Texture { width, height, format, mips,
+        inline_bytes: 0, stream_offset: 0, stream_size: 0, stream_path: String::new() };
+    match texture_bytes(&texture)? {
+        Some(bytes) if bytes > 0 => Ok(bytes),
+        _ => Err(invalid("Unity texture codec/shape is outside the supported subset")),
+    }
+}
+
+/// Infer and validate the single downscale implied by a payload length. Both
+/// dimensions are halved the same number of times (never upscaled), the payload
+/// must be the complete 1x1-terminated chain of the result, and the result must
+/// pass the repository texture policy (short edge) plus the 4x4 block floor on
+/// every axis that is already at least 4. A chain length strictly decreases per
+/// halving, so at most one shape can match and nothing is ever guessed. An empty
+/// result means "not a downscale payload"; a refused one explains itself.
+#[cfg(any(test, feature = "development-audits"))]
+fn shrink_shape(texture: &crate::unity_tree::Texture, payload_len: usize) -> io::Result<Option<(u32, u32, u32)>> {
+    let (width, height) = (texture.width, texture.height);
+    let target = payload_len as u64;
+    let mut found = None;
+    for level in 1..32u32 {
+        let (new_width, new_height) = (width >> level, height >> level);
+        if new_width == 0 || new_height == 0 { break; }
+        let mips = full_mip_levels(new_width, new_height);
+        if texture_shape_bytes(texture.format, new_width, new_height, mips)? == target {
+            if found.is_some() {
+                return Err(invalid("Unity shrink payload length matches more than one downscale"));
+            }
+            found = Some((new_width, new_height, mips));
+        }
+    }
+    let Some((new_width, new_height, mips)) = found else { return Ok(None) };
+    if crate::texture_policy::output_too_thin(new_width, new_height) {
+        return Err(invalid(&format!(
+            "Unity texture downscale to {new_width}x{new_height} is refused by the repository texture policy (short edge below {})",
+            crate::texture_policy::MIN_SHORT_EDGE)));
+    }
+    if (width >= 4 && new_width < 4) || (height >= 4 && new_height < 4) {
+        return Err(invalid("Unity texture downscale below the 4x4 block floor is not supported"));
+    }
+    Ok(Some((new_width, new_height, mips)))
+}
+
+/// Prove a supplied shrink payload is a self-consistent mip chain for the new
+/// declared shape before any byte is written, with the same DDS wrapper and
+/// parser the export route uses, then decode every level. This proves chain
+/// geometry and per-level decodability in the source format; for BC and
+/// uncompressed codecs any bytes of the right length decode, so pixel
+/// correctness and visual equivalence are not proven.
+#[cfg(any(test, feature = "development-audits"))]
+fn prove_shrink_chain(format: image_dds::ImageFormat, width: u32, height: u32,
+    mips: u32, payload: &[u8]) -> io::Result<()> {
+    use image_dds::Surface;
+    let surface = Surface { width, height, depth: 1, layers: 1, mipmaps: mips,
+        image_format: format, data: payload };
+    let candidate = crate::texture::build_dds(&surface)?;
+    let check = crate::texture::parse(&candidate)?;
+    if check.width != width || check.height != height || check.mipmaps != mips
+        || check.format != format || &candidate[check.data_start..] != payload {
+        return Err(invalid("Unity shrink payload failed its mip-chain self-check"));
+    }
+    let decoded = Surface { width, height, depth: 1, layers: 1, mipmaps: mips,
+        image_format: format, data: &candidate[check.data_start..] }
+        .decode_rgba8()
+        .map_err(|error| invalid(&format!("Unity shrink payload decode failed: {error}")))?;
+    if decoded.width != width || decoded.height != height || decoded.depth != 1 || decoded.layers != 1 {
+        return Err(invalid("Unity shrink payload decoded to an unexpected shape"));
+    }
+    Ok(())
+}
+
+/// Write one proven 4-byte object field through its captured span, requiring a
+/// primitive span that holds exactly the value the tree walk already parsed.
+/// Returns the node-relative extent that changed.
+#[cfg(any(test, feature = "development-audits"))]
+fn patch_field(node: &mut [u8], object_start: usize, fields: &crate::unity_tree::TextureFields,
+    path: &str, value: u32, expected: u32, big: bool) -> io::Result<(usize, usize)> {
+    let span = fields.spans.get(path)
+        .filter(|span| span.kind == "PRIMITIVE_BITS" && span.end == span.start + 4)
+        .ok_or_else(|| invalid(&format!("Unity texture replace requires the {path} field span")))?;
+    let at = object_start.checked_add(span.start)
+        .ok_or_else(|| invalid("Unity texture field offset overflow"))?;
+    if read_u32(node, at, big)? != expected {
+        return Err(invalid(&format!("Unity texture {path} span does not hold the parsed value")));
+    }
+    write_u32(node, at, value, big)?;
+    Ok((at, at + 4))
+}
+
+/// Fresh shared-budget inventory for one already-decoded SerializedFile node.
+#[cfg(any(test, feature = "development-audits"))]
+fn node_texture_inventory(node: &[u8]) -> io::Result<crate::unity_serialized::BundleTextureInventory> {
+    let mut metadata_budget = 32u64 * 1024 * 1024;
+    let mut object_budget = 64u64 * 1024 * 1024;
+    let mut report_budget = 10000u64;
+    crate::unity_serialized::bundle_texture_inventory(node, &mut metadata_budget, &mut object_budget, &mut report_budget)
+}
+
+/// Development-only detached rewrite of one inline Unity SerializedFile
 /// Texture2D payload, published as a NEW bundle file. Selection, identity and
-/// storage rules are exactly the export route's. Only a payload whose byte
-/// length equals the known mip-chain length for the unchanged width/height/mip
-/// count/format is accepted; dimension/mip changes and streamed extents are
-/// refused because relocating objects and `.resS` ranges is not implemented.
-/// The SerializedFile length prefix and object-table size field are updated
-/// (necessarily to their existing values under the same-length rule) and the
-/// touched blocks are re-encoded with the source codec. A nonzero
-/// uncompressed-data hash field is refused because its algorithm is unproven;
-/// an all-zero field is preserved byte-for-byte. No CRC, CAB name, Addressables
-/// catalogue or atlas reference is rebuilt, and the artifact is not runtime
-/// validated. The source is never modified.
+/// storage rules are exactly the export route's. Two payload shapes are
+/// accepted and both keep every object offset in the SerializedFile table
+/// byte-stable:
+///   * the exact known mip-chain length for the unchanged width/height/mip
+///     count/format (a same-shape chain has a single length), or
+///   * a strictly shorter complete 1x1-terminated mip chain for dimensions that
+///     are the current ones halved one or more times (never upscaled), accepted
+///     by the repository texture policy (short edge >= 64) and never pushed
+///     below the 4x4 block floor on an axis that already reaches 4.
+/// A chain length determines its shape uniquely, so a length that matches
+/// neither rule is refused rather than guessed. Because the object's serialized
+/// size is kept exactly as before, the bytes between the new payload end and the
+/// old payload end are zero-filled ("zero tail"): every byte after the new
+/// payload in the object extent must already be zero, so the fields that follow
+/// the payload keep their parsed values although Unity reads them sequentially,
+/// not by absolute offset. Such an object no longer consumes its declared extent
+/// exactly; the in-house reader accepts exactly one trailing run of zero bytes
+/// for that reason. The zero tail compresses away only when the covering blocks
+/// are really compressed: a stored-codec bundle rebuilds to its original size
+/// and reports NO_GAIN. Only a strictly smaller container is published; NO_GAIN
+/// publishes nothing.
+///
+/// The image-data length prefix, width, height, mip count and (when the schema
+/// has the field) m_CompleteImageSize are patched through the spans the tree
+/// walk captured, each of which must hold exactly the value the walk parsed. The
+/// supplied bytes are spliced verbatim: no pixel or codec re-encode happens.
+/// Only blocks that intersect the patched range are re-encoded with their source
+/// codec, every other block keeps its source bytes. A nonzero uncompressed-data
+/// hash field is refused because its algorithm is unproven; an all-zero field is
+/// preserved byte-for-byte. No CRC, CAB name, Addressables catalogue or atlas
+/// reference is rebuilt, the zero-padded extent is not proven to be accepted by
+/// the Unity runtime, and the artifact is not runtime validated. The source is
+/// never modified.
 #[cfg(any(test, feature = "development-audits"))]
 pub fn texture_replace(node_index: usize, path_id: u64, payload_path: &Path, input: &Path, output: &Path) -> io::Result<()> {
     use crate::audit_io::Source;
@@ -673,62 +810,141 @@ pub fn texture_replace(node_index: usize, path_id: u64, payload_path: &Path, inp
     if prefix as usize != payload_len {
         return Err(invalid("Unity inline image length prefix cannot be proven"));
     }
-    // Only the exact known mip-chain length is accepted. For one width/height/
-    // mip-count/format the chain length is a single value, so a different length
-    // is refused: moving the object would shift every later object offset, and
-    // the alignment/padding rules for that have not been proven.
+    // Two payload shapes are accepted, and neither moves an object offset:
+    //  * the exact known mip-chain length for the unchanged width/height/
+    //    mip-count/format shape (a chain has a single length per shape), and
+    //  * the complete 1x1-terminated chain of a strictly smaller shape obtained
+    //    by halving both dimensions one or more times (never upscaled). The
+    //    payload length determines that shape uniquely.
     let mut payload_source = Source::open(payload_path, MAX_TEXTURE_BUNDLE, MAX_TEXTURE_BUNDLE + 16)?;
     let new_len = payload_source.len();
-    if new_len != located.expected {
+    if new_len > u32::MAX as u64 {
+        return Err(invalid("Unity replacement payload exceeds the 4 GiB length prefix"));
+    }
+    let new_len = new_len as usize;
+    let new_payload = payload_source.read_at(0, new_len)?;
+    let old_texture = &located.fields.texture;
+    let shrink = new_len != payload_len;
+    let (new_width, new_height, new_mips) = if !shrink {
+        (old_texture.width, old_texture.height, old_texture.mips)
+    } else if new_len > payload_len {
         return Err(invalid(&format!(
-            "Unity replacement payload must be exactly {} bytes for the unchanged {}x{} format {} mip chain ({} bytes given; dimension, format and mip-count changes are not supported)",
-            located.expected, located.fields.texture.width, located.fields.texture.height,
-            located.fields.texture.mips, new_len)));
+            "Unity replacement payload is {new_len} bytes, larger than the current {payload_len}-byte inline extent; payload size increases are refused")));
+    } else {
+        match shrink_shape(old_texture, new_len)? {
+            Some(shape) => shape,
+            None => return Err(invalid(&format!(
+                "Unity replacement payload must be exactly {payload_len} bytes for the unchanged {}x{} format {} {} mip chain, or the complete 1x1-terminated chain of a downscale of that shape (both dimensions halved one or more times, short edge at least {}); {new_len} bytes given",
+                old_texture.width, old_texture.height, old_texture.format, old_texture.mips,
+                crate::texture_policy::MIN_SHORT_EDGE))),
+        }
+    };
+    if shrink {
+        prove_shrink_chain(located.format, new_width, new_height, new_mips, &new_payload)?;
     }
-    let new_payload = payload_source.read_at(0, new_len as usize)?;
-    // Format bookkeeping: the length prefix and the object table entry's size
-    // are computed exactly as the container requires. Under the same-length rule
-    // both updates reproduce the existing values; anything else is refused
-    // instead of moving offsets.
-    let new_object_size = located.record.size - payload_len as u64 + new_len as u64;
-    if new_object_size != located.record.size {
-        return Err(invalid("Unity texture replace refuses a payload length that would move object offsets"));
+    // The serialized size is kept exactly as it was, so the object table entry
+    // needs no rewrite and no later object offset can move.
+    let object_start = located.record.start as usize;
+    let object_end = object_start + located.record.size as usize;
+    let payload_extent_end = payload_start + payload_len;
+    if payload_extent_end > object_end || object_end > located.slice.len() {
+        return Err(invalid("Unity inline payload extent cannot be proven"));
     }
-    let payload_at = payload_start;
-    let patch_start = located.node_offset as usize + payload_at;
+    // Build the patched node in memory: metadata fields through their proven
+    // spans, then the payload and (for a shrink) the zero tail of the old extent.
     let mut expected_node = located.slice.clone();
-    expected_node[payload_at..payload_at + new_len as usize].copy_from_slice(&new_payload);
+    let mut changed = vec![(span_start, span_start + 4)];
     write_u32(&mut expected_node, span_start, new_len as u32, located.big)?;
-    write_u32(&mut expected_node, size_field as usize, new_object_size as u32, located.big)?;
-    let (candidate, _changed, _) = rebuild_patched(&bytes, Some((patch_start, &new_payload)))?;
+    changed.push(patch_field(&mut expected_node, object_start, &located.fields,
+        "m_Width", new_width, old_texture.width, located.big)?);
+    changed.push(patch_field(&mut expected_node, object_start, &located.fields,
+        "m_Height", new_height, old_texture.height, located.big)?);
+    changed.push(patch_field(&mut expected_node, object_start, &located.fields,
+        "m_MipCount", new_mips, old_texture.mips, located.big)?);
+    // m_CompleteImageSize holds the complete image size of an inline texture. Its
+    // span must exist exactly when the value changes (a shrink), and when present
+    // it must hold the old inline length so the field's meaning is proven before
+    // it is rewritten.
+    match located.fields.spans.get("m_CompleteImageSize") {
+        Some(_) => changed.push(patch_field(&mut expected_node, object_start, &located.fields,
+            "m_CompleteImageSize", new_len as u32, payload_len as u32, located.big)?),
+        None if shrink => return Err(invalid("Unity texture shrink requires the m_CompleteImageSize field span")),
+        None => (),
+    }
+    expected_node[payload_start..payload_start + new_len].copy_from_slice(&new_payload);
+    if shrink {
+        // The fields that follow the payload are read sequentially from the zero
+        // tail after a shrink, so every byte after the old extent must already be
+        // zero: that is what keeps their parsed values identical.
+        if expected_node[payload_extent_end..object_end].iter().any(|byte| *byte != 0) {
+            return Err(invalid("Unity texture shrink requires every byte after the current inline payload to be zero; the fields that follow it would otherwise change"));
+        }
+        expected_node[payload_start + new_len..payload_extent_end].fill(0);
+    }
+    changed.push((payload_start, payload_extent_end));
+    let patch_lo = changed.iter().map(|(start, _)| *start).min().unwrap();
+    let patch_hi = changed.iter().map(|(_, end)| *end).max().unwrap();
+    let (candidate, _changed, _) = rebuild_patched(&bytes,
+        Some((located.node_offset as usize + patch_lo, &expected_node[patch_lo..patch_hi])))?;
     // (1) The candidate must re-parse as a UnityFS bundle with the same layout.
     let check_bundle = parse(&candidate)?;
     if check_bundle.flags != bundle.flags || check_bundle.nodes.len() != bundle.nodes.len()
-        || check_bundle.blocks.len() != bundle.blocks.len() {
+        || check_bundle.blocks.len() != bundle.blocks.len() || check_bundle.decoded != bundle.decoded {
         return Err(invalid("Unity texture replace changed the bundle layout"));
     }
-    // (2) The payload must re-extract identically through the same selection, and
-    // the whole replaced node must equal the spliced expectation.
+    // (2) Every retained object entry must be byte-stable and the target must
+    // re-parse with the new declared shape. The SerializedFile object table, all
+    // other objects in the same node and every other bundle node are compared.
     let mut check_decoder = NodeDecoder::new(&candidate, &check_bundle);
+    let check_node = &check_bundle.nodes[node_index];
+    if check_node.offset != bundle.nodes[node_index].offset || check_node.size != bundle.nodes[node_index].size
+        || check_node.flags != bundle.nodes[node_index].flags || check_node.path != bundle.nodes[node_index].path {
+        return Err(invalid("Unity texture replace changed the bundle node table"));
+    }
+    let check_slice = check_decoder.read(check_node.offset, check_node.size)?;
+    let before_inventory = node_texture_inventory(&located.slice)?;
+    let after_inventory = node_texture_inventory(&check_slice)?;
+    if after_inventory.version != before_inventory.version || after_inventory.big != before_inventory.big
+        || after_inventory.textures != before_inventory.textures
+        || after_inventory.object_records.len() != before_inventory.object_records.len() {
+        return Err(invalid("Unity texture replace changed the SerializedFile object table"));
+    }
+    for (before, after) in before_inventory.object_records.iter().zip(&after_inventory.object_records) {
+        if before.id != after.id || before.start != after.start || before.size != after.size
+            || before.type_index != after.type_index || before.table_start != after.table_start
+            || before.table_end != after.table_end {
+            return Err(invalid("Unity texture replace changed a SerializedFile object entry"));
+        }
+    }
+    let (_, declared) = after_inventory.details.iter().find(|(id, _)| *id == path_id)
+        .ok_or_else(|| invalid("Unity texture replace target no longer re-parses as a supported texture"))?;
+    if declared.texture.width != new_width || declared.texture.height != new_height
+        || declared.texture.mips != new_mips || declared.texture.format != old_texture.format
+        || declared.texture.inline_bytes != new_len
+        || declared.image_count != Some(1) || declared.dimension != Some(2) {
+        return Err(invalid("Unity texture replace target did not re-parse with the new declared shape"));
+    }
+    // (3) The payload must re-extract identically through the same selection, and
+    // the whole replaced node must equal the spliced expectation.
     let check = locate_texture(node_index, path_id, &check_bundle, &mut check_decoder)?;
     if check.version != located.version || check.big != located.big
-        || check.expected != located.expected
-        || check.fields.texture.width != located.fields.texture.width
-        || check.fields.texture.height != located.fields.texture.height
-        || check.fields.texture.format != located.fields.texture.format
-        || check.fields.texture.mips != located.fields.texture.mips
-        || check.fields.texture.inline_bytes != located.fields.texture.inline_bytes {
+        || check.expected != new_len as u64
+        || check.fields.texture.width != new_width
+        || check.fields.texture.height != new_height
+        || check.fields.texture.format != old_texture.format
+        || check.fields.texture.mips != new_mips
+        || check.fields.texture.inline_bytes != new_len {
         return Err(invalid("Unity texture replace changed the located texture identity"));
     }
     let LocatedStorage::Inline { payload_start: checked_start, payload_len: checked_len, .. } = check.storage else {
         return Err(invalid("Unity texture replace did not produce inline storage"));
     };
-    if checked_len as u64 != new_len
+    if checked_len != new_len
         || &check.slice[checked_start..checked_start + checked_len] != &new_payload[..]
         || check.slice != expected_node {
         return Err(invalid("Unity texture replace payload failed re-extraction"));
     }
-    // (3) Every other node's decoded bytes must be unchanged, node by node.
+    // (4) Every other node's decoded bytes must be unchanged, node by node.
     let mut old_decoder = NodeDecoder::new(&bytes, &bundle);
     let mut new_decoder = NodeDecoder::new(&candidate, &check_bundle);
     old_decoder.decode_budget = MAX_TEXTURE_BUNDLE + 64 * 1024 * 1024;
@@ -754,13 +970,17 @@ pub fn texture_replace(node_index: usize, path_id: u64, payload_path: &Path, inp
             position += take;
         }
     }
-    // Publish the fully verified candidate. NO_GAIN is a container-size note only:
-    // replacement does not require the rebuilt bundle to be smaller.
+    // Publish only a strictly smaller container: the route's purpose is space,
+    // and a rebuild that is not smaller is reported as NO_GAIN with nothing
+    // written (the same rule the lossless recompression export uses).
+    source.unchanged()?;
     let status = if candidate.len() < bytes.len() { "EXPORTED" } else { "NO_GAIN" };
-    super::detached_export::publish(output, &candidate, || source.unchanged())?;
-    println!("UNITYFS_TEXTURE_REPLACE|{node_index}|{path_id}|{payload_len}|{new_len}|{}|{}|{status}",
-        bundle.nodes.len(), bundle.blocks.len());
-    eprintln!("Experimental detached Unity texture replace: source unchanged; one inline payload copied verbatim with no re-encode. NO_GAIN means the published bundle is not smaller than the source and refers to container size only. Only an all-zero uncompressed-data hash field is accepted and it is preserved, not recomputed; no CRC/CAB-name/Addressables-catalogue rebuild, no .resS relocation and no runtime validation. Research artifact only.");
+    if status == "EXPORTED" {
+        super::detached_export::publish(output, &candidate, || source.unchanged())?;
+    }
+    println!("UNITYFS_TEXTURE_REPLACE|{node_index}|{path_id}|{}x{}|{new_width}x{new_height}|{}|{new_mips}|{payload_len}|{new_len}|{}|{}|{status}",
+        old_texture.width, old_texture.height, old_texture.mips, bytes.len(), candidate.len());
+    eprintln!("Experimental detached Unity texture replace: source unchanged; the supplied payload bytes are spliced verbatim (no pixel/codec re-encode) and a shrink keeps the object extent by zero-padding the tail. NO_GAIN means the rebuilt container is not strictly smaller and nothing was published. Only an all-zero uncompressed-data hash field is accepted and it is preserved, not recomputed; no CRC/CAB-name/Addressables-catalogue rebuild, no .resS relocation, no proof that the Unity runtime accepts a zero-padded object extent and no runtime validation. Research artifact only.");
     Ok(())
 }
 
@@ -1213,6 +1433,7 @@ mod tests {
         let specs = [
             (0, "Texture2D", "Base", -1, 0),
             (1, "int", "m_Width", 4, 0), (1, "int", "m_Height", 4, 0),
+            (1, "int", "m_CompleteImageSize", 4, 0),
             (1, "int", "m_TextureFormat", 4, 0), (1, "int", "m_MipCount", 4, 0),
             (1, "int", "m_ImageCount", 4, 0), (1, "int", "m_TextureDimension", 4, 0),
             (1, "TypelessData", "image data", -1, 0x4000),
@@ -1234,7 +1455,7 @@ mod tests {
     }
     fn inline_object(width: u32, height: u32, format: u32, mips: u32, payload: &[u8]) -> Vec<u8> {
         let mut o = Vec::new();
-        for v in [width, height, format, mips, 1, 2] { o.extend_from_slice(&v.to_le_bytes()); }
+        for v in [width, height, payload.len() as u32, format, mips, 1, 2] { o.extend_from_slice(&v.to_le_bytes()); }
         o.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         o.extend_from_slice(payload);
         o.extend_from_slice(&0u64.to_le_bytes()); // stream offset
@@ -1243,8 +1464,9 @@ mod tests {
         while o.len() % 4 != 0 { o.push(0); }
         o
     }
-    /// One v22 little-endian SerializedFile with a single Texture2D object (id 123).
-    fn serialized_inline_texture(object: &[u8]) -> Vec<u8> {
+    /// One v22 little-endian SerializedFile holding the given texture objects
+    /// (path ID, object bytes) at 16-byte-aligned data offsets.
+    fn serialized_objects(objects: &[(u64, Vec<u8>)]) -> Vec<u8> {
         let (raw, strings) = texture_tree();
         let mut m = b"2022.3.0f1\0".to_vec();
         put32(&mut m, 19); m.push(1); put32(&mut m, 1);
@@ -1252,17 +1474,27 @@ mod tests {
         put32(&mut m, (raw.len() / 32) as u32); put32(&mut m, strings.len() as u32);
         m.extend(&raw); m.extend(&strings);
         put32(&mut m, 0); // dependencies
-        put32(&mut m, 1); while m.len() % 4 != 0 { m.push(0); }
-        put64(&mut m, 123); put64(&mut m, 0); put32(&mut m, object.len() as u32); put32(&mut m, 0);
+        put32(&mut m, objects.len() as u32); while m.len() % 4 != 0 { m.push(0); }
+        let mut payload = Vec::new();
+        for (index, (id, object)) in objects.iter().enumerate() {
+            if index > 0 { while payload.len() % 16 != 0 { payload.push(0); } }
+            put64(&mut m, *id); put64(&mut m, payload.len() as u64);
+            put32(&mut m, object.len() as u32); put32(&mut m, 0);
+            payload.extend_from_slice(object);
+        }
         for _ in 0..3 { put32(&mut m, 0); } m.push(0);
         let data = (48 + m.len() as u64).div_ceil(16) * 16;
         let mut sf = vec![0u8; 48];
         sf[8..12].copy_from_slice(&22u32.to_be_bytes());
         sf[20..24].copy_from_slice(&(m.len() as u32).to_be_bytes());
-        sf[24..32].copy_from_slice(&(data + object.len() as u64).to_be_bytes());
+        sf[24..32].copy_from_slice(&(data + payload.len() as u64).to_be_bytes());
         sf[32..40].copy_from_slice(&data.to_be_bytes());
-        sf.extend(&m); sf.resize(data as usize, 0); sf.extend(object);
+        sf.extend(&m); sf.resize(data as usize, 0); sf.extend(&payload);
         sf
+    }
+    /// One v22 little-endian SerializedFile with a single Texture2D object (id 123).
+    fn serialized_inline_texture(object: &[u8]) -> Vec<u8> {
+        serialized_objects(&[(123, object.to_vec())])
     }
     /// A stored UnityFS bundle whose single node is a flag-4 SerializedFile.
     fn bundle_with_serialized(data: &[u8]) -> Vec<u8> {
@@ -1316,7 +1548,7 @@ mod tests {
     }
     fn streamed_object(path: &str, size: u32) -> Vec<u8> {
         let mut o = Vec::new();
-        for v in [8u32, 8, 4, 1, 1, 2] { o.extend_from_slice(&v.to_le_bytes()); }
+        for v in [8u32, 8, size, 4, 1, 1, 2] { o.extend_from_slice(&v.to_le_bytes()); }
         o.extend_from_slice(&0u32.to_le_bytes()); // inline length 0
         o.extend_from_slice(&0u64.to_le_bytes()); // stream offset 0
         o.extend_from_slice(&size.to_le_bytes()); // stream size
@@ -1350,7 +1582,7 @@ mod tests {
         assert!(texture_export(1, 123, &input, &root.join("other2.dds")).is_err());
         // A streamed variant (no inline payload, non-empty stream extent) is refused.
         let mut streamed = Vec::new();
-        for v in [8u32, 8, 4, 1, 1, 2] { streamed.extend_from_slice(&v.to_le_bytes()); }
+        for v in [8u32, 8, 4, 4, 1, 1, 2] { streamed.extend_from_slice(&v.to_le_bytes()); }
         streamed.extend_from_slice(&0u32.to_le_bytes()); // inline length 0
         streamed.extend_from_slice(&0u64.to_le_bytes()); // stream offset
         streamed.extend_from_slice(&4u32.to_le_bytes()); // stream size
@@ -1410,11 +1642,15 @@ mod tests {
     /// their total.
     fn bundle_with_blocks(data: &[u8], nodes: &[(u64, u64, u32, &str)], block_sizes: &[usize],
         codec: u16, hash: [u8; 16]) -> Vec<u8> {
-        assert_eq!(block_sizes.iter().sum::<usize>(), data.len());
-        let encode = |chunk: &[u8]| -> Vec<u8> {
+        bundle_with_encoder(data, nodes, block_sizes, codec, hash, |chunk| {
             if codec == 0 { chunk.to_vec() }
             else { compress(chunk, Some(CompressionMode::HIGHCOMPRESSION(9)), false).unwrap() }
-        };
+        })
+    }
+    /// The same bundle builder with an explicit block/metadata encoder.
+    fn bundle_with_encoder(data: &[u8], nodes: &[(u64, u64, u32, &str)], block_sizes: &[usize],
+        codec: u16, hash: [u8; 16], encode: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
+        assert_eq!(block_sizes.iter().sum::<usize>(), data.len());
         let mut info = hash.to_vec();
         info.extend_from_slice(&(block_sizes.len() as u32).to_be_bytes());
         let mut blocks = Vec::new();
@@ -1435,9 +1671,7 @@ mod tests {
             info.extend_from_slice(&flags.to_be_bytes());
             info.extend_from_slice(path.as_bytes()); info.push(0);
         }
-        let metadata = if codec == 0 { info.clone() } else {
-            compress(&info, Some(CompressionMode::HIGHCOMPRESSION(9)), false).unwrap()
-        };
+        let metadata = if codec == 0 { info.clone() } else { encode(&info) };
         let mut b = b"UnityFS\0".to_vec();
         b.extend_from_slice(&8u32.to_be_bytes());
         b.extend_from_slice(b"5.x.x\02021.3.45f1\0"); let fields = b.len();
@@ -1447,6 +1681,21 @@ mod tests {
         b.extend_from_slice(&metadata);
         for encoded in blocks { b.extend_from_slice(&encoded); }
         let length = b.len() as u64; b[fields..fields + 8].copy_from_slice(&length.to_be_bytes()); b
+    }
+    /// A valid, deliberately literal-only LZ4 block. Decodable but always beaten
+    /// by the high-compression re-encode, so a patched bundle is provably
+    /// smaller without depending on LZ4 heuristics.
+    fn literal_lz4(data: &[u8]) -> Vec<u8> {
+        let mut encoded = vec![(data.len().min(15) as u8) << 4];
+        let mut n = data.len().saturating_sub(15);
+        while n >= 255 { encoded.push(255); n -= 255; }
+        if data.len() >= 15 { encoded.push(n as u8); }
+        encoded.extend_from_slice(data); encoded
+    }
+    /// A bundle whose blocks and metadata use the poor LZ4 encoding above, with
+    /// a single SerializedFile node.
+    fn bundle_with_poor_blocks(sf: &[u8]) -> Vec<u8> {
+        bundle_with_encoder(sf, &[(0, sf.len() as u64, 4, "CAB-test")], &[sf.len()], 3, [0u8; 16], literal_lz4)
     }
     /// Object-relative payload offset of the single inline Texture2D in `sf`.
     fn inline_payload_offset(sf: &[u8], path_id: u64) -> usize {
@@ -1464,7 +1713,9 @@ mod tests {
         let payload: Vec<u8> = (0..256u32).map(|i| (i * 7 % 251) as u8).collect();
         let object = inline_object(8, 8, 4, 1, &payload);
         let sf = serialized_inline_texture(&object);
-        let bundle = bundle_with_serialized(&sf);
+        // A poor (literal-only) source encoding guarantees the re-encoded block
+        // is strictly smaller, so the same-shape replace is published.
+        let bundle = bundle_with_poor_blocks(&sf);
         let replacement: Vec<u8> = (0..256u32).map(|i| ((i * 11 + 3) % 253) as u8).collect();
         let root = std::env::temp_dir().join(format!("bgc-unitytex-replace-{}-{}", std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
@@ -1525,7 +1776,9 @@ mod tests {
         for cut in cuts { sizes.push(cut - previous); previous = cut; }
         let nodes = [(0u64, sf.len() as u64, 4u32, "CAB-test"),
                      (sf.len() as u64, stream.len() as u64, 0u32, "CAB-test.resS")];
-        let bundle = bundle_with_blocks(&data, &nodes, &sizes, 3, [0u8; 16]);
+        // Poor source encoding: the touched blocks are re-encoded smaller, so the
+        // strictly-smaller publication gate passes.
+        let bundle = bundle_with_encoder(&data, &nodes, &sizes, 3, [0u8; 16], literal_lz4);
         let replacement: Vec<u8> = (0..256u32).map(|i| ((i * 5 + 9) % 251) as u8).collect();
         let root = std::env::temp_dir().join(format!("bgc-unitytex-blocks-{}-{}", std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
@@ -1597,6 +1850,183 @@ mod tests {
         assert_eq!(fs::read(&short_input).unwrap(), short_bundle);
         assert_eq!(fs::read(&hashed_input).unwrap(), hashed);
         assert_eq!(fs::read(&streamed_input).unwrap(), streamed);
+        fs::remove_dir_all(root).unwrap();
+    }
+    /// Chain length of the complete 1x1-terminated chain of one shape.
+    fn chain_len(format: u32, width: u32, height: u32) -> usize {
+        texture_shape_bytes(format, width, height, full_mip_levels(width, height)).unwrap() as usize
+    }
+    fn payload_of(len: usize, seed: u32) -> Vec<u8> {
+        (0..len as u32).map(|i| (i.wrapping_mul(seed).wrapping_add(7) % 251) as u8).collect()
+    }
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("{name}-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&root).unwrap();
+        root
+    }
+    #[test]
+    fn shrunk_inline_texture_keeps_the_object_extent_and_publishes_a_smaller_bundle() {
+        // 128x128 DXT1 with its complete 8-level chain. The 64x64 downscale is a
+        // 7-level chain, passes the repository short-edge policy, and is spliced
+        // into the same object extent with a zero-padded tail.
+        let old_len = chain_len(10, 128, 128);
+        assert_eq!(old_len, 10936);
+        let new_len = chain_len(10, 64, 64);
+        assert_eq!(new_len, 2744);
+        let old_payload = payload_of(old_len, 7);
+        let new_payload = payload_of(new_len, 11);
+        let other = payload_of(8 * 8 * 4, 3);
+        let objects = [(123u64, inline_object(128, 128, 10, 8, &old_payload)),
+                       (124u64, inline_object(8, 8, 4, 1, &other))];
+        let sf = serialized_objects(&objects);
+        let bundle = bundle_with_poor_blocks(&sf);
+        let root = scratch("bgc-unitytex-shrink");
+        let input = root.join("bundle"); fs::write(&input, &bundle).unwrap();
+        let payload_file = root.join("payload.bin"); fs::write(&payload_file, &new_payload).unwrap();
+        let output = root.join("shrunk.bundle");
+        texture_replace(0, 123, &payload_file, &input, &output).unwrap();
+        // (e) The source is never modified.
+        assert_eq!(fs::read(&input).unwrap(), bundle, "source must stay unchanged");
+        let out = fs::read(&output).unwrap();
+        assert!(out.len() < bundle.len(), "published bundle must be strictly smaller");
+        // The container keeps its node/block/decoded layout and the SerializedFile
+        // object table is byte-stable.
+        let (before, after) = (parse(&bundle).unwrap(), parse(&out).unwrap());
+        assert_eq!(before.nodes.len(), after.nodes.len());
+        assert_eq!(before.blocks.len(), after.blocks.len());
+        assert_eq!(before.decoded, after.decoded);
+        let (mut old_decoder, mut new_decoder) = (NodeDecoder::new(&bundle, &before), NodeDecoder::new(&out, &after));
+        let old_node = old_decoder.read(0, before.nodes[0].size).unwrap();
+        let new_node = new_decoder.read(0, after.nodes[0].size).unwrap();
+        let old_records = node_texture_inventory(&old_node).unwrap();
+        let new_records = node_texture_inventory(&new_node).unwrap();
+        assert_eq!(old_records.object_records.len(), new_records.object_records.len());
+        for (old, new) in old_records.object_records.iter().zip(&new_records.object_records) {
+            assert_eq!((old.id, old.start, old.size, old.type_index, old.table_start, old.table_end),
+                (new.id, new.start, new.size, new.type_index, new.table_start, new.table_end));
+        }
+        // (d) Everything outside the target object extent is byte-identical: no
+        // other object, table entry or node byte can have moved.
+        let target = old_records.object_records.iter().find(|record| record.id == 123).unwrap();
+        let (start, end) = (target.start as usize, (target.start + target.size) as usize);
+        assert_eq!(&old_node[..start], &new_node[..start]);
+        assert_eq!(&old_node[end..], &new_node[end..]);
+        let before_other = old_records.object_records.iter().find(|record| record.id == 124).unwrap();
+        let after_other = new_records.object_records.iter().find(|record| record.id == 124).unwrap();
+        assert_eq!(&old_node[before_other.start as usize..(before_other.start + before_other.size) as usize],
+            &new_node[after_other.start as usize..(after_other.start + after_other.size) as usize]);
+        // (a) The patched object re-parses with the new declared shape and the
+        // fields sit at the captured spans; the tail of the old payload extent is
+        // zero, which is what keeps every later field's parsed value identical.
+        let (_, fields) = new_records.details.iter().find(|(id, _)| *id == 123).unwrap();
+        assert_eq!((fields.texture.width, fields.texture.height, fields.texture.mips), (64, 64, 7));
+        assert_eq!(fields.texture.inline_bytes, new_len);
+        assert_eq!((fields.image_count, fields.dimension), (Some(1), Some(2)));
+        let object = &new_node[start..end];
+        for (name, value) in [("m_Width", 64u32), ("m_Height", 64),
+                              ("m_CompleteImageSize", new_len as u32), ("m_MipCount", 7)] {
+            let span = fields.spans.get(name).unwrap();
+            assert_eq!(read_u32(object, span.start, false).unwrap(), value, "{name}");
+        }
+        let span = fields.spans.get("image data").unwrap();
+        let (offset, length) = span.payload.unwrap();
+        assert_eq!(length, new_len);
+        assert_eq!(span.start + 4, offset);
+        assert_eq!(read_u32(object, span.start, false).unwrap(), new_len as u32);
+        assert!(object[offset + length..].iter().all(|byte| *byte == 0), "old payload extent must be zero-padded");
+        // The payload re-extracts byte-identically through the shared selection.
+        let dds_path = root.join("check.dds");
+        texture_export(0, 123, &output, &dds_path).unwrap();
+        let dds = fs::read(&dds_path).unwrap();
+        let check = crate::texture::parse(&dds).unwrap();
+        assert_eq!((check.width, check.height, check.mipmaps), (64, 64, 7));
+        assert_eq!(&dds[check.data_start..], &new_payload[..]);
+        // A shrink that is not strictly smaller is not published, and an existing
+        // destination is never replaced.
+        assert!(texture_replace(0, 123, &payload_file, &input, &output).is_err());
+        assert_eq!(fs::read(&output).unwrap(), out);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn shrink_refuses_upscale_policy_and_unmatched_chain_lengths() {
+        let old_len = chain_len(10, 128, 128);
+        let old_payload = payload_of(old_len, 7);
+        let object = inline_object(128, 128, 10, 8, &old_payload);
+        let sf = serialized_inline_texture(&object);
+        let bundle = bundle_with_poor_blocks(&sf);
+        let root = scratch("bgc-unitytex-shrink-refuse");
+        let input = root.join("bundle"); fs::write(&input, &bundle).unwrap();
+        let payload_file = root.join("payload.bin");
+        let cases = [
+            // (b) An upscaled shape cannot be spliced: its chain is larger than the
+            // current extent.
+            ("upscale", payload_of(chain_len(10, 256, 256), 11), "larger than the current"),
+            // (c) A 32x32 chain violates the repository short-edge policy.
+            ("thin", payload_of(chain_len(10, 32, 32), 11), "texture policy"),
+            // (c) One level short of the old chain matches no accepted shape.
+            ("levels", payload_of(old_len - 8, 11), "must be exactly"),
+            // (c) An arbitrary length matches nothing at all.
+            ("odd", payload_of(old_len / 2 + 1, 11), "must be exactly"),
+        ];
+        for (name, payload, message) in cases {
+            fs::write(&payload_file, &payload).unwrap();
+            let destination = root.join(&format!("{name}.bundle"));
+            let error = texture_replace(0, 123, &payload_file, &input, &destination).unwrap_err();
+            assert!(format!("{error}").contains(message), "{name}: {error}");
+            assert!(!destination.exists(), "{name} must not publish");
+        }
+        // A shrink needs the m_CompleteImageSize span (its value changes) and it
+        // must hold exactly the old inline length.
+        let shrink_file = root.join("shrink.bin");
+        fs::write(&shrink_file, payload_of(chain_len(10, 64, 64), 11)).unwrap();
+        let mut inconsistent = inline_object(128, 128, 10, 8, &old_payload);
+        inconsistent[8..12].copy_from_slice(&0u32.to_le_bytes());
+        let inconsistent_bundle = bundle_with_poor_blocks(&serialized_inline_texture(&inconsistent));
+        let inconsistent_input = root.join("inconsistent");
+        fs::write(&inconsistent_input, &inconsistent_bundle).unwrap();
+        let error = texture_replace(0, 123, &shrink_file, &inconsistent_input,
+            &root.join("inconsistent.bundle")).unwrap_err();
+        assert!(format!("{error}").contains("does not hold the parsed value"), "{error}");
+        // A source with nonzero bytes after the payload cannot be shrunk: the
+        // fields that follow the payload would then be read from the zero tail.
+        let mut stale = Vec::new();
+        for v in [128u32, 128, old_len as u32, 10, 8, 1, 2] { stale.extend_from_slice(&v.to_le_bytes()); }
+        stale.extend_from_slice(&(old_len as u32).to_le_bytes());
+        stale.extend_from_slice(&old_payload);
+        stale.extend_from_slice(&0xdead_beefu64.to_le_bytes()); // stale stream offset
+        stale.extend_from_slice(&0u32.to_le_bytes());
+        stale.extend_from_slice(&0u32.to_le_bytes());
+        while stale.len() % 4 != 0 { stale.push(0); }
+        let stale_bundle = bundle_with_poor_blocks(&serialized_inline_texture(&stale));
+        let stale_input = root.join("stale"); fs::write(&stale_input, &stale_bundle).unwrap();
+        let error = texture_replace(0, 123, &shrink_file, &stale_input,
+            &root.join("stale.bundle")).unwrap_err();
+        assert!(format!("{error}").contains("every byte after"), "{error}");
+        assert_eq!(fs::read(&input).unwrap(), bundle);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn no_gain_replacements_publish_nothing() {
+        // A stored-codec source keeps the object extent byte-for-byte, so both a
+        // shrink and a same-shape payload rebuild to exactly the original size:
+        // the route reports NO_GAIN and leaves the destination absent.
+        let old_len = chain_len(10, 128, 128);
+        let object = inline_object(128, 128, 10, 8, &payload_of(old_len, 7));
+        let sf = serialized_inline_texture(&object);
+        let bundle = bundle_with_serialized(&sf);
+        let root = scratch("bgc-unitytex-nogain");
+        let input = root.join("bundle"); fs::write(&input, &bundle).unwrap();
+        let shrink = root.join("shrink.bin");
+        fs::write(&shrink, payload_of(chain_len(10, 64, 64), 11)).unwrap();
+        let same = root.join("same.bin");
+        fs::write(&same, payload_of(old_len, 13)).unwrap();
+        for (name, payload) in [("shrink.bundle", &shrink), ("same.bundle", &same)] {
+            let destination = root.join(name);
+            texture_replace(0, 123, payload, &input, &destination).unwrap();
+            assert!(!destination.exists(), "{name} must not publish a non-smaller rebuild");
+        }
+        assert_eq!(fs::read(&input).unwrap(), bundle);
         fs::remove_dir_all(root).unwrap();
     }
 }

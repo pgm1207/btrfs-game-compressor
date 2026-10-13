@@ -1,5 +1,8 @@
 //! Bounded type-tree-guided Texture2D inspection. Never guesses stripped schemas,
 //! decodes textures, follows stream paths or writes files. Unsupported trees skip.
+//! A schema must consume the whole object except for one trailing run of zero
+//! bytes, which the detached texture replace writer produces (shrunk inline
+//! payload inside an unchanged object extent); a nonzero tail is still refused.
 use std::{collections::BTreeMap, io};
 fn bad(s: &str) -> io::Error { super::invalid(s) }
 fn unsupported(s: &str) -> io::Error { io::Error::new(io::ErrorKind::Unsupported, s) }
@@ -292,7 +295,15 @@ fn inspect_fields(nodes: &[Node], bytes: &[u8], big: bool, spans: bool) -> io::R
     let mut r = Reader { bytes, pos: 0, big, work: 200000, values: BTreeMap::new(),
         spans: spans.then(BTreeMap::new), span_text_budget: 128 * 1024 };
     r.walk(nodes, 0, "", true)?;
-    if r.pos != bytes.len() { return Err(bad("Unity texture schema does not consume complete object")); }
+    // The schema normally consumes the complete object. Exactly one trailing run
+    // of zero bytes is accepted instead: the detached texture replace writer
+    // shrinks an inline payload inside the object's unchanged serialized extent,
+    // so the fields that follow the payload are read from a zero tail that the
+    // tree legitimately does not consume. Every remaining byte must be zero; a
+    // nonzero tail is still refused as an unproven layout.
+    if bytes[r.pos..].iter().any(|byte| *byte != 0) {
+        return Err(bad("Unity texture schema does not consume complete object"));
+    }
     let number = |path: &str| -> io::Result<u64> {
         match r.values.get(path) { Some(Value::Number(n)) => Ok(*n), _ => Err(bad("missing numeric Unity texture field")) }
     };
@@ -396,7 +407,9 @@ pub(crate) mod tests {
             assert_eq!((t.inline_bytes, t.stream_offset, t.stream_size), (0, 4096, 1398120));
             assert_eq!(t.stream_path, "shared.assets.resSxx");
             for n in 0..bytes.len() { assert!(inspect_texture(&tree, &bytes[..n], big).is_err(), "{big}:{n}"); }
-            let mut extra = bytes.clone(); extra.push(0); assert!(inspect_texture(&tree, &extra, big).is_err());
+            // Only a trailing run of zero bytes is tolerated (the detached
+            // replace writer's zero tail); any other extension is refused.
+            let mut extra = bytes.clone(); extra.push(1); assert!(inspect_texture(&tree, &extra, big).is_err());
         }
     }
     #[test]
@@ -412,6 +425,22 @@ pub(crate) mod tests {
         assert!(inspect_texture(&tree, &broken, false).is_err());
         let mut duplicate = tree.clone(); duplicate[2].name = "m_Width".to_owned();
         assert!(inspect_texture(&duplicate, &bytes, false).is_err());
+    }
+    #[test]
+    fn a_zero_tail_is_accepted_and_a_nonzero_tail_is_still_refused() {
+        let (raw, strings, bytes) = fixture(false);
+        let tree = parse(&raw, &strings, 32, false).unwrap();
+        assert!(inspect_texture(&tree, &bytes, false).is_ok());
+        // The detached texture replace writer leaves a zero tail when it shrinks
+        // an inline payload inside an unchanged object extent.
+        let mut zeroed = bytes.clone();
+        zeroed.extend_from_slice(&[0u8; 64]);
+        assert!(inspect_texture(&tree, &zeroed, false).is_ok());
+        assert!(inspect_texture_fields(&tree, &zeroed, false).unwrap().spans.contains_key("image data"));
+        let mut nonzero = bytes.clone();
+        nonzero.extend_from_slice(&[0u8; 63]);
+        nonzero.push(1);
+        assert!(inspect_texture(&tree, &nonzero, false).is_err());
     }
     #[test]
     fn unknown_leaf_and_common_offsets_fail_closed() {
