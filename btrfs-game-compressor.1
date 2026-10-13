@@ -49,6 +49,28 @@ as unavailable.
 .B \-\-recheck
 Remeasure every discovered game and refresh its current original and on-disk sizes without recompressing files. Existing compression timestamps are preserved, so changed games remain marked updated. Requires root permission for Btrfs extent measurements.
 .TP
+.B \-\-run
+Process every pending game non\-interactively: compress the games that need
+compression, then deduplicate each one. Same selection rules and per\-game steps
+as the interactive batch, with no menus and no prompts, so a script or a
+supervisor can drive it. Beta asset optimization is never applied unattended,
+games held back by
+.I exclude_games
+or
+.I max_size_mib
+are skipped, running games are left alone, and the pass is safe to interrupt and
+re\-run.
+.TP
+.B \-\-no\-dedupe
+With
+.BR \-\-run ,
+stop after compression. Games whose compression is already current are not
+queued, and a compressed game stays marked
+.B COMPRESSED
+until a later dedupe pass (or
+.BR \-\-dedupe )
+completes it.
+.TP
 .BI \-\-assets " GAME"
 Preview beta asset optimization for one installed game at the configured
 profile. Supported media include loose images, simple legacy DDS textures, and
@@ -458,6 +480,15 @@ Extra library roots, one per line.
 Installs holding less than this many MiB of file data are treated as empty
 download leftovers and skipped. \fB0\fR disables the filter.
 .TP
+.I ~/.config/btrfs\-game\-compressor/max_size_mib
+Batch passes only touch games smaller than this many MiB; \fB0\fR or no file
+disables the ceiling. Status and history views are never filtered by it.
+.TP
+.I ~/.config/btrfs\-game\-compressor/exclude_games
+One exact game folder name per line; blank lines and \fB#\fRcomments are
+ignored. Batch passes never touch these games, while status and history views
+still report them.
+.TP
 .I ~/.config/btrfs\-game\-compressor/compress_level
 Zstd level passed to
 .BR "btrfs filesystem defragment \-L" .
@@ -538,6 +569,8 @@ btrfs\-game\-compressor
 btrfs\-game\-compressor \-\-status
 btrfs\-game\-compressor \-\-status \-\-pending
 btrfs\-game\-compressor \-\-dry\-run
+btrfs\-game\-compressor \-\-run
+btrfs\-game\-compressor \-\-run \-\-no\-dedupe
 btrfs\-game\-compressor \-\-dedupe
 btrfs\-game\-compressor \-\-library /mnt/games
 btrfs\-game\-compressor \-\-status \-\-no\-color | column \-t

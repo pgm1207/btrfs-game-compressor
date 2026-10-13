@@ -1271,6 +1271,70 @@ check_not_contains "--balance ran nothing unattended" "SHIM btrfs" "$out"
 PATH="$OLD_PATH"
 
 # ---------------------------------------------------------------------------
+group "Batch target filters"
+
+# A pass must never queue a game the user excluded, nor one at or above the
+# max_size_mib ceiling. A shim library lets the selection be observed without
+# touching a real filesystem: the inert backend makes every attempt fail fast,
+# so the names it tried are exactly the selection under test.
+FL="$WORK/filter library/steamapps/common"
+mkdir -p "$FL/KeepGame" "$FL/ExcludedGame" "$FL/HugeGame"
+dd if=/dev/zero of="$FL/KeepGame/data"     bs=1M count=10 2>/dev/null
+dd if=/dev/zero of="$FL/ExcludedGame/data" bs=1M count=10 2>/dev/null
+dd if=/dev/zero of="$FL/HugeGame/data"     bs=1M count=60 2>/dev/null
+echo "$FL" > "$HOME/.config/btrfs-game-compressor/custom_libraries.txt"
+: > "$HOME/.local/state/btrfs-game-compressor/compressed_games.db"
+mkdir -p "$WORK/filter-shim"
+cat > "$WORK/filter-shim/stat" <<'SHIM'
+#!/bin/sh
+if [ "$1" = "-f" ] && [ "$3" = "%T" ]; then echo btrfs; else exec /usr/bin/stat "$@"; fi
+SHIM
+chmod +x "$WORK/filter-shim/stat"
+PATH="$WORK/filter-shim:$PATH"
+
+FCFG="$HOME/.config/btrfs-game-compressor"
+printf 'ExcludedGame\n' > "$FCFG/exclude_games"
+echo "50" > "$FCFG/max_size_mib"
+
+out=$("$PROG" --run --no-dedupe --no-color < /dev/null 2>&1)
+check_contains "--run tries the kept game" "Compressing: KeepGame" "$out"
+check_not_contains "--run skips an excluded game" "ExcludedGame" "$out"
+check_not_contains "--run skips a game over the size ceiling" "HugeGame" "$out"
+check_contains "--run reports the held-back games" "2 game(s) held back by exclude_games / max_size_mib" "$out"
+
+# Both filters off: every game is a target again.
+: > "$FCFG/exclude_games"
+echo "0" > "$FCFG/max_size_mib"
+out=$("$PROG" --run --no-dedupe --no-color < /dev/null 2>&1)
+check_contains "an empty exclude file frees the game" "Compressing: ExcludedGame" "$out"
+check_contains "a zero ceiling frees a large game" "Compressing: HugeGame" "$out"
+
+# The filters govern passes only; the status view always reports every game.
+printf 'ExcludedGame\n' > "$FCFG/exclude_games"
+echo "50" > "$FCFG/max_size_mib"
+out=$("$PROG" --status --no-color 2>/dev/null)
+check_contains "status still lists an excluded game" "ExcludedGame" "$out"
+check_contains "status still lists an over-ceiling game" "HugeGame" "$out"
+
+# Invalid configuration is ignored with a notice, never fatal.
+echo "lots" > "$FCFG/max_size_mib"
+out=$("$PROG" --status --no-color 2>&1)
+check_contains "an invalid size ceiling is reported" "ignoring invalid value in" "$out"
+check_contains "an invalid size ceiling does not stop the report" "KeepGame" "$out"
+echo "0" > "$FCFG/max_size_mib"
+: > "$FCFG/exclude_games"
+
+# Mode and modifier rules.
+out=$("$PROG" --no-dedupe < /dev/null 2>&1); rc=$?
+check_rc "--no-dedupe alone is refused" 2 $rc
+check_contains "--no-dedupe names its mode" "only applies to --run" "$out"
+out=$("$PROG" --run --status < /dev/null 2>&1); rc=$?
+check_rc "--run cannot be combined with another mode" 2 $rc
+
+PATH="$OLD_PATH"
+rm -rf "$FL"
+
+# ---------------------------------------------------------------------------
 group "Community ratio table"
 
 # The parser has to work on the exact shape the repository stores and on the

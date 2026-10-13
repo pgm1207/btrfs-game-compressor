@@ -1145,10 +1145,11 @@ btrfs-game-compressor
 
 ### Non-interactive
 
-Every mode below is non-interactive. `--dedupe` and `--balance` change filesystem
-data; `--recheck` refreshes saved measurements without rewriting game files. A game
-is `COMPACTED` when its compression is current and a successful dedupe pass has
-completed since that compression. `COMPRESSED` games are queued for dedupe only.
+Every mode below is non-interactive. `--run`, `--dedupe` and `--balance` change
+filesystem data; `--recheck` refreshes saved measurements without rewriting game
+files. A game is `COMPACTED` when its compression is current and a successful
+dedupe pass has completed since that compression. `COMPRESSED` games are queued
+for dedupe only.
 
 ```sh
 # one-shot report
@@ -1159,6 +1160,15 @@ btrfs-game-compressor --status --pending
 
 # what a batch run would do, changing nothing
 btrfs-game-compressor --dry-run
+
+# headless pending-games batch: compress what needs it, then deduplicate each
+# game. Same rules and steps as the interactive batch, but it prompts for
+# nothing and never applies beta assets. Honours exclude_games and
+# max_size_mib, and is safe to interrupt and re-run.
+btrfs-game-compressor --run
+
+# compress now, leave every game's deduplication for a later pass
+btrfs-game-compressor --run --no-dedupe
 
 # deduplicate all discovered Btrfs Steam libraries and measure the result
 btrfs-game-compressor --dedupe
@@ -1322,6 +1332,25 @@ always compress a `LOW YIELD` game on demand: highlight it in the TUI and press 
 writes almost nothing, so it is worth doing even for a low percentage of a huge game.
 It is gated by a small absolute floor instead, `min_prune_mib` (default 1): a 1 GB
 saving on a 100 GB game is a prune, not a rewrite, and it is taken.
+
+### What a pass is allowed to touch
+
+Two optional files keep specific games out of every pass, whatever their state:
+
+```sh
+# one exact game folder name per line; blank lines and #comments are ignored
+printf 'MonsterHunterRise\n' > ~/.config/btrfs-game-compressor/exclude_games
+
+# only touch games smaller than this many MiB (0 or absent = no limit)
+echo 20480 > ~/.config/btrfs-game-compressor/max_size_mib   # 20 GiB
+```
+
+Both filters gate batch targets — the interactive batch and `--run` — and nothing
+else. `--status`, `--dry-run`, `--history` and `--stats` keep reporting the whole
+library, because an exclusion is a policy for writes, not a claim about what is
+installed. Every pass reports how many games its filters held back, so a skipped
+game never disappears silently. `max_size_mib` is the easy way to smoke-test a
+pass: set it low, watch one small game go through, then lift it.
 
 ### Empty installs are ignored
 
@@ -1677,11 +1706,13 @@ you can read. See [`ratios/README.md`](ratios/README.md) for the format and rule
 | `~/.config/btrfs-game-compressor/custom_libraries.txt` | extra library roots, one per line |
 | `~/.config/btrfs-game-compressor/throttle.conf` | `0` = full speed, `1` = `nice`/`ionice` eco mode |
 | `~/.config/btrfs-game-compressor/min_size_mib` | skip installs under this many MiB; `0` disables |
+| `~/.config/btrfs-game-compressor/max_size_mib` | batch passes only touch games under this many MiB; `0` or absent disables |
+| `~/.config/btrfs-game-compressor/exclude_games` | batch passes never touch these games; one exact folder name per line |
 | `~/.config/btrfs-game-compressor/min_gain_pct` | hold back **rewrites** (compression) under this `%` last time; `0` disables |
 | `~/.config/btrfs-game-compressor/min_prune_mib` | minimum saving for a **delete-only** prune; `0` disables |
 | `~/.config/btrfs-game-compressor/keep_languages` | languages `--slim` keeps (codes or names) |
 | `~/.config/btrfs-game-compressor/compress_level` | zstd level `1`-`15`, or `auto` to mirror the mount |
-| `~/.config/btrfs-game-compressor/visual_target` | beta asset profile: native, 360p, 720p, 1080p, 1440p or 4K |
+| `~/.config/btrfs-game-compressor/visual_target` | beta asset profile: native, lossless, or 480p / 720p / 1080p / 1440p / 4K |
 | `~/.config/btrfs-game-compressor/ratios_hint.json` | imported community table, used as a fallback hint only |
 | `~/.config/btrfs-game-compressor/auto_update` | `1` (default) checks for a newer release once a day; `0` disables |
 | `~/.local/state/btrfs-game-compressor/compressed_games.db` | what was compressed, when, and how much it saved |

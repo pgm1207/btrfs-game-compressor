@@ -19,6 +19,8 @@ STATE_FILE="$STATE_DIR/compressed_games.db"
 CUSTOM_LIBS_FILE="$CONFIG_DIR/custom_libraries.txt"
 THROTTLE_FILE="$CONFIG_DIR/throttle.conf"
 MIN_SIZE_FILE="$CONFIG_DIR/min_size_mib"
+MAX_SIZE_FILE="$CONFIG_DIR/max_size_mib"
+EXCLUDE_FILE="$CONFIG_DIR/exclude_games"
 LEVEL_FILE="$CONFIG_DIR/compress_level"
 VISUAL_TARGET_FILE="$CONFIG_DIR/visual_target"
 KEEP_LANGUAGES_FILE="$CONFIG_DIR/keep_languages"
@@ -108,6 +110,8 @@ OPT_STATUS=0
 OPT_DRY_RUN=0
 OPT_DEDUPE=0
 OPT_RECHECK=0
+OPT_RUN=0
+OPT_NO_DEDUPE=0
 OPT_ASSETS=0
 OPT_ASSET_PLAN_DIR=0
 ASSET_PLAN_DIR=""
@@ -191,6 +195,12 @@ OPTIONS
         --dedupe          manually scan all installed games in each Btrfs library
                           (also marks them COMPACTED after a successful pass)
         --recheck         remeasure installed games and refresh saved statistics
+        --run             batch the pending games headlessly: compress what
+                          needs compressing, then deduplicate each game. Prompts
+                          for nothing, never applies beta assets.
+                          Honours exclude_games and max_size_mib.
+        --no-dedupe       with --run, stop after compression; the game is left
+                          waiting for a later dedupe pass
         --assets GAME     preview [BETA] asset optimization for one game
         --asset-plan-dir DIR
                           read-only Balanced asset preview for any directory,
@@ -314,6 +324,8 @@ EXAMPLES
     $PROGNAME                        interactive mode
     $PROGNAME --status               one-shot report (safe for scripts/CI)
     $PROGNAME --dry-run --pending    what is still waiting to be compressed
+    $PROGNAME --run                  headless pending-games pass (compress + dedupe)
+    $PROGNAME --run --no-dedupe      compress now, deduplicate on a later pass
     $PROGNAME --dedupe               full-library maintenance scan (manual)
     $PROGNAME --recheck              refresh measurements without recompressing
     $PROGNAME --library /mnt/games   register a library outside Steam's VDF
@@ -336,6 +348,8 @@ FILES
         auto_update            1 = check for a newer release once a day (default)
         keep_languages         languages --slim keeps (codes or names, comma separated)
         min_prune_mib          MiB a delete-only prune must free to be worth doing (default 1)
+        exclude_games          passes never touch these games (one folder name per line)
+        max_size_mib           passes only touch games below this size (0 or absent = no limit)
     $STATE_DIR
         compressed_games.db    compression measurements and timestamps
         dedupe_completed.db   successful dedupe passes used for COMPACTED status
@@ -367,6 +381,8 @@ parse_args() {
             -n|--dry-run)  OPT_DRY_RUN=1 ;;
             --dedupe)      OPT_DEDUPE=1 ;;
             --recheck)     OPT_RECHECK=1 ;;
+            --run)         OPT_RUN=1 ;;
+            --no-dedupe)   OPT_NO_DEDUPE=1 ;;
             --export-fmod)
                 [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] || {
                     echo "$PROGNAME: --export-fmod requires QUALITY FILE OUTPUT" >&2; exit 2;
@@ -546,6 +562,7 @@ parse_args() {
     local -a modes=(
         "OPT_STATUS:--status:1"
         "OPT_DRY_RUN:--dry-run:0"
+        "OPT_RUN:--run:0"
         "OPT_DEDUPE:--dedupe:0"
         "OPT_RECHECK:--recheck:0"
         "OPT_ASSETS:--assets:0"
@@ -603,6 +620,10 @@ parse_args() {
     # --balance rewrites a whole filesystem; it can never ride along silently.
     if [ "$OPT_PENDING_ONLY" -eq 1 ] && [ "$OPT_STATUS" -ne 1 ] && [ "$OPT_DRY_RUN" -ne 1 ]; then
         echo "$PROGNAME: --pending only applies to --status or --dry-run" >&2
+        exit 2
+    fi
+    if [ "$OPT_NO_DEDUPE" -eq 1 ] && [ "$OPT_RUN" -ne 1 ]; then
+        echo "$PROGNAME: --no-dedupe only applies to --run" >&2
         exit 2
     fi
     if [ "$OPT_YES" -eq 1 ] && [ "$OPT_UNINSTALL" -ne 1 ] && [ "$OPT_SUBMIT_RATIOS" -ne 1 ]; then
@@ -745,6 +766,8 @@ normalize_languages() {
 
 load_config() {
     MIN_SIZE_MIB=1
+    MAX_SIZE_MIB=0
+    EXCLUDED_GAMES=()
     COMPRESS_LEVEL=auto
     VISUAL_TARGET=native
     KEEP_LANGUAGES=""
@@ -760,6 +783,32 @@ load_config() {
         elif [ -n "${val:-}" ]; then
             echo "$PROGNAME: ignoring invalid value in $MIN_SIZE_FILE (expected a whole number of MiB)" >&2
         fi
+    fi
+
+    # Upper size ceiling for batch targets: no file or 0 means no limit. This is
+    # a filter for passes, never a status: --status still reports every game.
+    if [ -f "$MAX_SIZE_FILE" ]; then
+        read -r val < "$MAX_SIZE_FILE" 2>/dev/null || val=""
+        if [[ "${val:-}" =~ ^[0-9]+$ ]]; then
+            MAX_SIZE_MIB="$val"
+        elif [ -n "${val:-}" ]; then
+            echo "$PROGNAME: ignoring invalid value in $MAX_SIZE_FILE (expected a whole number of MiB, 0 for no limit)" >&2
+        fi
+    fi
+
+    # Games a pass must never touch, one exact folder name per line. Blank lines
+    # and #comments are skipped. Only passes honour it: --status and --dry-run
+    # keep reporting the whole library so an exclusion is never mistaken for a
+    # game that does not exist.
+    if [ -f "$EXCLUDE_FILE" ]; then
+        local line
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [ -n "$line" ] || continue
+            [ "${line:0:1}" = "#" ] && continue
+            EXCLUDED_GAMES+=("$line")
+        done < "$EXCLUDE_FILE"
     fi
 
     if [ -f "$LEVEL_FILE" ]; then
@@ -1575,8 +1624,14 @@ ensure_sudo() {
     check_compsize
     if [ "$COMPSIZE_OK" -eq 1 ] && [ "$EUID" -ne 0 ]; then
         if ! sudo -n true 2>/dev/null; then
-            echo -e "${YELLOW}sudo access is required to read Btrfs compression metadata...${RESET}"
-            sudo -v
+            if [ "${HEADLESS:-0}" -eq 1 ]; then
+                # Detached runs cannot answer a password prompt; measurement
+                # degrades to "unknown" and the pass itself carries on.
+                echo "$PROGNAME: note: no cached sudo credentials; savings measurement will be unavailable for this pass." >&2
+            else
+                echo -e "${YELLOW}sudo access is required to read Btrfs compression metadata...${RESET}"
+                sudo -v
+            fi
         fi
     fi
 }
@@ -2291,13 +2346,32 @@ draw_progress_bar() {
 }
 
 batch_compress_routine() {
-    clear
-    tput cnorm
+    # HEADLESS is set by --run: a detached pass has no terminal at all, so the
+    # screen moves and keypress waits are skipped, and nothing ever prompts.
+    local headless="${HEADLESS:-0}"
+    if [ "$headless" -ne 1 ]; then
+        clear
+        tput cnorm
+    fi
     local pending=0 all_mode=0 choice="" allow_assets=0
-    local -a targets_idx=() skipped_low=()
+    local -a targets_idx=() skipped_low=() filtered_out=()
     # Compression's only skip gate is the ratio (min_gain_pct), so LOW YIELD is
     # disabled exactly when that gate is off.
     for i in "${!GAMES_STATUS[@]}"; do
+        # The user's own gates come first: an excluded or over-ceiling game is
+        # never queued, whatever its status.
+        if game_is_filtered_out "$i"; then
+            filtered_out+=("$i")
+            continue
+        fi
+        if [ "$OPT_NO_DEDUPE" -eq 1 ]; then
+            # Compression-only pass: a game whose compression is already
+            # current is waiting on deduplication alone, so it is not a target.
+            case "${GAMES_STATUS[$i]}" in
+                "UNCOMPRESSED"|"UPDATED") targets_idx+=("$i") ;;
+            esac
+            continue
+        fi
         case "${GAMES_STATUS[$i]}" in
             "UNCOMPRESSED"|"UPDATED") targets_idx+=("$i") ;;
             "COMPRESSED") targets_idx+=("$i") ;; # compressed already; dedupe only
@@ -2315,7 +2389,7 @@ batch_compress_routine() {
     # A finished filesystem compaction does not imply that optional visual
     # assets were processed. Recheck mode visits every installed game while
     # keeping filesystem compression limited to games that actually need it.
-    if [ -t 0 ]; then
+    if [ "$headless" -ne 1 ] && [ -t 0 ]; then
         echo "Batch mode:"
         echo "  [1] Process pending games (compress if needed, then optimize assets, then deduplicate)"
         echo "  [2] Optimize assets in every installed game ([BETA]; never recompresses whole games)"
@@ -2339,7 +2413,7 @@ batch_compress_routine() {
         NEEDS_FULL_CLEAR=1
         return
     fi
-    if [ "${VISUAL_TARGET:-native}" != native ] && [ "$pending" -gt 0 ] && [ -t 0 ]; then
+    if [ "${VISUAL_TARGET:-native}" != native ] && [ "$pending" -gt 0 ] && [ "$headless" -ne 1 ] && [ -t 0 ]; then
         echo
         echo "[BETA] Asset profile: $VISUAL_TARGET"
         echo "Images/DDS may lose detail; WAV may be resampled and supported standalone FMOD may be re-encoded. Audio quality follows the asset profile, not Zstd level. Opus conversion is not attempted."
@@ -2357,8 +2431,13 @@ batch_compress_routine() {
         if [ "${#skipped_low[@]}" -gt 0 ]; then
             echo -e "${YELLOW}Nothing to compress: ${#skipped_low[@]} game(s) are held back as low yield.${RESET}"
             echo "    Set min_gain_pct=0 to compress them anyway."
+        elif [ "${#filtered_out[@]}" -gt 0 ]; then
+            echo -e "${GREEN}Nothing to compress beyond the games held back by exclude_games / max_size_mib.${RESET}"
         else
             echo -e "${GREEN}All games are already compacted (compressed and deduplicated).${RESET}"
+        fi
+        if [ "${#filtered_out[@]}" -gt 0 ]; then
+            echo "    ${#filtered_out[@]} game(s) are held back by exclude_games / max_size_mib."
         fi
         if [ "$STAT_RUNNING_COUNT" -gt 0 ]; then
             echo -e "${YELLOW}$STAT_RUNNING_COUNT game(s) are running right now and were left alone.${RESET}"
@@ -2389,6 +2468,9 @@ batch_compress_routine() {
     fi
     if [ "${#skipped_low[@]}" -gt 0 ]; then
         echo "  ${#skipped_low[@]} low-yield game(s) held back (compressing rewrites the whole game, so a low ratio is skipped; set min_gain_pct=0 to include them)."
+    fi
+    if [ "${#filtered_out[@]}" -gt 0 ]; then
+        echo "  ${#filtered_out[@]} game(s) held back by exclude_games / max_size_mib."
     fi
     echo "  Press Ctrl+C anytime to cancel safely."
     hrule
@@ -2442,7 +2524,14 @@ batch_compress_routine() {
             e_t=$(( $(date +%s) - s_t ))
             print_summary_block "$g_name" "$b_disk" "$result" "$g_path"
             echo -e "    ${GREEN}✓ Finished in ${e_t}s${RESET}"
-            needs_dedupe=1
+            if [ "$OPT_NO_DEDUPE" -eq 1 ]; then
+                # Compression-only pass: mark the game as still waiting for a
+                # dedupe pass, exactly as a failed dedupe step would.
+                GAMES_STATUS[$idx]="COMPRESSED"
+                GAMES_DEDUPE_PENDING[$idx]=1
+            else
+                needs_dedupe=1
+            fi
             CHECKED_STATE[${GAMES_PATH[$idx]}]=0
         fi
 
@@ -2505,8 +2594,10 @@ batch_compress_routine() {
     else
         if [ "$all_mode" -eq 1 ]; then echo -e "${GREEN}Asset optimization batch finished! Press any key to return...${RESET}"; else echo -e "${GREEN}Batch compression and deduplication finished! Press any key to return...${RESET}"; fi
     fi
-    read_input
-    tput civis
+    if [ "$headless" -ne 1 ]; then
+        read_input
+        tput civis
+    fi
     NEEDS_FULL_CLEAR=1
 }
 
@@ -2583,6 +2674,19 @@ status_color() {
 
 low_yield_filter_disabled() {
     [[ "${MIN_GAIN_PCT:-}" =~ ^0+([.]0+)?$ ]]
+}
+
+# User gate for batch targets: exclude_games entries and the max_size_mib
+# ceiling. Only a pass consults this; status views stay unfiltered.
+game_is_filtered_out() {
+    local i="$1" entry
+    for entry in "${EXCLUDED_GAMES[@]}"; do
+        [ "$entry" = "${GAMES_NAME[$i]}" ] && return 0
+    done
+    if [ "${MAX_SIZE_MIB:-0}" -gt 0 ] && [ "${GAMES_BYTES[$i]:-0}" -ge "$(( MAX_SIZE_MIB * 1024 * 1024 ))" ]; then
+        return 0
+    fi
+    return 1
 }
 
 # Keep every pending-only view aligned with the batch queue: games held back as
@@ -5061,6 +5165,16 @@ fi
 for lib in "${LIBS[@]}"; do
     check_compress_mount "$lib"
 done
+
+# --run: the pending-games batch without a terminal. Same selection rules and
+# per-game steps as the interactive batch, minus every menu and prompt; beta
+# assets are never applied unattended. --no-dedupe stops after compression.
+if [ "$OPT_RUN" -eq 1 ]; then
+    require_btrfs
+    HEADLESS=1
+    batch_compress_routine
+    exit $?
+fi
 
 if [ ! -t 0 ]; then
     echo "$PROGNAME: interactive mode needs a terminal. Use --status or --dry-run when piping." >&2

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Filters and headless batches
+
+- Add `--run`: process every pending game without a terminal. Same selection
+  rules and per-game steps as the interactive batch (compress what needs it,
+  then deduplicate each game), no menus and no prompts, beta asset optimization
+  is never applied unattended, and the pass is safe to interrupt and re-run.
+  `--no-dedupe` stops after compression and leaves the game waiting for a later
+  dedupe pass.
+- Add `exclude_games` (one exact game folder name per line; blank lines and
+  `#`comments are ignored) and `max_size_mib` (a size ceiling in MiB; `0` or no
+  file disables it) config files. Both gate batch targets only - `--status`,
+  `--dry-run`, `--history` and `--stats` keep reporting the whole library - and
+  every pass reports how many games its filters held back.
+- Document both filters and `--run` in `--help`, the man page and the README,
+  and cover selection, config validation and the mode rules in the smoke suite.
+
 ### Development routes
 
 - Add the gated, in-place `unityfs-texture-apply PROFILE LEVEL GAME_DIR
