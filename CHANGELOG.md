@@ -37,6 +37,19 @@
   library-wide `--dedupe` can complete on a library that contains Proton.
   Genuine rejected ranges still fail the pass.
 
+- Add physical **stream compaction** to the streamed `unityfs-texture-replace`
+  route: the freed `[new_end, old_end)` range is removed from the `.resS` node
+  and every later texture's `m_StreamData/offset` in that node is shifted by the
+  delta through its captured span, with a full pre-publish re-verification (all
+  streamed textures re-extracted from source and candidate and compared byte for
+  byte, all other nodes and object records unchanged, strict size gain). If any
+  reference cannot be proven (unresolved, straddling, missing span, >4096
+  streamed objects) it falls back to the zero-padded result instead of guessing.
+  Validated on a real Cocoon bundle: 262,144 decoded bytes removed, 200 offsets
+  shifted, `.resS` 98,237,088 -> 97,974,944, and an independent verifier agrees.
+  Honest limit: the file gain tracks the *compressed* size of the removed region,
+  so heavily compressible data barely shrinks the bundle.
+
 ## 0.3.1 — 2026-10-08 — Recovery hardening, measurement and DDS quality
 
 This maintenance release contains the changes listed below. The release artifacts

@@ -4,8 +4,12 @@
 //! research-only Texture2D export and a verified in-place payload replace, which
 //! can shrink a mip chain inside the object's unchanged serialized extent (inline
 //! storage: zero-padded tail) or inside the uniquely-claimed `.resS` extent of a
-//! streamed texture (same offset: zero-padded remainder; see `texture_replace`
-//! and `replace_streamed_texture`). Layout reference: AssetStudio BundleFile.cs
+//! streamed texture. A streamed shrink physically compacts the `.resS` node (the
+//! freed tail `[new_end, old_end)` is removed from the decoded bytes, every later
+//! node offset and every proven later stream offset shifts down by the delta);
+//! when any reference cannot be proven the route falls back to the prior
+//! zero-padded in-place rewrite. See `texture_replace` and
+//! `replace_streamed_texture`. Layout reference: AssetStudio BundleFile.cs
 //! (format documentation only).
 use lz4::block::{compress, decompress, CompressionMode};
 use std::{fs, io::{self, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt}, path::Path};
@@ -269,6 +273,228 @@ fn rebuild_patches(b: &[u8], patches: &[(usize, &[u8])]) -> io::Result<(Vec<u8>,
     }
     Ok((out, changed, bundle))
 }
+
+/// One planned output block of a compacted rebuild: source-encoded bytes copied
+/// verbatim (decoded content unchanged) or content that must be encoded again
+/// (a partially removed block or one that carries a patch).
+#[cfg(any(test, feature = "development-audits"))]
+enum CompactBlock {
+    Copied { old: usize },
+    Built { decoded: Vec<u8>, old: usize },
+}
+
+/// Statistics of one compacted rebuild: the physically removed decoded length,
+/// the new decoded total and, for every re-encoded block, its source index and
+/// old/new encoded sizes (the caller reports them honestly; compression means a
+/// removed decoded byte does not equal a removed file byte).
+#[cfg(any(test, feature = "development-audits"))]
+struct CompactionStats {
+    removed: usize,
+    new_decoded: u64,
+    touched: Vec<(usize, usize, usize)>,
+}
+
+/// Container rebuild that PHYSICALLY drops the decoded byte range `[from, to)`
+/// from the bundle address space and moves every later decoded byte down by the
+/// removed length. Unlike `rebuild_patches` this changes the decoded total, so
+/// the block table, every shifted node offset and the target node's size are
+/// rebuilt rather than kept byte-stable:
+///   * blocks that do not intersect `[from, to)` keep their source bytes
+///     verbatim (their decoded content is unchanged, only its absolute offset
+///     moved) unless a patch intersects them;
+///   * a block that straddles `from` or `to` contributes only its kept piece(s),
+///     each re-encoded with the block's own codec (a block wholly inside the
+///     removed range contributes nothing and disappears);
+///   * the metadata section is rebuilt with the same 16-byte hash placeholder,
+///     the new block triples and the same node order/paths, with the target
+///     node's size and every later node's offset adjusted.
+/// `patches` are absolute ranges in the NEW decoded address space (after the
+/// removal), must not overlap, must not straddle `from` (a patch cannot span the
+/// cut) and are spliced verbatim. Every new block is decoded back and compared
+/// against its expected content (the source block, or the exact piece/patch
+/// splice), so no unrelated byte can change. Returns the candidate, its stats,
+/// the source bundle and the reparsed candidate bundle.
+#[cfg(any(test, feature = "development-audits"))]
+fn rebuild_compacted(b: &[u8], patches: &[(usize, &[u8])], from: usize, to: usize, target: usize)
+    -> io::Result<(Vec<u8>, CompactionStats, Bundle, Bundle)> {
+    let bundle = parse(b)?;
+    let decoded = bundle.decoded as usize;
+    if from >= to || to > decoded { return Err(invalid("UnityFS compaction extent is invalid")); }
+    let removed = to - from;
+    let new_decoded = decoded - removed;
+    let node = bundle.nodes.get(target).ok_or_else(|| invalid("UnityFS compaction target node is out of range"))?;
+    let node_start = node.offset as usize;
+    let node_end = node_start.checked_add(node.size as usize).ok_or_else(|| invalid("UnityFS compaction node extent overflow"))?;
+    if from <= node_start || to > node_end { return Err(invalid("UnityFS compaction extent is outside the target node")); }
+    // Every other node must lie wholly before the removal or wholly after it:
+    // anything intersecting it could neither keep its bytes nor be shifted
+    // unambiguously.
+    for (index, other) in bundle.nodes.iter().enumerate() {
+        if index == target { continue; }
+        let start = other.offset as usize;
+        let end = start.checked_add(other.size as usize).ok_or_else(|| invalid("UnityFS node extent overflow"))?;
+        if !(end <= from || start >= to) {
+            return Err(invalid("UnityFS compaction extent intersects a different node"));
+        }
+    }
+    let mut ranges = Vec::with_capacity(patches.len());
+    for (start, bytes) in patches {
+        let end = start.checked_add(bytes.len()).ok_or_else(|| invalid("UnityFS patch extent overflow"))?;
+        if end > new_decoded { return Err(invalid("UnityFS patch exceeds decoded bundle data")); }
+        if *start < from && end > from { return Err(invalid("UnityFS patch straddles the compacted cut")); }
+        ranges.push((*start, end, *bytes));
+    }
+    ranges.sort_unstable_by_key(|(start, _, _)| *start);
+    if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) { return Err(invalid("UnityFS patches overlap")); }
+    // Plan the new block sequence: kept source blocks verbatim, kept pieces of
+    // straddling blocks (and any block a patch intersects) re-encoded.
+    let mut plan: Vec<CompactBlock> = Vec::new();
+    let mut table: Vec<(usize, usize, u16)> = Vec::new();
+    let mut payload_out: Vec<u8> = Vec::new();
+    let mut touched = Vec::new();
+    let mut block_start = 0usize;
+    for (index, block) in bundle.blocks.iter().enumerate() {
+        super::cancelled()?;
+        let block_end = block_start.checked_add(block.decoded).ok_or_else(|| invalid("UnityFS block extent overflow"))?;
+        let mut pieces: Vec<(usize, usize)> = Vec::new();
+        if block_end <= from || block_start >= to {
+            pieces.push((0, block.decoded));
+        } else {
+            if block_start < from { pieces.push((0, from - block_start)); }
+            if block_end > to { pieces.push((to - block_start, block.decoded)); }
+        }
+        for (local_start, local_end) in pieces {
+            if local_start >= local_end { continue; }
+            let old_piece_start = block_start + local_start;
+            let new_piece_start = if old_piece_start < from { old_piece_start } else { old_piece_start - removed };
+            let new_piece_end = new_piece_start + (local_end - local_start);
+            let patched = ranges.iter().any(|(start, end, _)| *start < new_piece_end && new_piece_start < *end);
+            let codec = (block.flags & 0x3f) as u32;
+            if local_start == 0 && local_end == block.decoded && !patched {
+                let source = b.get(block.offset..block.offset + block.encoded)
+                    .ok_or_else(|| invalid("UnityFS source block outside file"))?;
+                payload_out.extend_from_slice(source);
+                table.push((block.decoded, block.encoded, block.flags));
+                plan.push(CompactBlock::Copied { old: index });
+                continue;
+            }
+            let source = b.get(block.offset..block.offset + block.encoded)
+                .ok_or_else(|| invalid("UnityFS source block outside file"))?;
+            let mut decoded_block = decode(source, block.decoded, codec)?;
+            let mut kept = decoded_block.drain(local_start..local_end).collect::<Vec<u8>>();
+            for (start, end, bytes) in &ranges {
+                let first = (*start).max(new_piece_start);
+                let last = (*end).min(new_piece_end);
+                if first < last {
+                    kept[first - new_piece_start..last - new_piece_start]
+                        .copy_from_slice(&bytes[first - *start..last - *start]);
+                }
+            }
+            let encoded = if codec == 0 { kept.clone() } else {
+                compress(&kept, Some(CompressionMode::HIGHCOMPRESSION(12)), false)?
+            };
+            super::cancelled()?;
+            let roundtrip = decode(&encoded, kept.len(), codec).map_err(|error| invalid(&format!(
+                "compacted UnityFS source block {index} failed round-trip verification: {error}")))?;
+            if roundtrip != kept {
+                return Err(invalid(&format!("compacted UnityFS source block {index} failed round-trip verification")));
+            }
+            touched.push((index, block.encoded, encoded.len()));
+            table.push((kept.len(), encoded.len(), block.flags));
+            payload_out.extend_from_slice(&encoded);
+            plan.push(CompactBlock::Built { decoded: kept, old: index });
+        }
+        block_start = block_end;
+    }
+    if table.is_empty() || table.len() > 65536 { return Err(invalid("invalid compacted UnityFS block count")); }
+    if table.iter().map(|(size, _, _)| *size).sum::<usize>() != new_decoded {
+        return Err(invalid("compacted UnityFS decoded length mismatch"));
+    }
+    // Rebuild the metadata: the 16-byte hash placeholder is preserved verbatim,
+    // the block/decoded/encoded/flag triples are rewritten, and the node table
+    // keeps its order, flags and paths with the target shrunk and every later
+    // node moved down by exactly the removed length.
+    let mut info = bundle.info[..16].to_vec();
+    info.extend_from_slice(&(table.len() as u32).to_be_bytes());
+    for (size, encoded, flags) in &table {
+        info.extend_from_slice(&(*size as u32).to_be_bytes());
+        info.extend_from_slice(&(*encoded as u32).to_be_bytes());
+        info.extend_from_slice(&flags.to_be_bytes());
+    }
+    info.extend_from_slice(&(bundle.nodes.len() as u32).to_be_bytes());
+    for (index, node) in bundle.nodes.iter().enumerate() {
+        let (offset, size) = if index == target {
+            (node.offset, node.size - removed as u64)
+        } else if node.offset >= to as u64 {
+            (node.offset - removed as u64, node.size)
+        } else { (node.offset, node.size) };
+        info.extend_from_slice(&offset.to_be_bytes());
+        info.extend_from_slice(&size.to_be_bytes());
+        info.extend_from_slice(&node.flags.to_be_bytes());
+        info.extend_from_slice(&node.path);
+        info.push(0);
+    }
+    let codec = bundle.flags & 0x3f;
+    let metadata = if codec == 0 { info.clone() } else {
+        compress(&info, Some(CompressionMode::HIGHCOMPRESSION(12)), false)?
+    };
+    if decode(&metadata, info.len(), codec)? != info { return Err(invalid("UnityFS metadata round-trip mismatch")); }
+    let mut out = b[..bundle.header_end].to_vec();
+    if bundle.version >= 7 { out.resize(align(out.len())?, 0); }
+    if bundle.flags & 0x80 == 0 { out.extend_from_slice(&metadata); }
+    if bundle.flags & 0x200 != 0 { out.resize(align(out.len())?, 0); }
+    out.extend_from_slice(&payload_out);
+    if bundle.flags & 0x80 != 0 { out.extend_from_slice(&metadata); }
+    let length = out.len() as u64;
+    out[bundle.fields..bundle.fields + 8].copy_from_slice(&length.to_be_bytes());
+    out[bundle.fields + 8..bundle.fields + 12].copy_from_slice(&(metadata.len() as u32).to_be_bytes());
+    // The block count can change (a block wholly inside the removed range
+    // disappears), so unlike `rebuild_patches` the decoded metadata length must
+    // be rewritten to the candidate's own info length, not kept from the source.
+    out[bundle.fields + 12..bundle.fields + 16].copy_from_slice(&(info.len() as u32).to_be_bytes());
+    let check = parse(&out).map_err(|error| invalid(&format!("compacted UnityFS candidate failed to parse: {error}")))?;
+    if check.flags != bundle.flags || check.nodes.len() != bundle.nodes.len()
+        || check.blocks.len() != table.len() || check.decoded != new_decoded as u64 {
+        return Err(invalid("compacted UnityFS layout failed verification"));
+    }
+    for (index, (old, new)) in bundle.nodes.iter().zip(&check.nodes).enumerate() {
+        if old.flags != new.flags || old.path != new.path { return Err(invalid("compacted UnityFS node entry changed")); }
+        let expected = if index == target {
+            (old.offset, old.size - removed as u64)
+        } else if old.offset >= to as u64 {
+            (old.offset - removed as u64, old.size)
+        } else { (old.offset, old.size) };
+        if (new.offset, new.size) != expected { return Err(invalid("compacted UnityFS node extent was not rewritten")); }
+    }
+    // Decode every new block and compare it against its exact expected content:
+    // the source block for verbatim copies, the piece/patch splice otherwise.
+    for ((entry, new), item) in table.iter().zip(&check.blocks).zip(&plan) {
+        super::cancelled()?;
+        let old_index = match item {
+            CompactBlock::Copied { old } | CompactBlock::Built { old, .. } => *old,
+        };
+        let old = &bundle.blocks[old_index];
+        if new.decoded != entry.0 || new.encoded != entry.1 || new.flags != entry.2 {
+            return Err(invalid(&format!("compacted UnityFS block table mismatch in source block {old_index}")));
+        }
+        let expected = match item {
+            CompactBlock::Copied { .. } => {
+                if out[new.offset..new.offset + new.encoded] != b[old.offset..old.offset + old.encoded] {
+                    return Err(invalid(&format!("compacted UnityFS copied source block {old_index} changed")));
+                }
+                decode(&b[old.offset..old.offset + old.encoded], old.decoded, (old.flags & 0x3f) as u32)?
+            }
+            CompactBlock::Built { decoded, .. } => decoded.clone(),
+        };
+        let actual = decode(&out[new.offset..new.offset + new.encoded], new.decoded, (new.flags & 0x3f) as u32)
+            .map_err(|error| invalid(&format!("compacted UnityFS output block {old_index} cannot be decoded: {error}")))?;
+        if expected != actual {
+            return Err(invalid(&format!("compacted UnityFS content differs in output block {old_index}")));
+        }
+    }
+    Ok((out, CompactionStats { removed, new_decoded: new_decoded as u64, touched }, bundle, check))
+}
+
 
 /// Read-only inventory of a UnityFS bundle: decode the blocks in memory and
 /// summarize each SerializedFile node (version, object and class counts). Streams
@@ -578,6 +804,13 @@ fn write_u32(bytes: &mut [u8], offset: usize, value: u32, big: bool) -> io::Resu
     Ok(())
 }
 
+#[cfg(any(test, feature = "development-audits"))]
+fn read_u64(bytes: &[u8], offset: usize, big: bool) -> io::Result<u64> {
+    let end = offset.checked_add(8).ok_or_else(|| invalid("Unity field offset overflow"))?;
+    let field = bytes.get(offset..end).ok_or_else(|| invalid("truncated Unity field"))?;
+    Ok(if big { u64::from_be_bytes(field.try_into().unwrap()) } else { u64::from_le_bytes(field.try_into().unwrap()) })
+}
+
 /// Development-only detached export of one inline Unity SerializedFile
 /// Texture2D into a standalone DDS. Selection is explicit: `node_index` is the
 /// bundle directory node index and `path_id` the original 64-bit object path ID.
@@ -782,9 +1015,10 @@ fn node_texture_inventory(node: &[u8]) -> io::Result<crate::unity_serialized::Bu
 /// publishes nothing.
 ///
 /// A streamed (`*.resS`) texture is delegated to `replace_streamed_texture`: it
-/// accepts only a strictly shorter halved-mip chain and applies the same
-/// zero-padding principle inside the uniquely-claimed stream extent instead of
-/// the object extent.
+/// accepts only a strictly shorter halved-mip chain and physically compacts the
+/// uniquely-claimed stream extent (removing the freed tail and shifting every
+/// proven later stream offset) when every reference can be proven, falling back
+/// to the prior zero-padded in-place rewrite otherwise.
 ///
 /// The image-data length prefix, width, height, mip count and (when the schema
 /// has the field) m_CompleteImageSize are patched through the spans the tree
@@ -1018,6 +1252,438 @@ pub fn texture_replace(node_index: usize, path_id: u64, payload_path: &Path, inp
     Ok(())
 }
 
+/// Hard bound on the number of streamed Texture2D objects one physical
+/// compaction may have to account for across the whole bundle. Exceeding it
+/// blocks compaction (the zero-padded fallback still runs) instead of looping.
+#[cfg(any(test, feature = "development-audits"))]
+const MAX_STREAM_REFS: usize = 4096;
+
+/// One streamed texture reference whose declared `m_StreamData/offset` must be
+/// rewritten by a physical compaction: the SerializedFile node it lives in, its
+/// path ID, the NEW absolute position of its 8-byte offset field in the decoded
+/// bundle, the old node-relative offset it must currently hold, and the field's
+/// endianness.
+#[cfg(any(test, feature = "development-audits"))]
+#[derive(Debug)]
+struct StreamShiftRef {
+    sf_node: usize,
+    id: u64,
+    field_at: usize,
+    old_offset: u64,
+    big: bool,
+}
+
+#[cfg(any(test, feature = "development-audits"))]
+#[derive(Debug)]
+struct StreamCompactionPlan {
+    shifts: Vec<StreamShiftRef>,
+    streamed: usize,
+}
+
+/// Prove that every streamed Texture2D in this bundle that can reference the
+/// target `.resS` node can be rewritten by one physical removal of
+/// `[stream_offset + new_len, stream_offset + stream_size)` and list exactly
+/// what blocks it otherwise. The rules are fail-closed:
+///   * every SerializedFile node must be readable and fully inventoried: an
+///     opaque, unsupported, over-budget or unretained texture object could hide
+///     a stream range, so any of them blocks compaction;
+///   * every streamed object's path must resolve to a node in this bundle
+///     (another resource node is fine: it is not being compacted);
+///   * an object in the target node whose range lies inside the removed region
+///     or straddles its start blocks compaction (its bytes would disappear);
+///   * an object in the target node whose range starts at or after the removed
+///     end must have a captured 8-byte `m_StreamData/offset` span that currently
+///     holds exactly the parsed offset, so the field can be shifted by the
+///     removed length;
+///   * nodes with flags other than 0 (resource) or 4 (SerializedFile) cannot be
+///     proven to hold no SerializedFile objects and block compaction;
+///   * more than `MAX_STREAM_REFS` streamed objects blocks compaction.
+/// Nothing is written; the caller keeps the zero-padded route as fallback.
+#[cfg(any(test, feature = "development-audits"))]
+#[allow(clippy::too_many_arguments)]
+fn plan_stream_compaction(bytes: &[u8], bundle: &Bundle, node_index: usize, path_id: u64,
+    target: usize, stream_offset: u64, stream_size: u64, new_len: usize)
+    -> Result<StreamCompactionPlan, Vec<String>> {
+    let mut blockers = Vec::new();
+    let mut shifts = Vec::new();
+    let removed = stream_size - new_len as u64;
+    let new_end = stream_offset + new_len as u64;
+    let old_end = stream_offset + stream_size;
+    let target_node = &bundle.nodes[target];
+    let rem_to = target_node.offset + old_end;
+    let mut names = std::collections::BTreeMap::<Vec<u8>, usize>::new();
+    for (index, node) in bundle.nodes.iter().enumerate() {
+        if names.insert(node.path.clone(), index).is_some() {
+            return Err(vec![format!("duplicate node name {} makes stream resolution ambiguous",
+                String::from_utf8_lossy(&node.path))]);
+        }
+    }
+    let mut decoder = NodeDecoder::new(bytes, bundle);
+    decoder.decode_budget = MAX_TEXTURE_BUNDLE + 64 * 1024 * 1024;
+    decoder.copy_budget = MAX_TEXTURE_BUNDLE + 64 * 1024 * 1024;
+    let mut streamed = 0usize;
+    'nodes: for (index, node) in bundle.nodes.iter().enumerate() {
+        super::cancelled().map_err(|error| vec![format!("cancelled: {error}")])?;
+        match node.flags {
+            // Resource nodes hold no SerializedFile objects, so they cannot
+            // carry a Texture2D stream range; other flags are unproven.
+            0 => (),
+            4 => {
+                let name = String::from_utf8_lossy(&node.path).into_owned();
+                if node.size > 64 * 1024 * 1024 {
+                    blockers.push(format!("node {index} ({name}): SerializedFile exceeds the 64 MiB read limit"));
+                    continue;
+                }
+                let slice = match decoder.read(node.offset, node.size) {
+                    Ok(slice) => slice,
+                    Err(error) => { blockers.push(format!("node {index} ({name}): cannot be read: {error}")); continue; }
+                };
+                if !crate::unity_serialized::plausible(&slice) {
+                    blockers.push(format!("node {index} ({name}): not a supported SerializedFile header"));
+                    continue;
+                }
+                let inventory = match node_texture_inventory(&slice) {
+                    Ok(inventory) => inventory,
+                    Err(error) => { blockers.push(format!("node {index} ({name}): texture inventory failed: {error}")); continue; }
+                };
+                if inventory.unretained != 0 {
+                    blockers.push(format!("node {index} ({name}): {} texture object(s) were not retained by the inventory; their stream ranges cannot be proven", inventory.unretained));
+                }
+                for (id, status) in &inventory.opaque {
+                    blockers.push(format!("node {index} ({name}): texture object {id} is not retained ({status}); its stream range cannot be proven"));
+                }
+                for (id, fields) in &inventory.details {
+                    let texture = &fields.texture;
+                    if texture.stream_size == 0 { continue; }
+                    streamed += 1;
+                    if streamed > MAX_STREAM_REFS {
+                        blockers.push(format!("the bundle declares more than the {MAX_STREAM_REFS} streamed textures compaction is bounded to"));
+                        break 'nodes;
+                    }
+                    let Some(stream_name) = stream_node(&node.path, &texture.stream_path) else {
+                        blockers.push(format!("node {index} object {id}: stream path {:?} does not resolve in this bundle", texture.stream_path));
+                        continue;
+                    };
+                    let Some(&resolved) = names.get(stream_name) else {
+                        blockers.push(format!("node {index} object {id}: stream target {} is not present in this bundle", String::from_utf8_lossy(stream_name)));
+                        continue;
+                    };
+                    if bundle.nodes[resolved].flags != 0 {
+                        blockers.push(format!("node {index} object {id}: stream target is not a resource node"));
+                        continue;
+                    }
+                    let Some(end) = texture.stream_offset.checked_add(texture.stream_size) else {
+                        blockers.push(format!("node {index} object {id}: stream extent overflows"));
+                        continue;
+                    };
+                    if end > bundle.nodes[resolved].size {
+                        blockers.push(format!("node {index} object {id}: stream extent [{}, {}) is outside its target node", texture.stream_offset, end));
+                        continue;
+                    }
+                    if resolved != target { continue; }
+                    if *id == path_id {
+                        if index != node_index || texture.stream_offset != stream_offset || texture.stream_size != stream_size {
+                            blockers.push(format!("node {index} object {id}: target identity differs from the located object"));
+                        }
+                        continue;
+                    }
+                    if end <= new_end { continue; }
+                    if texture.stream_offset >= old_end {
+                        let Some(span) = fields.spans.get("m_StreamData/offset") else {
+                            blockers.push(format!("node {index} object {id}: the m_StreamData/offset span is missing"));
+                            continue;
+                        };
+                        if span.kind != "PRIMITIVE_BITS" || span.end != span.start + 8 {
+                            blockers.push(format!("node {index} object {id}: the m_StreamData/offset span cannot be proven to be an 8-byte primitive"));
+                            continue;
+                        }
+                        let Some(record) = inventory.object_records.iter().find(|record| record.id == *id) else {
+                            blockers.push(format!("node {index} object {id}: object record was not retained"));
+                            continue;
+                        };
+                        let at = record.start as usize + span.start;
+                        if at.checked_add(8).is_none_or(|field_end| field_end > slice.len())
+                            || read_u64(&slice, at, inventory.big).ok() != Some(texture.stream_offset) {
+                            blockers.push(format!("node {index} object {id}: the offset span does not hold the parsed stream offset"));
+                            continue;
+                        }
+                        let Some(new_node_offset) = (if node.offset >= rem_to { node.offset.checked_sub(removed) } else { Some(node.offset) }) else {
+                            blockers.push(format!("node {index} object {id}: node offset cannot be shifted"));
+                            continue;
+                        };
+                        let Some(field_at) = (new_node_offset as usize).checked_add(at) else {
+                            blockers.push(format!("node {index} object {id}: shifted field offset overflows"));
+                            continue;
+                        };
+                        shifts.push(StreamShiftRef { sf_node: index, id: *id, field_at,
+                            old_offset: texture.stream_offset, big: inventory.big });
+                        continue;
+                    }
+                    let reason = if texture.stream_offset >= new_end {
+                        "lies inside the removed region"
+                    } else {
+                        "straddles the start of the removed region"
+                    };
+                    blockers.push(format!("node {index} object {id}: declared range [{}, {}) {reason}", texture.stream_offset, end));
+                }
+            }
+            other => blockers.push(format!("node {index}: flags {other} (not a resource or SerializedFile) cannot be proven to hold no SerializedFile objects")),
+        }
+    }
+    if !blockers.is_empty() { return Err(blockers); }
+    Ok(StreamCompactionPlan { shifts, streamed })
+}
+
+/// Result of re-proving a compacted candidate before publication.
+#[cfg(any(test, feature = "development-audits"))]
+struct CompactionVerification {
+    gain: u64,
+    refs_shifted: usize,
+    streamed: usize,
+}
+
+/// Re-prove a compacted candidate against the source bundle: the `.resS` node
+/// lost exactly the removed range (new payload at the same offset, every other
+/// byte unchanged), every non-`.resS` node is byte-identical outside the exactly
+/// declared patches, the SerializedFile object records and every retained
+/// texture identity are byte-stable, every streamed texture still extracts
+/// byte-identically except the target (which must equal the supplied payload),
+/// every planned offset shift was observed, and the declared streamed total
+/// shrank by exactly the removed length. Returns the honest gain and counts.
+#[cfg(any(test, feature = "development-audits"))]
+#[allow(clippy::too_many_arguments)]
+fn verify_compacted_stream(bytes: &[u8], bundle: &Bundle, candidate: &[u8], check_bundle: &Bundle,
+    node_index: usize, path_id: u64, expected_node: &[u8], patch_lo: usize, patch_hi: usize,
+    target: usize, stream_offset: u64, stream_size: u64, new_payload: &[u8],
+    new_width: u32, new_height: u32, new_mips: u32, plan: &StreamCompactionPlan)
+    -> io::Result<CompactionVerification> {
+    let removed = stream_size - new_payload.len() as u64;
+    let target_node = &bundle.nodes[target];
+    let check_target = &check_bundle.nodes[target];
+    if check_target.offset != target_node.offset || check_target.size + removed != target_node.size
+        || check_target.flags != target_node.flags || check_target.path != target_node.path {
+        return Err(invalid("Unity streamed compaction changed the .resS node extent"));
+    }
+    for (index, (old, new)) in bundle.nodes.iter().zip(&check_bundle.nodes).enumerate() {
+        if old.flags != new.flags || old.path != new.path {
+            return Err(invalid("Unity streamed compaction changed a bundle node entry"));
+        }
+        let expected = if index == target {
+            (old.offset, old.size - removed)
+        } else if old.offset >= target_node.offset + stream_offset + stream_size {
+            (old.offset.checked_sub(removed).ok_or_else(|| invalid("Unity streamed compaction node underflow"))?, old.size)
+        } else {
+            (old.offset, old.size)
+        };
+        if (new.offset, new.size) != expected {
+            return Err(invalid("Unity streamed compaction did not shift the node table exactly"));
+        }
+    }
+    let mut old_decoder = NodeDecoder::new(bytes, bundle);
+    let mut new_decoder = NodeDecoder::new(candidate, check_bundle);
+    for decoder in [&mut old_decoder, &mut new_decoder] {
+        decoder.decode_budget = 3 * (MAX_TEXTURE_BUNDLE + 64 * 1024 * 1024);
+        decoder.copy_budget = 3 * (MAX_TEXTURE_BUNDLE + 64 * 1024 * 1024);
+    }
+    // (1) The .resS node must hold exactly the new payload at the same offset
+    // followed by the source bytes that used to follow the old extent.
+    let kept_end = stream_offset + new_payload.len() as u64;
+    let old_extent_end = stream_offset + stream_size;
+    let mut position = 0u64;
+    while position < check_target.size {
+        super::cancelled()?;
+        let take = (4 * 1024 * 1024u64).min(check_target.size - position);
+        let mut expected = Vec::with_capacity(take as usize);
+        if position < kept_end {
+            let length = kept_end.min(position + take) - position;
+            expected.extend_from_slice(&old_decoder.read(target_node.offset + position, length)?);
+        }
+        if position + take > kept_end {
+            let start = kept_end.max(position);
+            let length = position + take - start;
+            // New coordinate `start` maps to old coordinate `start + removed`.
+            expected.extend_from_slice(&old_decoder.read(target_node.offset + start + removed, length)?);
+        }
+        let first = position.max(stream_offset);
+        let last = (position + take).min(kept_end);
+        if first < last {
+            expected[(first - position) as usize..(last - position) as usize]
+                .copy_from_slice(&new_payload[(first - stream_offset) as usize..(last - stream_offset) as usize]);
+        }
+        let actual = new_decoder.read(check_target.offset + position, take)?;
+        if actual != expected {
+            return Err(invalid("Unity streamed compaction changed .resS bytes outside the removed extent"));
+        }
+        position += take;
+    }
+    if check_target.size != target_node.size - removed || target_node.size < old_extent_end {
+        return Err(invalid("Unity streamed compaction .resS node size is inconsistent"));
+    }
+    // (2) Patches in NEW absolute coordinates: the target's own fields and every
+    // shifted offset field. They must all lie in SerializedFile nodes.
+    let mut patches: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+    let sf_new_offset = check_bundle.nodes[node_index].offset as usize;
+    patches.push((sf_new_offset + patch_lo, sf_new_offset + patch_hi, expected_node[patch_lo..patch_hi].to_vec()));
+    for shift in &plan.shifts {
+        let value = shift.old_offset - removed;
+        let bytes = if shift.big { value.to_be_bytes() } else { value.to_le_bytes() };
+        patches.push((shift.field_at, shift.field_at + 8, bytes.to_vec()));
+    }
+    for (start, end, _) in &patches {
+        if *start >= *end || *end > check_bundle.decoded as usize { return Err(invalid("Unity streamed compaction patch extent is invalid")); }
+    }
+    // (3) Every non-.resS node must be byte-identical outside those patches; the
+    // target's SerializedFile node must equal the spliced expectation exactly.
+    let mut patched_nodes = std::collections::BTreeSet::new();
+    for (start, end, _) in &patches {
+        let mut found = false;
+        for (index, node) in check_bundle.nodes.iter().enumerate() {
+            if index == target { continue; }
+            let node_start = node.offset as usize;
+            let node_end = node_start + node.size as usize;
+            if *start >= node_start && *end <= node_end { found = true; patched_nodes.insert(index); break; }
+        }
+        if !found { return Err(invalid("Unity streamed compaction patch lies outside every SerializedFile node")); }
+    }
+    for (index, old_node) in bundle.nodes.iter().enumerate() {
+        super::cancelled()?;
+        if index == target { continue; }
+        let new_node = &check_bundle.nodes[index];
+        let node_patches: Vec<&(usize, usize, Vec<u8>)> = patches.iter()
+            .filter(|(start, end, _)| *start >= new_node.offset as usize && *end <= (new_node.offset + new_node.size) as usize)
+            .collect();
+        if index == node_index {
+            // The target's SerializedFile node carries its own field patch and
+            // any shifted stream offsets that live in it; both must be spliced
+            // into the expectation before the byte comparison.
+            let base = new_node.offset as usize;
+            let mut expected = expected_node.to_vec();
+            for (start, end, bytes) in &node_patches {
+                expected[*start - base..*end - base].copy_from_slice(bytes);
+            }
+            let actual = new_decoder.read(new_node.offset, new_node.size)?;
+            if actual != expected {
+                return Err(invalid("Unity streamed compaction changed the target SerializedFile node"));
+            }
+            continue;
+        }
+        let mut position = 0u64;
+        while position < old_node.size {
+            super::cancelled()?;
+            let take = (4 * 1024 * 1024u64).min(old_node.size - position);
+            let mut expected = old_decoder.read(old_node.offset + position, take)?;
+            for (start, end, bytes) in &node_patches {
+                let first = (*start).max((new_node.offset + position) as usize);
+                let last = (*end).min((new_node.offset + position + take) as usize);
+                if first < last {
+                    let base = new_node.offset as usize + position as usize;
+                    expected[first - base..last - base].copy_from_slice(&bytes[first - *start..last - *start]);
+                }
+            }
+            let actual = new_decoder.read(new_node.offset + position, take)?;
+            if actual != expected {
+                return Err(invalid("Unity streamed compaction changed a different bundle node"));
+            }
+            position += take;
+        }
+    }
+    // (4) The object tables and every retained texture identity must re-run
+    // byte-stable, with only the target's declared shape/size and the planned
+    // offset fields changed.
+    let shifts: std::collections::BTreeMap<(usize, u64), u64> = plan.shifts.iter()
+        .map(|shift| ((shift.sf_node, shift.id), shift.old_offset - removed)).collect();
+    let mut filtered = Vec::new(); // (node index, source slice, source inventory)
+    for (index, old_node) in bundle.nodes.iter().enumerate() {
+        if old_node.flags != 4 { continue; }
+        let old_slice = old_decoder.read(old_node.offset, old_node.size)?;
+        let new_slice = new_decoder.read(check_bundle.nodes[index].offset, check_bundle.nodes[index].size)?;
+        let before = node_texture_inventory(&old_slice)?;
+        let after = node_texture_inventory(&new_slice)?;
+        if before.version != after.version || before.big != after.big || before.trees != after.trees
+            || before.textures != after.textures || before.unretained != after.unretained
+            || before.opaque.len() != after.opaque.len() || before.details.len() != after.details.len()
+            || before.object_records.len() != after.object_records.len() {
+            return Err(invalid("Unity streamed compaction changed the SerializedFile object table"));
+        }
+        for (old, new) in before.object_records.iter().zip(&after.object_records) {
+            if (old.id, old.start, old.size, old.type_index, old.table_start, old.table_end)
+                != (new.id, new.start, new.size, new.type_index, new.table_start, new.table_end) {
+                return Err(invalid("Unity streamed compaction changed a SerializedFile object entry"));
+            }
+        }
+        for ((id, before_fields), (after_id, after_fields)) in before.details.iter().zip(&after.details) {
+            if id != after_id || before_fields.image_count != after_fields.image_count
+                || before_fields.dimension != after_fields.dimension {
+                return Err(invalid("Unity streamed compaction changed a retained texture identity"));
+            }
+            let (b, a) = (&before_fields.texture, &after_fields.texture);
+            if a.format != b.format || a.stream_path != b.stream_path || a.inline_bytes != b.inline_bytes {
+                return Err(invalid("Unity streamed compaction changed a retained texture's storage kind"));
+            }
+            if *id == path_id {
+                if (a.width, a.height, a.mips, a.stream_size, a.stream_offset)
+                    != (new_width, new_height, new_mips, new_payload.len() as u64, stream_offset) {
+                    return Err(invalid("Unity streamed compaction did not re-parse the target at its new declared shape"));
+                }
+            } else {
+                if (a.width, a.height, a.mips, a.stream_size) != (b.width, b.height, b.mips, b.stream_size) {
+                    return Err(invalid("Unity streamed compaction changed an unrelated texture's declared shape"));
+                }
+                let expected = shifts.get(&(index, *id)).copied().unwrap_or(b.stream_offset);
+                if a.stream_offset != expected {
+                    return Err(invalid("Unity streamed compaction shifted an offset that was not planned or missed one"));
+                }
+            }
+        }
+        filtered.push((index, old_slice, before));
+    }
+    // (5) Extract every streamed texture from the source and the candidate: all
+    // must be byte-identical except the target, which must equal the payload.
+    let mut names = std::collections::BTreeMap::<Vec<u8>, usize>::new();
+    for (index, node) in bundle.nodes.iter().enumerate() { names.insert(node.path.clone(), index); }
+    let mut observed = std::collections::BTreeSet::new();
+    let mut streamed = 0usize;
+    let (mut source_total, mut candidate_total) = (0u64, 0u64);
+    for (index, _, before) in &filtered {
+        let node = &bundle.nodes[*index];
+        for (id, fields) in &before.details {
+            let texture = &fields.texture;
+            if texture.stream_size == 0 { continue; }
+            streamed += 1;
+            let name = stream_node(&node.path, &texture.stream_path)
+                .ok_or_else(|| invalid("Unity streamed compaction lost a stream path resolution"))?;
+            let resolved = *names.get(name).ok_or_else(|| invalid("Unity streamed compaction lost a stream target"))?;
+            let (new_offset, new_size) = if *id == path_id {
+                (stream_offset, new_payload.len() as u64)
+            } else if let Some(&shifted) = shifts.get(&(*index, *id)) {
+                observed.insert((*index, *id));
+                (shifted, texture.stream_size)
+            } else {
+                (texture.stream_offset, texture.stream_size)
+            };
+            let source_bytes = old_decoder.read(bundle.nodes[resolved].offset + texture.stream_offset, texture.stream_size)?;
+            let candidate_bytes = new_decoder.read(check_bundle.nodes[resolved].offset + new_offset, new_size)?;
+            source_total += texture.stream_size;
+            candidate_total += new_size;
+            if *id == path_id {
+                if candidate_bytes != new_payload {
+                    return Err(invalid("Unity streamed compaction payload failed re-extraction"));
+                }
+            } else if candidate_bytes != source_bytes {
+                return Err(invalid("Unity streamed compaction changed an unrelated streamed payload"));
+            }
+        }
+    }
+    if observed.len() != shifts.len() {
+        return Err(invalid("Unity streamed compaction did not observe every planned offset shift"));
+    }
+    if streamed != plan.streamed || source_total - candidate_total != removed {
+        return Err(invalid("Unity streamed compaction streamed-size accounting is inconsistent"));
+    }
+    Ok(CompactionVerification { gain: bytes.len().saturating_sub(candidate.len()) as u64,
+        refs_shifted: shifts.len(), streamed })
+}
+
 /// Development-only detached rewrite of one streamed `.resS` Unity
 /// SerializedFile Texture2D payload, published as a NEW bundle. Selection,
 /// identity and stream resolution are exactly the export route's: same-bundle
@@ -1029,32 +1695,40 @@ pub fn texture_replace(node_index: usize, path_id: u64, payload_path: &Path, inp
 /// shrink rule of the inline route, including the repository short-edge policy,
 /// so the payload length determines the new shape uniquely and nothing is
 /// guessed. The same-shape and larger cases are refused; this route is
-/// shrink-only because the zero-padding rule is its whole purpose.
+/// shrink-only because it exists to free stream bytes.
 ///
-/// The new payload is written at the SAME stream offset inside the `.resS` node
-/// and the rest of the object's OLD declared extent is zero-filled, so every
-/// other range into that node, every SerializedFile object offset and every
-/// other node byte stays valid, and the zeros compress away. The target object's
-/// own `m_Width`, `m_Height`, `m_MipCount`, `m_CompleteImageSize` and
-/// `m_StreamData/size` are patched through the spans the tree walk captured,
-/// each of which must hold exactly the value the walk parsed; the declared
-/// stream offset and path are unchanged and the texture carries zero inline
-/// bytes. Two disjoint patches (the SerializedFile node's fields and the `.resS`
-/// extent) are applied in one rebuild pass, each touched block keeping its source
-/// codec, with the block/node tables and info section rebuilt exactly as the
-/// inline route does.
+/// Two publication modes:
+///   * PHYSICAL COMPACTION (preferred): the freed tail `[new_end, old_end)` is
+///     removed from the `.resS` node's decoded bytes, so the node becomes
+///     smaller by exactly that delta, the decoded bundle shrinks by it, the node
+///     table is rebuilt (target size and every later node offset) and every
+///     streamed object whose declared range starts at or after `old_end` in the
+///     same node has its `m_StreamData/offset` shifted down by the delta through
+///     its captured span. The target's own fields are patched as usual. This is
+///     only allowed when the plan in `plan_stream_compaction` proves every
+///     reference; otherwise the candidate is discarded (nothing is published by
+///     the compacted route) and the blockers are reported.
+///   * ZERO-PADDED FALLBACK (unchanged prior behavior): the new payload is
+///     written at the same stream offset and the rest of the old extent is
+///     zero-filled, leaving every offset valid. Used whenever compaction cannot
+///     be proven and, like compaction, only published when strictly smaller.
 ///
-/// Verification before publication: candidate re-parse with the same layout, the
-/// SerializedFile object table byte-stable with the target re-parsed at the new
-/// declared shape, the new payload re-extracted byte-identically through the
-/// shared streamed selection, every other node compared decoded, the `.resS`
-/// node byte-identical outside the old extent (new payload then zeros inside),
-/// the container strictly smaller and the source unchanged. Any failure
-/// publishes nothing. Stream ownership stays unproven, only an all-zero
-/// uncompressed-data hash placeholder is accepted (preserved, not recomputed),
-/// no CRC/CAB-name/Addressables catalogue is rebuilt, the runtime acceptance of
-/// a zero-padded stream tail is not proven and the artifact is not runtime
-/// validated.
+/// Verification before publication (compaction): the plan rules above, the
+/// candidate re-parsed with the target node smaller by exactly the removed
+/// delta and every later node shifted by exactly it, every non-`.resS` node
+/// byte-identical outside the declared patches, every object record
+/// `(id, start, size, type_index)` and every retained texture identity
+/// byte-stable, every streamed texture re-extracted from the source and the
+/// candidate and byte-identical except the target (which must equal the supplied
+/// payload), every planned shift observed, the declared streamed total shrunk by
+/// exactly the removed delta and the container strictly smaller. The decoded
+/// gain is exactly the removed delta; because the covering blocks are LZ4, the
+/// FILE gain is the encoded footprint of the removed bytes minus the touched
+/// blocks' re-encode overhead, which is reported instead of overclaimed.
+/// The zero-padded fallback keeps its prior verification. Any failure publishes
+/// nothing. Stream ownership stays unproven, only an all-zero uncompressed-data
+/// hash placeholder is accepted (preserved, not recomputed), no CRC/CAB-name/
+/// Addressables catalogue is rebuilt and the artifact is not runtime validated.
 #[cfg(any(test, feature = "development-audits"))]
 #[allow(clippy::too_many_arguments)]
 fn replace_streamed_texture(bytes: &[u8], bundle: &Bundle, located: &LocatedTexture,
@@ -1082,8 +1756,8 @@ fn replace_streamed_texture(bytes: &[u8], bundle: &Bundle, located: &LocatedText
     let new_len = new_len as usize;
     let new_payload = payload_source.read_at(0, new_len)?;
     // A streamed replacement is shrink-only: the new payload replaces the head of
-    // the OLD declared extent and the rest is zeroed, so a payload that is not
-    // strictly shorter has no zero-padding rule here.
+    // the OLD declared extent and the tail is freed, so a payload that is not
+    // strictly shorter cannot free anything.
     if new_len as u64 >= stream_size {
         return Err(invalid(&format!(
             "Unity streamed replacement payload must be strictly shorter than the current {stream_size}-byte stream extent; {new_len} bytes given")));
@@ -1119,14 +1793,83 @@ fn replace_streamed_texture(bytes: &[u8], bundle: &Bundle, located: &LocatedText
     }
     let patch_lo = changed.iter().map(|(start, _)| *start).min().unwrap();
     let patch_hi = changed.iter().map(|(_, end)| *end).max().unwrap();
-    let node_patch = (located.node_offset as usize + patch_lo, &expected_node[patch_lo..patch_hi]);
-    // The new payload goes back at the SAME stream offset; the rest of the OLD
-    // declared extent is zeroed so every other range stays valid.
     let target_node = &bundle.nodes[target];
     let stream_patch_start = (target_node.offset + stream_offset) as usize;
     if stream_patch_start.checked_add(stream_size as usize).is_none_or(|end| end > bundle.decoded as usize) {
         return Err(invalid("Unity streamed extent is outside the decoded bundle"));
     }
+    // Preferred route: physically remove `[stream_patch_start + new_len,
+    // stream_patch_start + stream_size)` and shift every proven later offset.
+    match plan_stream_compaction(bytes, bundle, node_index, path_id, target, stream_offset, stream_size, new_len) {
+        Ok(plan) => {
+            let removed = stream_size - new_len as u64;
+            let rem_from = stream_patch_start + new_len;
+            let rem_to = stream_patch_start + stream_size as usize;
+            let sf_new_offset = if bundle.nodes[node_index].offset >= rem_to as u64 {
+                bundle.nodes[node_index].offset - removed
+            } else { bundle.nodes[node_index].offset };
+            let mut patches: Vec<(usize, Vec<u8>)> = Vec::new();
+            patches.push((sf_new_offset as usize + patch_lo, expected_node[patch_lo..patch_hi].to_vec()));
+            for shift in &plan.shifts {
+                let value = shift.old_offset - removed;
+                let bytes = if shift.big { value.to_be_bytes() } else { value.to_le_bytes() };
+                patches.push((shift.field_at, bytes.to_vec()));
+            }
+            patches.push((stream_patch_start, new_payload.clone()));
+            patches.sort_unstable_by_key(|(start, _)| *start);
+            let patch_refs: Vec<(usize, &[u8])> = patches.iter()
+                .map(|(start, bytes)| (*start, bytes.as_slice())).collect();
+            let attempt = rebuild_compacted(bytes, &patch_refs, rem_from, rem_to, target)
+                .and_then(|(candidate, stats, _source_bundle, check_bundle)| {
+                    let verification = verify_compacted_stream(bytes, bundle, &candidate, &check_bundle,
+                        node_index, path_id, &expected_node, patch_lo, patch_hi, target,
+                        stream_offset, stream_size, &new_payload, new_width, new_height, new_mips, &plan)?;
+                    // The decoded bundle shrank by exactly the removed delta (the
+                    // compaction's whole point); the FILE gain is the encoded
+                    // footprint of the removed bytes minus the touched blocks'
+                    // re-encode overhead, so it is checked for strictness and
+                    // reported honestly rather than assumed equal to the delta.
+                    if check_bundle.decoded + removed != bundle.decoded {
+                        return Err(invalid("Unity streamed compaction did not remove exactly the declared delta"));
+                    }
+                    let touched_old: u64 = stats.touched.iter().map(|(_, old, _)| *old as u64).sum();
+                    let touched_new: u64 = stats.touched.iter().map(|(_, _, new)| *new as u64).sum();
+                    Ok((candidate, stats, verification, touched_old, touched_new))
+                });
+            match attempt {
+                Ok((candidate, stats, verification, touched_old, touched_new)) => {
+                    source.unchanged()?;
+                    let status = if candidate.len() < bytes.len() { "EXPORTED" } else { "NO_GAIN" };
+                    if status == "EXPORTED" {
+                        super::detached_export::publish(output, &candidate, || source.unchanged())?;
+                    }
+                    println!("UNITYFS_TEXTURE_REPLACE|{node_index}|{path_id}|storage=stream-compacted|{}x{}|{}x{}|{}|{}|{}|{}|{}|{}|{}|{}|{status}",
+                        old_texture.width, old_texture.height, new_width, new_height,
+                        old_texture.mips, new_mips, stream_size, new_len, stats.removed,
+                        verification.refs_shifted, bytes.len(), candidate.len());
+                    println!("UNITYFS_STREAM_COMPACTION|{node_index}|{path_id}|{}|{}|{}|{}|{}|{}",
+                        verification.refs_shifted, verification.streamed, stats.removed,
+                        stats.touched.len(), touched_old, touched_new);
+                    eprintln!("Experimental detached Unity streamed texture replace (physical compaction): source unchanged; the freed .resS tail is removed from the node, every later node offset and every proven texture stream offset shifts down by the same delta, and the supplied payload bytes are spliced verbatim (no pixel/codec re-encode). NO_GAIN means the rebuilt container is not strictly smaller and nothing was published. The decoded bundle shrinks by exactly the removed delta; the file saving is the encoded footprint of those bytes minus the touched blocks' re-encode overhead (reported above). Only an all-zero uncompressed-data hash field is accepted and it is preserved, not recomputed; no CRC/CAB-name/Addressables-catalogue rebuild, stream ownership is unique-claim only, no proof that the Unity runtime accepts the rewritten stream layout and no runtime validation. Research artifact only.");
+                    return Ok(());
+                }
+                Err(error) => {
+                    println!("UNITYFS_STREAM_COMPACTION_BLOCKED|{node_index}|{path_id}|candidate rejected: {error}");
+                }
+            }
+        }
+        Err(blockers) => {
+            for blocker in &blockers {
+                println!("UNITYFS_STREAM_COMPACTION_BLOCKED|{node_index}|{path_id}|{blocker}");
+            }
+            if blockers.is_empty() {
+                println!("UNITYFS_STREAM_COMPACTION_BLOCKED|{node_index}|{path_id}|compaction was blocked without a stated reason");
+            }
+        }
+    }
+    // Fallback: the zero-padded in-place rewrite, unchanged from the prior route.
+    println!("UNITYFS_STREAM_COMPACTION|{node_index}|{path_id}|BLOCKED|ZERO_PADDED_FALLBACK");
+    let node_patch = (located.node_offset as usize + patch_lo, &expected_node[patch_lo..patch_hi]);
     let mut stream_patch = new_payload.clone();
     stream_patch.resize(stream_size as usize, 0);
     // Two disjoint patches in one rebuild: the SerializedFile node's fields and
@@ -2349,20 +3092,175 @@ mod tests {
         assert!(rebuild_patches(&b, &[(bundle.decoded as usize, &[1])]).is_err());
     }
     #[test]
-    fn streamed_shrink_zero_pads_the_stream_extent_and_publishes_a_smaller_bundle() {
+    fn streamed_shrink_physically_compacts_the_node_and_shifts_a_later_offset() {
         // 128x128 DXT1 (8 mips, 10936 stream bytes) downscaled to the 64x64 7-mip
-        // chain (2744 bytes). The extent is split across blocks and a third node
-        // follows it, so the two-node patch crosses block boundaries instead of
-        // covering a single block.
+        // chain (2744 bytes), so 8192 stream bytes are physically removed. The
+        // target extent starts 64 bytes into the .resS node, another streamed
+        // texture owns that kept prefix, and a third texture starts exactly at
+        // the old extent end: compaction must shift that later m_StreamData/offset
+        // down by the removed delta, shrink the .resS node and move the following
+        // node down by the same delta. The extent is split across blocks that
+        // straddle the cut on both sides, so piece handling is exercised too.
         let old_len = chain_len(10, 128, 128);
         assert_eq!(old_len, 10936);
         let new_len = chain_len(10, 64, 64);
         assert_eq!(new_len, 2744);
+        let removed = (old_len - new_len) as u64;
+        let prefix = 64u64;
+        let before = payload_of(prefix as usize, 21);
+        let target_payload = payload_of(old_len, 7);
+        let after = payload_of(600, 29);
+        let other = payload_of(300, 33);
+        let target = streamed_object_at(128, 128, 10, prefix, old_len as u32, "CAB-test.resS");
+        let before_object = streamed_object_at(8, 8, 10, 0, before.len() as u32, "CAB-test.resS");
+        let after_object = streamed_object_at(8, 8, 10, prefix + old_len as u64, after.len() as u32, "CAB-test.resS");
+        let sf = serialized_objects(&[(123, target), (124, before_object), (125, after_object)]);
+        let mut data = sf.clone();
+        data.extend_from_slice(&before);
+        data.extend_from_slice(&target_payload);
+        data.extend_from_slice(&after);
+        data.extend_from_slice(&other);
+        let stream_start = sf.len();
+        let cut_from = stream_start + prefix as usize + new_len;
+        let cut_to = stream_start + prefix as usize + old_len;
+        let stream_size = prefix as usize + old_len + after.len();
+        let mut cuts = vec![stream_start + 100, stream_start + 2000, cut_from + 500,
+                            cut_to - 500, cut_to + 300, data.len()];
+        cuts.sort_unstable(); cuts.dedup();
+        let mut sizes = Vec::new();
+        let mut previous = 0usize;
+        for cut in cuts { sizes.push(cut - previous); previous = cut; }
+        let nodes = [(0u64, sf.len() as u64, 4u32, "CAB-test"),
+                     (stream_start as u64, stream_size as u64, 0u32, "CAB-test.resS"),
+                     ((stream_start + stream_size) as u64, other.len() as u64, 0u32, "CAB-test.other")];
+        // Poor (literal-only) source encoding: every touched block is re-encoded
+        // strictly smaller, so the strictly-smaller publication gate passes.
+        let bundle = bundle_with_encoder(&data, &nodes, &sizes, 3, [0u8; 16], literal_lz4);
+        let root = scratch("bgc-unitystream-compact");
+        let input = root.join("bundle"); fs::write(&input, &bundle).unwrap();
+        let new_payload = payload_of(new_len, 11);
+        let payload_file = root.join("payload.bin"); fs::write(&payload_file, &new_payload).unwrap();
+        let output = root.join("shrunk.bundle");
+        texture_replace(0, 123, &payload_file, &input, &output).unwrap();
+        // (a) The source is never modified and only a strictly smaller container
+        // is published; the decoded bundle shrank by exactly the removed delta.
+        assert_eq!(fs::read(&input).unwrap(), bundle, "source must stay unchanged");
+        let out = fs::read(&output).unwrap();
+        assert!(out.len() < bundle.len(), "published bundle must be strictly smaller");
+        let (before_bundle, after_bundle) = (parse(&bundle).unwrap(), parse(&out).unwrap());
+        assert_eq!(before_bundle.nodes.len(), after_bundle.nodes.len());
+        assert_eq!(after_bundle.decoded + removed, before_bundle.decoded);
+        // (b) The .resS node lost exactly the freed tail and the following node
+        // moved down by the same delta; paths and flags are unchanged.
+        assert_eq!(after_bundle.nodes[1].offset, before_bundle.nodes[1].offset);
+        assert_eq!(after_bundle.nodes[1].size + removed, before_bundle.nodes[1].size);
+        assert_eq!(after_bundle.nodes[2].offset + removed, before_bundle.nodes[2].offset);
+        assert_eq!(after_bundle.nodes[2].size, before_bundle.nodes[2].size);
+        for (old, new) in before_bundle.nodes.iter().zip(&after_bundle.nodes) {
+            assert_eq!((old.flags, &old.path), (new.flags, &new.path));
+        }
+        let (mut old_decoder, mut new_decoder) = (NodeDecoder::new(&bundle, &before_bundle),
+            NodeDecoder::new(&out, &after_bundle));
+        // (c) The SerializedFile object table is byte-stable; the target re-parses
+        // with the new declared shape and the later texture re-parses with its
+        // offset shifted down by exactly the removed delta.
+        let old_node = old_decoder.read(0, before_bundle.nodes[0].size).unwrap();
+        let new_node = new_decoder.read(0, after_bundle.nodes[0].size).unwrap();
+        let old_inventory = node_texture_inventory(&old_node).unwrap();
+        let new_inventory = node_texture_inventory(&new_node).unwrap();
+        assert_eq!(old_inventory.object_records.len(), new_inventory.object_records.len());
+        for (old, new) in old_inventory.object_records.iter().zip(&new_inventory.object_records) {
+            assert_eq!((old.id, old.start, old.size, old.type_index, old.table_start, old.table_end),
+                (new.id, new.start, new.size, new.type_index, new.table_start, new.table_end));
+        }
+        fn fields_of(inventory: &crate::unity_serialized::BundleTextureInventory, id: u64)
+            -> &crate::unity_tree::TextureFields {
+            &inventory.details.iter().find(|(candidate, _)| *candidate == id).unwrap().1
+        }
+        let target_fields = fields_of(&new_inventory, 123);
+        assert_eq!((target_fields.texture.width, target_fields.texture.height, target_fields.texture.mips), (64, 64, 7));
+        assert_eq!(target_fields.texture.inline_bytes, 0);
+        assert_eq!((target_fields.texture.stream_offset, target_fields.texture.stream_size), (prefix, new_len as u64));
+        assert_eq!(fields_of(&old_inventory, 124).texture.stream_offset, 0);
+        assert_eq!(fields_of(&new_inventory, 124).texture.stream_offset, 0);
+        assert_eq!(fields_of(&old_inventory, 125).texture.stream_offset, prefix + old_len as u64);
+        assert_eq!(fields_of(&new_inventory, 125).texture.stream_offset, prefix + new_len as u64);
+        // Every changed SerializedFile byte must lie in one declared patch: the
+        // target's shape/size fields or the later texture's offset field.
+        let mut allowed = Vec::new();
+        for (id, fields) in &new_inventory.details {
+            let record = new_inventory.object_records.iter().find(|record| record.id == *id).unwrap();
+            let names: &[&str] = if *id == 123 {
+                &["m_Width", "m_Height", "m_MipCount", "m_CompleteImageSize", "m_StreamData/size"]
+            } else if *id == 125 {
+                &["m_StreamData/offset"]
+            } else { &[] };
+            for name in names {
+                let span = fields.spans.get(*name).unwrap();
+                allowed.push((record.start as usize + span.start, record.start as usize + span.end));
+            }
+        }
+        for (offset, (old, new)) in old_node.iter().zip(&new_node).enumerate() {
+            if old != new {
+                assert!(allowed.iter().any(|(start, end)| offset >= *start && offset < *end),
+                    "SerializedFile byte {offset} changed outside every declared patch");
+            }
+        }
+        // Read the raw shifted offset field back through its span.
+        let record_125 = new_inventory.object_records.iter().find(|record| record.id == 125).unwrap();
+        let span_125 = fields_of(&new_inventory, 125).spans.get("m_StreamData/offset").unwrap();
+        assert_eq!(read_u64(&new_node, record_125.start as usize + span_125.start, false).unwrap(),
+            prefix + new_len as u64, "the later texture's offset field must hold the shifted offset");
+        // (d) The .resS node keeps the prefix, holds the new payload, then the
+        // shifted suffix exactly; the trailing node is byte-identical.
+        let old_stream = old_decoder.read(before_bundle.nodes[1].offset, before_bundle.nodes[1].size).unwrap();
+        let new_stream = new_decoder.read(after_bundle.nodes[1].offset, after_bundle.nodes[1].size).unwrap();
+        assert_eq!(new_stream.len() as u64 + removed, old_stream.len() as u64);
+        assert_eq!(&new_stream[..prefix as usize], &old_stream[..prefix as usize]);
+        assert_eq!(&new_stream[prefix as usize..prefix as usize + new_len], &new_payload[..]);
+        assert_eq!(&new_stream[prefix as usize + new_len..], &old_stream[prefix as usize + old_len..]);
+        assert_eq!(old_decoder.read(before_bundle.nodes[2].offset, before_bundle.nodes[2].size).unwrap(),
+            new_decoder.read(after_bundle.nodes[2].offset, after_bundle.nodes[2].size).unwrap());
+        // (e) Every streamed texture re-extracts byte-identically except the
+        // target, which equals the supplied payload.
+        let extract = |decoder: &mut NodeDecoder, bundle: &Bundle, inventory: &crate::unity_serialized::BundleTextureInventory,
+                       id: u64| -> Vec<u8> {
+            let fields = fields_of(inventory, id);
+            decoder.read(bundle.nodes[1].offset + fields.texture.stream_offset, fields.texture.stream_size).unwrap()
+        };
+        assert_eq!(extract(&mut new_decoder, &after_bundle, &new_inventory, 123), new_payload);
+        assert_eq!(extract(&mut new_decoder, &after_bundle, &new_inventory, 124),
+            extract(&mut old_decoder, &before_bundle, &old_inventory, 124));
+        assert_eq!(extract(&mut new_decoder, &after_bundle, &new_inventory, 125), after);
+        assert_eq!(extract(&mut old_decoder, &before_bundle, &old_inventory, 125), after);
+        // (f) The payload re-extracts byte-identically through the existing
+        // streamed export route. An existing destination is never replaced.
+        let dds_path = root.join("check.dds");
+        texture_export(0, 123, &output, &dds_path).unwrap();
+        let dds = fs::read(&dds_path).unwrap();
+        let check = crate::texture::parse(&dds).unwrap();
+        assert_eq!((check.width, check.height, check.mipmaps), (64, 64, 7));
+        assert_eq!(&dds[check.data_start..], &new_payload[..]);
+        assert!(texture_replace(0, 123, &payload_file, &input, &output).is_err());
+        assert_eq!(fs::read(&output).unwrap(), out);
+        assert_eq!(fs::read(&input).unwrap(), bundle);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn streamed_shrink_zero_pads_when_a_reference_cannot_be_proven() {
+        // An unresolved streamed reference (the replace route's unique-claim
+        // check skips it, but its range cannot be proven) blocks physical
+        // compaction. The zero-padded fallback still runs: the extent keeps its
+        // size, the freed tail is zeroed, the decoded bundle is unchanged and a
+        // strictly smaller candidate is still published.
+        let old_len = chain_len(10, 128, 128);
+        let new_len = chain_len(10, 64, 64);
         let old_payload = payload_of(old_len, 7);
         let new_payload = payload_of(new_len, 11);
         let other = payload_of(600, 17);
-        let object = streamed_object_shape(128, 128, 10, "CAB-test.resS");
-        let sf = serialized_inline_texture(&object);
+        let target = streamed_object_at(128, 128, 10, 0, old_len as u32, "CAB-test.resS");
+        let stray = streamed_object_at(8, 8, 10, 5000, 1000, "/abs/missing.resS");
+        let sf = serialized_objects(&[(123, target), (124, stray)]);
         let mut data = sf.clone();
         data.extend_from_slice(&old_payload);
         data.extend_from_slice(&other);
@@ -2375,31 +3273,30 @@ mod tests {
         let nodes = [(0u64, sf.len() as u64, 4u32, "CAB-test"),
                      (sf.len() as u64, old_len as u64, 0u32, "CAB-test.resS"),
                      ((sf.len() + old_len) as u64, other.len() as u64, 0u32, "CAB-test.other")];
-        // Poor (literal-only) source encoding: every touched block is re-encoded
-        // strictly smaller, so the strictly-smaller publication gate passes.
         let bundle = bundle_with_encoder(&data, &nodes, &sizes, 3, [0u8; 16], literal_lz4);
-        let root = scratch("bgc-unitystream-shrink");
+        // The plan itself refuses the unresolved reference: this is the blocker
+        // that keeps the route on the padded path.
+        let parsed = parse(&bundle).unwrap();
+        let blockers = plan_stream_compaction(&bundle, &parsed, 0, 123, 1, 0, old_len as u64, new_len).unwrap_err();
+        assert!(blockers.iter().any(|blocker| blocker.contains("does not resolve in this bundle")), "{blockers:?}");
+        let root = scratch("bgc-unitystream-padded");
         let input = root.join("bundle"); fs::write(&input, &bundle).unwrap();
         let payload_file = root.join("payload.bin"); fs::write(&payload_file, &new_payload).unwrap();
         let output = root.join("shrunk.bundle");
         texture_replace(0, 123, &payload_file, &input, &output).unwrap();
-        // (a) The source is never modified and only a strictly smaller container
-        // is published.
         assert_eq!(fs::read(&input).unwrap(), bundle, "source must stay unchanged");
         let out = fs::read(&output).unwrap();
         assert!(out.len() < bundle.len(), "published bundle must be strictly smaller");
         let (before, after) = (parse(&bundle).unwrap(), parse(&out).unwrap());
         assert_eq!(before.nodes.len(), after.nodes.len());
         assert_eq!(before.blocks.len(), after.blocks.len());
-        assert_eq!(before.decoded, after.decoded);
+        assert_eq!(before.decoded, after.decoded, "the fallback must keep the decoded layout");
+        assert_eq!((after.nodes[1].offset, after.nodes[1].size), (before.nodes[1].offset, before.nodes[1].size));
         let (mut old_decoder, mut new_decoder) = (NodeDecoder::new(&bundle, &before), NodeDecoder::new(&out, &after));
-        // (b) The SerializedFile object table is byte-stable, the target re-parses
-        // with the new declared shape and its patched fields hold the new values.
         let old_node = old_decoder.read(0, before.nodes[0].size).unwrap();
         let new_node = new_decoder.read(0, after.nodes[0].size).unwrap();
         let old_records = node_texture_inventory(&old_node).unwrap();
         let new_records = node_texture_inventory(&new_node).unwrap();
-        assert_eq!(old_records.object_records.len(), new_records.object_records.len());
         for (old, new) in old_records.object_records.iter().zip(&new_records.object_records) {
             assert_eq!((old.id, old.start, old.size, old.type_index, old.table_start, old.table_end),
                 (new.id, new.start, new.size, new.type_index, new.table_start, new.table_end));
@@ -2415,11 +3312,7 @@ mod tests {
             let span = fields.spans.get(name).unwrap();
             assert_eq!(read_u32(target_object, span.start, false).unwrap(), value, "{name}");
         }
-        // Nothing outside the target object extent changed in the SerializedFile.
-        let (start, end) = (record.start as usize, (record.start + record.size) as usize);
-        assert_eq!(&old_node[..start], &new_node[..start]);
-        assert_eq!(&old_node[end..], &new_node[end..]);
-        // (c) The .resS extent holds the new payload followed by zeros, every byte
+        // The .resS extent holds the new payload followed by zeros, every byte
         // outside the OLD extent is unchanged, and the third node is untouched.
         let old_stream = old_decoder.read(before.nodes[1].offset, before.nodes[1].size).unwrap();
         let new_stream = new_decoder.read(after.nodes[1].offset, after.nodes[1].size).unwrap();
@@ -2428,19 +3321,66 @@ mod tests {
         assert_eq!(&old_stream[old_len..], &new_stream[old_len..], "outside the old extent must be unchanged");
         assert_eq!(old_decoder.read(before.nodes[2].offset, before.nodes[2].size).unwrap(),
             new_decoder.read(after.nodes[2].offset, after.nodes[2].size).unwrap());
-        // (d) The payload re-extracts byte-identically through the existing
-        // streamed export route.
+        // The payload re-extracts byte-identically through the exported route.
         let dds_path = root.join("check.dds");
         texture_export(0, 123, &output, &dds_path).unwrap();
         let dds = fs::read(&dds_path).unwrap();
         let check = crate::texture::parse(&dds).unwrap();
         assert_eq!((check.width, check.height, check.mipmaps), (64, 64, 7));
         assert_eq!(&dds[check.data_start..], &new_payload[..]);
-        // An existing destination is never replaced; the source stays intact.
         assert!(texture_replace(0, 123, &payload_file, &input, &output).is_err());
         assert_eq!(fs::read(&output).unwrap(), out);
         assert_eq!(fs::read(&input).unwrap(), bundle);
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn stream_compaction_plan_refuses_overlapping_unresolved_and_absent_references() {
+        // The replace route's unique-claim check refuses a same-node overlap
+        // before the plan runs, so the plan's own fail-closed rules are proven
+        // directly: a range that straddles the cut, a range inside the removed
+        // region, an unresolvable stream path and a resolved-but-absent target
+        // each block compaction with their own reason.
+        let old_len = chain_len(10, 128, 128);
+        let new_len = chain_len(10, 64, 64);
+        let stream = payload_of(old_len as usize + 2048, 7);
+        let target = streamed_object_at(128, 128, 10, 64, old_len as u32, "CAB-test.resS");
+        let cases: &[(&str, Vec<u8>, &str)] = &[
+            ("straddle", streamed_object_at(8, 8, 10, 2700, 500, "CAB-test.resS"),
+                "straddles the start of the removed region"),
+            ("inside", streamed_object_at(8, 8, 10, 5000, 100, "CAB-test.resS"),
+                "lies inside the removed region"),
+            ("unresolved", streamed_object_at(8, 8, 10, 5000, 100, "/abs/missing.resS"),
+                "does not resolve in this bundle"),
+            ("absent", streamed_object_at(8, 8, 10, 5000, 100, "CAB-absent.resS"),
+                "is not present in this bundle"),
+        ];
+        for (name, stray, expected) in cases {
+            let sf = serialized_objects(&[(123, target.clone()), (124, stray.clone())]);
+            let bundle = bundle_with_serialized_and_stream(&sf, &stream);
+            let parsed = parse(&bundle).unwrap();
+            let blockers = plan_stream_compaction(&bundle, &parsed, 0, 123, 1, 64, old_len as u64, new_len)
+                .expect_err(name);
+            assert!(blockers.iter().any(|blocker| blocker.contains(expected)),
+                "{name}: expected {expected:?}, got {blockers:?}");
+        }
+    }
+    #[test]
+    fn stream_compaction_plan_refuses_more_than_the_streamed_reference_bound() {
+        // One target plus MAX_STREAM_REFS other streamed textures exceed the
+        // stated bound; the plan refuses instead of looping over an unbounded
+        // object set.
+        let target = streamed_object_at(8, 8, 10, 0, 1000, "CAB-test.resS");
+        let mut objects = vec![(123u64, target)];
+        for index in 0..MAX_STREAM_REFS {
+            objects.push((124 + index as u64,
+                streamed_object_at(8, 8, 10, 1000 + index as u64 * 16, 4, "CAB-test.resS")));
+        }
+        let sf = serialized_objects(&objects);
+        let stream = vec![0u8; 1000 + MAX_STREAM_REFS * 16 + 16];
+        let bundle = bundle_with_serialized_and_stream(&sf, &stream);
+        let parsed = parse(&bundle).unwrap();
+        let blockers = plan_stream_compaction(&bundle, &parsed, 0, 123, 1, 0, 1000, 500).unwrap_err();
+        assert!(blockers.iter().any(|blocker| blocker.contains("more than the")), "{blockers:?}");
     }
     #[test]
     fn streamed_replace_refuses_non_shorter_unresolved_aliased_and_misshaped_payloads() {
@@ -2494,15 +3434,18 @@ mod tests {
     }
     #[test]
     fn streamed_no_gain_replacements_publish_nothing() {
-        // The stored-codec bundle keeps every block at its decoded length, so
-        // zeroing the extent cannot shrink the container: the route reports
-        // NO_GAIN and leaves the destination absent. The declared extent starts
-        // 111 bytes into the .resS node, so the same-offset patch arithmetic and
-        // the internal re-extraction check are exercised off the node start.
+        // With an unresolved reference the physical plan is refused and the
+        // zero-padded fallback runs. In a stored-codec bundle that fallback keeps
+        // every block at its decoded length, so zeroing the extent cannot shrink
+        // the container: the route reports NO_GAIN and leaves the destination
+        // absent. The declared extent starts 111 bytes into the .resS node, so
+        // the same-offset patch arithmetic and the internal re-extraction check
+        // are exercised off the node start.
         let old_len = chain_len(10, 128, 128);
         let offset = 111u64;
-        let object = streamed_object_at(128, 128, 10, offset, old_len as u32, "CAB-test.resS");
-        let sf = serialized_inline_texture(&object);
+        let target = streamed_object_at(128, 128, 10, offset, old_len as u32, "CAB-test.resS");
+        let stray = streamed_object_at(8, 8, 10, 5000, 100, "missing.resS");
+        let sf = serialized_objects(&[(123, target), (124, stray)]);
         let mut stream = vec![0x5au8; offset as usize];
         stream.extend_from_slice(&payload_of(old_len, 7));
         let bundle = bundle_with_serialized_and_stream(&sf, &stream);
