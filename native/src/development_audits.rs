@@ -13,6 +13,7 @@ const COMMANDS: &[&str] = &[
 const XNB_EXPORT: &str = "xnb-texture-export";
 const UNITYFS_TEXTURE_EXPORT: &str = "unityfs-texture-export";
 const UNITYFS_TEXTURE_REPLACE: &str = "unityfs-texture-replace";
+const UNITYFS_TEXTURE_APPLY: &str = "unityfs-texture-apply";
 const UNREAL_PAK_ENTRY_EXPORT: &str = "unreal-pak-entry-export";
 const UNREAL_TEXTURE_EXPORT: &str = "unreal-texture-export";
 
@@ -28,12 +29,35 @@ pub fn dispatch(args: &[OsString]) -> Option<io::Result<()>> {
         println!("  {XNB_EXPORT} MAX_EDGE INPUT OUTPUT (detached experimental export)");
         println!("  {UNITYFS_TEXTURE_EXPORT} NODE_INDEX:PATH_ID INPUT OUTPUT (detached experimental export)");
         println!("  {UNITYFS_TEXTURE_REPLACE} NODE_INDEX:PATH_ID RAW_PAYLOAD_FILE INPUT OUTPUT (detached experimental replace)");
+        println!("  {UNITYFS_TEXTURE_APPLY} PROFILE LEVEL GAME_DIR RELATIVE_BUNDLE [RELATIVE_BUNDLE...] (in-place apply on a game copy; backup + restore)");
         println!("  {UNREAL_PAK_ENTRY_EXPORT} ENTRY_PATH INPUT OUTPUT (detached experimental export)");
         println!("  {UNREAL_TEXTURE_EXPORT} EXPORT_NAME INPUT OUTPUT (detached experimental export)");
         println!("Draft routes require the development-audits Cargo feature; no installed apply or automatic routing.");
         println!("The XNB export decodes and re-encodes BC pixels; audits do not certify runtime compatibility.");
         println!("Detached XNB publication requires O_TMPFILE and /proc/self/fd; use a trusted research output directory.");
         return Some(Ok(()));
+    }
+    if command == UNITYFS_TEXTURE_APPLY {
+        if args.len() < 5 {
+            return Some(Err(super::invalid(
+                "unityfs-texture-apply requires PROFILE LEVEL GAME_DIR and at least one game-relative bundle path")));
+        }
+        #[cfg(not(feature = "development-audits"))]
+        {
+            return Some(Err(io::Error::new(io::ErrorKind::Unsupported,
+                "the in-place Unity bundle apply is disabled in normal builds; the development-audits Cargo feature is required")));
+        }
+        #[cfg(feature = "development-audits")]
+        {
+            return Some((|| -> io::Result<()> {
+                let target = args[1].to_str().ok_or_else(|| super::invalid("invalid visual target"))?;
+                let level = args[2].to_str().and_then(|s| s.parse::<u8>().ok())
+                    .ok_or_else(|| super::invalid("invalid asset compression level"))?;
+                let root = Path::new(&args[3]);
+                let rels: Vec<std::path::PathBuf> = args[4..].iter().map(std::path::PathBuf::from).collect();
+                super::unityfs::apply::texture_apply_cli(target, level, root, &rels)
+            })());
+        }
     }
     if !COMMANDS.contains(&command) && command != XNB_EXPORT && command != UNITYFS_TEXTURE_EXPORT
         && command != UNITYFS_TEXTURE_REPLACE
@@ -117,7 +141,7 @@ mod tests {
         assert!(dispatch(&[]).is_none());
         assert!(dispatch(&[OsString::from("not-a-development-command")]).is_none());
         for command in COMMANDS.iter().copied().chain([XNB_EXPORT, UNITYFS_TEXTURE_EXPORT,
-            UNITYFS_TEXTURE_REPLACE, UNREAL_PAK_ENTRY_EXPORT, UNREAL_TEXTURE_EXPORT]) {
+            UNITYFS_TEXTURE_REPLACE, UNITYFS_TEXTURE_APPLY, UNREAL_PAK_ENTRY_EXPORT, UNREAL_TEXTURE_EXPORT]) {
             let error = dispatch(&[OsString::from(command)]).unwrap().unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
@@ -142,6 +166,10 @@ mod tests {
         let args = [OsString::from(UNITYFS_TEXTURE_REPLACE), OsString::from("0:1"),
             OsString::from("/nonexistent-bgc-guard-payload"),
             OsString::from("/nonexistent-bgc-guard-input"), OsString::from("/nonexistent-bgc-guard-output")];
+        assert_eq!(dispatch(&args).unwrap().unwrap_err().kind(), io::ErrorKind::Unsupported);
+        let args = [OsString::from(UNITYFS_TEXTURE_APPLY), OsString::from("balanced"),
+            OsString::from("1"), OsString::from("/nonexistent-bgc-guard-game"),
+            OsString::from("bundle")];
         assert_eq!(dispatch(&args).unwrap().unwrap_err().kind(), io::ErrorKind::Unsupported);
         let args = [OsString::from(UNREAL_PAK_ENTRY_EXPORT), OsString::from("a.b"),
             OsString::from("/nonexistent-bgc-guard-input"), OsString::from("/nonexistent-bgc-guard-output")];

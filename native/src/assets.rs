@@ -33,8 +33,11 @@ const MAX_PIXELS: u64 = 80_000_000;
 
 /// Advisory per-game inode lock. Released automatically when the descriptor
 /// closes or the process exits, including SIGKILL. This only coordinates
-/// cooperating native asset commands, not Steam itself.
-fn lock_game_for_mutation(root: &Path) -> io::Result<File> {
+/// cooperating native asset commands, not Steam itself. Also used by the Unity
+/// bundle apply so it cannot overlap the loose asset pass, restore, finalize or
+/// prune. This is the same guard the installed asset pipeline holds; it is not
+/// an atomic running-game check.
+pub(crate) fn lock_game_for_mutation(root: &Path) -> io::Result<File> {
     let dir = OpenOptions::new()
         .read(true)
         .custom_flags(NOFOLLOW | libc::O_DIRECTORY)
@@ -79,6 +82,12 @@ fn profile(s: &str) -> io::Result<Option<Profile>> {
 }
 fn bad(s: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, s)
+}
+/// Profile cap exposed to other gated writers (Unity bundle apply). `None` is
+/// the `native` no-op profile; `u32::MAX` is lossless, which never resizes.
+#[cfg(any(test, feature = "development-audits"))]
+pub(crate) fn profile_max_edge(target: &str) -> io::Result<Option<u32>> {
+    Ok(profile(target)?.map(|p| p.max_edge))
 }
 fn append_suffix(p: &Path, suffix: &str) -> PathBuf {
     let mut name = p.file_name().unwrap_or_default().to_os_string();
@@ -255,6 +264,122 @@ fn ensure_backup_dirs(root: &Path, relative_parent: &Path) -> io::Result<PathBuf
         validate_backup_dir(&p, root_device)?;
     }
     Ok(p)
+}
+/// Restorable-original path for one game-relative asset, in the same backup
+/// tree `assets restore` and `assets finalize` already walk.
+#[cfg(any(test, feature = "development-audits"))]
+pub(crate) fn backup_path(root: &Path, relative: &Path) -> PathBuf {
+    root.join(BACKUP).join(relative)
+}
+/// True when the installed asset still hashes to the checksum recorded next to
+/// its restorable original (the transformed state `assets restore` accepts).
+#[cfg(any(test, feature = "development-audits"))]
+pub(crate) fn matches_recorded_checksum(root: &Path, relative: &Path) -> io::Result<bool> {
+    let live = root.join(relative);
+    let backup = backup_path(root, relative);
+    matches_expected(&live, &sidecar(&backup))
+}
+/// Name for a bundle that carries a nonzero uncompressed-data hash or sits in
+/// an Addressables catalogue layout; used by the Unity bundle apply to report
+/// exactly why a bundle is refused rather than written.
+#[cfg(any(test, feature = "development-audits"))]
+pub(crate) const ASSET_REFUSAL_HASH: &str = "nonzero uncompressed-data hash";
+#[cfg(any(test, feature = "development-audits"))]
+pub(crate) const ASSET_REFUSAL_CATALOGUE: &str = "Addressables catalogue layout";
+
+/// Install already-verified replacement bytes for one game-relative regular
+/// file with the exact safety sequence the loose asset apply uses: a
+/// byte-identical restorable copy under `.bgc-assets-backup/<relative>`, a
+/// checksum sidecar recording the *replacement* hash (the format `assets
+/// restore`/`assets finalize` validate), a private temp file in the same
+/// directory, fsync, the original permissions/mtime, best-effort Btrfs
+/// compression, then an atomic rename and parent sync. Callers must already
+/// hold `lock_game_for_mutation` and have verified the replacement bytes in
+/// memory. On any error the live file is untouched and only objects created by
+/// this call are removed. Returns `(original_len, installed_len)`.
+#[cfg(any(test, feature = "development-audits"))]
+pub(crate) fn install_verified_asset(tree: &super::Tree, root: &Path, relative: &Path,
+    bytes: &[u8], level: u8) -> io::Result<(u64, u64)> {
+    if relative.as_os_str().is_empty()
+        || relative.components().any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(bad("asset install requires a non-empty game-relative path"));
+    }
+    let path = root.join(relative);
+    let meta = fs::symlink_metadata(&path)?;
+    if !meta.file_type().is_file() || meta.nlink() != 1 {
+        return Err(bad("asset install requires a regular single-link file"));
+    }
+    if meta.dev() != fs::symlink_metadata(root)?.dev() {
+        return Err(bad("asset install target crosses a filesystem"));
+    }
+    let backup = backup_path(root, relative);
+    let check = sidecar(&backup);
+    if backup.exists() || check.exists() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists,
+            "a restorable original for this asset already exists"));
+    }
+    let original_len = meta.len();
+    ensure_backup_dirs(root, relative.parent().unwrap_or(Path::new("")))?;
+    let tmp = append_suffix(&path, &format!(".bgc-tmp-{}", std::process::id()));
+    let mut backup_created = false;
+    let mut tmp_created = false;
+    let mut check_created = false;
+    let mut installed = false;
+    let result = (|| -> io::Result<()> {
+        clone_file(&path, &backup)?;
+        backup_created = true;
+        // The restorable copy is only trustworthy once proven byte-identical.
+        if !same_contents(&path, &backup)? {
+            return Err(bad("restorable copy differs from the source asset"));
+        }
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(NOFOLLOW)
+            .open(&tmp)?;
+        tmp_created = true;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        let m = fs::metadata(&path)?;
+        f.set_permissions(m.permissions())?;
+        f.set_times(FileTimes::new().set_modified(m.modified()?))?;
+        let rel_tmp = tmp
+            .strip_prefix(root)
+            .map_err(|_| bad("temporary asset escaped game directory"))?;
+        let writable = tree.open(rel_tmp, true)?;
+        super::compress_file_best_effort(&writable, rel_tmp, level)?;
+        let mut c = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(NOFOLLOW)
+            .open(&check)?;
+        check_created = true;
+        write!(c, "{:016x}\n", hash(bytes))?;
+        c.sync_all()?;
+        File::open(check.parent().ok_or_else(|| bad("invalid checksum path"))?)?.sync_all()?;
+        // Refuse a source that changed while the replacement was staged; the
+        // original still occupies the live path on this branch.
+        if !same_contents(&path, &backup)? {
+            return Err(bad("asset changed while its replacement was staged"));
+        }
+        fs::rename(&tmp, &path)?;
+        installed = true;
+        File::open(path.parent().ok_or_else(|| bad("invalid asset path"))?)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if tmp_created && !installed {
+            let _ = fs::remove_file(&tmp);
+        }
+        if !installed {
+            if check_created { let _ = fs::remove_file(&check); }
+            if backup_created { let _ = fs::remove_file(&backup); }
+        }
+        return Err(error);
+    }
+    let installed_len = fs::metadata(&path)?.len();
+    Ok((original_len, installed_len))
 }
 fn format_for(path: &Path) -> Option<ImageFormat> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {

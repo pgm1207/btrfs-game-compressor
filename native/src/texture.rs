@@ -245,7 +245,8 @@ pub(crate) fn build_dds<T: AsRef<[u8]>>(surface: &Surface<T>) -> io::Result<Vec<
 }
 
 /// Preserve aspect ratio, never upscale, and never return a zero dimension.
-fn scale_to(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
+/// Shared with the gated Unity bundle apply so both writers scale identically.
+pub(crate) fn scale_to(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
     if width <= max_dim && height <= max_dim {
         return (width, height);
     }
