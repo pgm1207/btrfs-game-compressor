@@ -28,6 +28,8 @@ mod unreal_iostore;
 mod iostore_index;
 #[cfg(feature = "development-audits")]
 mod unreal_package;
+#[cfg(feature = "development-audits")]
+mod unreal_texture;
 mod containers;
 mod gst2;
 mod texture_policy;

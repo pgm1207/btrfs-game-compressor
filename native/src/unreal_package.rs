@@ -6,6 +6,9 @@
 //! not verified extents. Version gates were cross-checked against the public
 //! UE4 `FPackageFileSummary`/`FObjectExport` serializers and UEViewer's
 //! UE4Version.h constant list (documentation only, no runtime dependency).
+//! `bulk_data_start` additionally walks the summary tail up to the declared
+//! bulk-data offset for the companion cooked-Texture2D audit; it does not read
+//! any payload bytes.
 use std::{io, path::Path};
 
 use super::{audit_io::Source, invalid};
@@ -149,6 +152,9 @@ pub(crate) struct Report {
     pub import_offset: i32,
     pub export_offset: i32,
     pub depends_offset: i32,
+    /// Absolute position of the first summary byte after `DependsOffset`, kept so
+    /// a companion reader can continue the summary without re-scanning it.
+    pub summary_tail: u64,
     pub names: Vec<String>,
     /// Import object-name indexes, used to resolve negative export class indexes.
     pub import_classes: Vec<usize>,
@@ -159,7 +165,7 @@ impl Report {
     /// Resolve an export class index to a name table entry. Negative indexes name
     /// an imported object (`-index - 1` into the import map); positive indexes
     /// name an export in the same package (`index - 1`). Zero is `None`.
-    fn class_name(&self, index: i32) -> io::Result<&str> {
+    pub(crate) fn class_name(&self, index: i32) -> io::Result<&str> {
         if index == 0 { return Ok("None"); }
         let name_index = if index < 0 {
             let import = index.checked_neg().and_then(|value| value.checked_sub(1))
@@ -186,7 +192,7 @@ fn table_offset(value: i32, header_size: u64) -> io::Result<u64> {
     Ok(value as u64)
 }
 
-fn inspect(source: &mut Source) -> io::Result<Report> {
+pub(crate) fn inspect(source: &mut Source) -> io::Result<Report> {
     let mut reader = Reader::new(source);
     if reader.u32()? != MAGIC { return Err(invalid("not an Unreal package (bad magic)")); }
     let legacy = reader.i32()?;
@@ -228,6 +234,7 @@ fn inspect(source: &mut Source) -> io::Result<Report> {
     let import_count = table_count(reader.i32()?, "Unreal package import count exceeds limit")?;
     let import_offset = table_offset(reader.i32()?, header_size)?;
     let depends_offset = table_offset(reader.i32()?, header_size)?;
+    let summary_tail = reader.position();
 
     let export_bytes = u64::from(export_count) * EXPORT_RECORD;
     if export_bytes > MAX_TABLE
@@ -314,9 +321,63 @@ fn inspect(source: &mut Source) -> io::Result<Report> {
     let report = Report { legacy, ue4, package_name, package_flags, total_header_size,
         name_offset: name_offset as i32, import_offset: import_offset as i32,
         export_offset: export_offset as i32, depends_offset: depends_offset as i32,
-        names, import_classes, exports };
+        summary_tail, names, import_classes, exports };
     for export in &report.exports { report.class_name(export.class_index)?; }
     Ok(report)
+}
+
+/// Skip an i32-prefixed `FString` whose text is not needed, including the empty
+/// string. `None` reports an implausible length instead of failing the walk.
+fn skip_string(reader: &mut Reader) -> io::Result<Option<()>> {
+    let size = reader.i32()?;
+    if size == 0 { return Ok(Some(())); }
+    let Some(count) = size.checked_abs().map(|count| count as usize) else { return Ok(None); };
+    if count > MAX_STRING { return Ok(None); }
+    let bytes = if size > 0 { count } else { count.checked_mul(2).ok_or_else(|| invalid("Unreal string size overflow"))? };
+    reader.skip(bytes)?;
+    Ok(Some(()))
+}
+
+/// Walk the remainder of the cooked package summary from `DependsOffset` to the
+/// declared `BulkDataStartOffset` for the same verified window as `inspect`.
+/// Only zero-or-absent optional tables are accepted, and `Ok(None)` reports
+/// "outside the verified summary shape" rather than guessing. Callers use this
+/// to resolve `PayloadAtEndOfFile` mip offsets, which are relative to it.
+pub(crate) fn bulk_data_start(source: &mut Source, report: &Report) -> io::Result<Option<u64>> {
+    // Editor packages carry additional summary fields this walk does not model.
+    if report.package_flags & 0x8000_0000 == 0 { return Ok(None); }
+    let mut reader = Reader::new(source);
+    reader.seek(report.summary_tail)?;
+    let string_references = reader.i32()?;
+    reader.i32()?; // StringAssetReferencesOffset
+    if !(0..=MAX_RECORDS).contains(&string_references) { return Ok(None); }
+    reader.skip(4)?; // ThumbnailTableOffset
+    reader.skip(16)?; // package GUID
+    let generations = reader.i32()?;
+    if !(0..=1024).contains(&generations) { return Ok(None); }
+    reader.skip(generations as usize * 8)?;
+    for _ in 0..2 { // saved-by and compatible FEngineVersion
+        reader.skip(10)?; // uint16 Major/Minor/Patch + int32 Changelist
+        if skip_string(&mut reader)?.is_none() { return Ok(None); }
+    }
+    reader.skip(4)?; // CompressionFlags
+    let chunks = reader.i32()?;
+    if !(0..=MAX_RECORDS).contains(&chunks) { return Ok(None); }
+    reader.skip(chunks as usize * 16)?; // FCompressedChunk records
+    reader.skip(4)?; // PackageSource
+    let packages = reader.i32()?;
+    if !(0..=MAX_RECORDS).contains(&packages) { return Ok(None); }
+    for _ in 0..packages {
+        if skip_string(&mut reader)?.is_none() { return Ok(None); }
+    }
+    if report.legacy > -7 {
+        if reader.i32()? != 0 { return Ok(None); } // NumTextureAllocations (legacy array)
+    }
+    reader.i32()?; // AssetRegistryDataOffset
+    let bulk = i64::from_le_bytes(reader.take(8)?.try_into().unwrap());
+    if bulk <= 0 || bulk as u64 > reader.length { return Ok(None); }
+    if reader.position() > report.name_offset as u64 { return Ok(None); }
+    Ok(Some(bulk as u64))
 }
 
 pub fn audit(path: &Path) -> io::Result<()> {
