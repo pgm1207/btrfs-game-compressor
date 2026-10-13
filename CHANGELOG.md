@@ -4,6 +4,42 @@
 
 ### Development routes
 
+- Add the gated, in-place `unityfs-texture-apply PROFILE LEVEL GAME_DIR
+  RELATIVE_BUNDLE...` route. It downscales ordinary inline/streamed Texture2D mip
+  chains inside a **game copy** (never the installed game) and re-encodes them
+  with the repository texture policy and the same codec path as
+  `texture-compress` (Lanczos3 resampling, regenerated complete
+  1x1-terminated chain, DDS self-check and the shared shrink-chain proof). Each
+  bundle is rewritten through the loose asset pipeline's safety sequence: a
+  byte-identical restorable copy under `.bgc-assets-backup/<relative>`, a
+  checksum sidecar recording the replacement hash, a private temp file, fsync,
+  the original permissions/mtime, best-effort Btrfs compression, an atomic
+  rename and parent sync; `assets restore` returns the source byte-identically
+  and `assets finalize` drops the backup. Refusal rules (each reported per
+  bundle/texture, never guessed at): a nonzero 16-byte info-section
+  uncompressed-data hash cannot be recomputed; an Addressables layout (a
+  case-insensitive `aa` path component or a `catalog*.json`/`catalog*.hash`
+  file beside or above the bundle inside the game root) may carry a catalogue
+  hash that cannot be recomputed; any bundle, inventory, field patch, streamed
+  reference plan or size comparison that cannot be fully proven fails closed
+  (a whole-bundle error, or a skipped texture with its reason); and no-gain
+  textures or bundles are never written. Before installing, the candidate is
+  re-parsed and compared against the source node by node, every other retained
+  texture identity and payload is re-extracted and required byte-identical, and
+  each applied target must re-extract and decode at its new declared
+  dimensions. Real Cocoon check on a copy: one 53,921,344-byte Addressables
+  bundle, 48 textures applied (47 physically compacted streamed + 1 inline),
+  41,914,711 bytes installed (-12,006,633 bytes); `assets restore` returned the
+  original sha256 byte-identically, `assets finalize` removed the backup, and
+  sample skipped-texture DDS exports were sha256-identical before and after.
+  The `aa/` layout that Cocoon ships is refused with the bundle unchanged.
+  Limits: stream ownership is proven only among the bundle's retained Texture2D
+  objects (non-texture owners are not inventoried), sprite/atlas/mesh consumers
+  of a resized texture are not modeled, runtime acceptance is not validated,
+  and a catalogue stored outside the game root is not detectable. Requires the
+  `development-audits` Cargo feature; no automatic routing and no installed
+  apply.
+
 - Add the gated, export-only `unityfs-texture-export NODE_INDEX:PATH_ID INPUT
   OUTPUT` route. It writes a standalone DDS from one ordinary Unity SerializedFile
   Texture2D (RGBA32/BGRA32/DXT1/DXT5/BC4/BC5/BC7) selected by an

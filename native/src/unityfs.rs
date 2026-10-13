@@ -1366,34 +1366,57 @@ struct StreamCompactionPlan {
     streamed: usize,
 }
 
+/// Which layout change a streamed-reference plan must prove.
+#[cfg(any(test, feature = "development-audits"))]
+#[derive(Clone, Copy)]
+enum StreamPlanMode {
+    /// Physical compaction: `[stream_offset + new_len, stream_offset + stream_size)`
+    /// is removed and every later reference shifts down by the removed length,
+    /// which needs a proven `m_StreamData/offset` span.
+    Compact { new_len: usize },
+    /// Zero-padded in-place rewrite: the target extent keeps its size, its head
+    /// is replaced and its freed tail is zeroed. Nothing shifts, so every other
+    /// reference must be disjoint from the whole old extent (an overlapping
+    /// range would be silently zeroed); a reference after the extent needs no
+    /// offset-field proof at all.
+    ZeroPad,
+}
+
 /// Prove that every streamed Texture2D in this bundle that can reference the
-/// target `.resS` node can be rewritten by one physical removal of
-/// `[stream_offset + new_len, stream_offset + stream_size)` and list exactly
-/// what blocks it otherwise. The rules are fail-closed:
+/// target `.resS` node is compatible with one layout change of the target
+/// (`StreamPlanMode`), and list exactly what blocks it otherwise. The rules are
+/// fail-closed:
 ///   * every SerializedFile node must be readable and fully inventoried: an
 ///     opaque, unsupported, over-budget or unretained texture object could hide
-///     a stream range, so any of them blocks compaction;
+///     a stream range, so any of them blocks the change;
 ///   * every streamed object's path must resolve to a node in this bundle
-///     (another resource node is fine: it is not being compacted);
-///   * an object in the target node whose range lies inside the removed region
-///     or straddles its start blocks compaction (its bytes would disappear);
-///   * an object in the target node whose range starts at or after the removed
-///     end must have a captured 8-byte `m_StreamData/offset` span that currently
-///     holds exactly the parsed offset, so the field can be shifted by the
-///     removed length;
+///     (another resource node is fine: it is not being changed);
+///   * an object in the target node whose range overlaps the affected region
+///     blocks the change (its bytes would disappear or be zeroed);
+///   * under `Compact`, an object in the target node whose range starts at or
+///     after the removed end must have a captured 8-byte `m_StreamData/offset`
+///     span that currently holds exactly the parsed offset, so the field can be
+///     shifted by the removed length;
 ///   * nodes with flags other than 0 (resource) or 4 (SerializedFile) cannot be
-///     proven to hold no SerializedFile objects and block compaction;
-///   * more than `MAX_STREAM_REFS` streamed objects blocks compaction.
-/// Nothing is written; the caller keeps the zero-padded route as fallback.
+///     proven to hold no SerializedFile objects and block the change;
+///   * more than `MAX_STREAM_REFS` streamed objects blocks the change.
+/// Nothing is written; the callers fall back or refuse.
 #[cfg(any(test, feature = "development-audits"))]
 #[allow(clippy::too_many_arguments)]
-fn plan_stream_compaction(bytes: &[u8], bundle: &Bundle, node_index: usize, path_id: u64,
-    target: usize, stream_offset: u64, stream_size: u64, new_len: usize)
+fn plan_stream_references(bytes: &[u8], bundle: &Bundle, node_index: usize, path_id: u64,
+    target: usize, stream_offset: u64, stream_size: u64, mode: StreamPlanMode)
     -> Result<StreamCompactionPlan, Vec<String>> {
     let mut blockers = Vec::new();
     let mut shifts = Vec::new();
-    let removed = stream_size - new_len as u64;
-    let new_end = stream_offset + new_len as u64;
+    let (removed, affected_start) = match mode {
+        StreamPlanMode::Compact { new_len } => {
+            if new_len as u64 >= stream_size {
+                return Err(vec!["the compacted replacement is not strictly shorter than the target extent".to_string()]);
+            }
+            (stream_size - new_len as u64, stream_offset + new_len as u64)
+        }
+        StreamPlanMode::ZeroPad => (0, stream_offset),
+    };
     let old_end = stream_offset + stream_size;
     let target_node = &bundle.nodes[target];
     let rem_to = target_node.offset + old_end;
@@ -1473,8 +1496,12 @@ fn plan_stream_compaction(bytes: &[u8], bundle: &Bundle, node_index: usize, path
                         }
                         continue;
                     }
-                    if end <= new_end { continue; }
+                    if end <= affected_start { continue; }
                     if texture.stream_offset >= old_end {
+                        match mode {
+                            StreamPlanMode::ZeroPad => continue,
+                            StreamPlanMode::Compact { .. } => {}
+                        }
                         let Some(span) = fields.spans.get("m_StreamData/offset") else {
                             blockers.push(format!("node {index} object {id}: the m_StreamData/offset span is missing"));
                             continue;
@@ -1505,10 +1532,13 @@ fn plan_stream_compaction(bytes: &[u8], bundle: &Bundle, node_index: usize, path
                             old_offset: texture.stream_offset, big: inventory.big });
                         continue;
                     }
-                    let reason = if texture.stream_offset >= new_end {
-                        "lies inside the removed region"
-                    } else {
-                        "straddles the start of the removed region"
+                    let reason = match mode {
+                        StreamPlanMode::ZeroPad => "overlaps the zero-padded extent",
+                        StreamPlanMode::Compact { .. } => if texture.stream_offset >= affected_start {
+                            "lies inside the removed region"
+                        } else {
+                            "straddles the start of the removed region"
+                        },
                     };
                     blockers.push(format!("node {index} object {id}: declared range [{}, {}) {reason}", texture.stream_offset, end));
                 }
@@ -1518,6 +1548,28 @@ fn plan_stream_compaction(bytes: &[u8], bundle: &Bundle, node_index: usize, path
     }
     if !blockers.is_empty() { return Err(blockers); }
     Ok(StreamCompactionPlan { shifts, streamed })
+}
+
+/// The physical-compaction plan of the streamed replace route.
+#[cfg(any(test, feature = "development-audits"))]
+#[allow(clippy::too_many_arguments)]
+fn plan_stream_compaction(bytes: &[u8], bundle: &Bundle, node_index: usize, path_id: u64,
+    target: usize, stream_offset: u64, stream_size: u64, new_len: usize)
+    -> Result<StreamCompactionPlan, Vec<String>> {
+    plan_stream_references(bytes, bundle, node_index, path_id, target,
+        stream_offset, stream_size, StreamPlanMode::Compact { new_len })
+}
+
+/// The stricter reference plan the in-place apply requires before a zero-padded
+/// rewrite: the whole old extent must be provably disjoint from every other
+/// streamed object and every streamed reference must be fully inventoried.
+#[cfg(any(test, feature = "development-audits"))]
+#[allow(clippy::too_many_arguments)]
+fn plan_stream_zero_pad(bytes: &[u8], bundle: &Bundle, node_index: usize, path_id: u64,
+    target: usize, stream_offset: u64, stream_size: u64)
+    -> Result<StreamCompactionPlan, Vec<String>> {
+    plan_stream_references(bytes, bundle, node_index, path_id, target,
+        stream_offset, stream_size, StreamPlanMode::ZeroPad)
 }
 
 /// Result of re-proving a compacted candidate before publication.
@@ -1796,10 +1848,18 @@ struct StreamedShrinkOutcome {
 /// in-place bundle apply; it writes nothing and publishes nothing. Any failure
 /// returns an error and no candidate. `diagnostics` explains every compaction
 /// blocker for the caller to report.
+///
+/// `strict_zero_pad` selects the in-place apply's stronger fallback contract:
+/// before a zero-padded rewrite, `plan_stream_zero_pad` must prove that every
+/// streamed reference in the whole bundle is inventoried and disjoint from the
+/// target's old extent. The detached replace route keeps its historical
+/// (documented) permissive fallback, because it publishes a new research
+/// artifact instead of overwriting an installed file.
 #[cfg(any(test, feature = "development-audits"))]
+#[allow(clippy::too_many_arguments)]
 fn streamed_shrink_candidate(bytes: &[u8], bundle: &Bundle, located: &LocatedTexture,
-    node_index: usize, path_id: u64, new_payload: &[u8], new_width: u32, new_height: u32, new_mips: u32)
-    -> io::Result<StreamedShrinkOutcome> {
+    node_index: usize, path_id: u64, new_payload: &[u8], new_width: u32, new_height: u32, new_mips: u32,
+    strict_zero_pad: bool) -> io::Result<StreamedShrinkOutcome> {
     let old_texture = &located.fields.texture;
     let (target, stream_offset, stream_size) = match located.storage {
         LocatedStorage::Streamed { target, offset, size } => (target, offset, size),
@@ -1878,6 +1938,25 @@ fn streamed_shrink_candidate(bytes: &[u8], bundle: &Bundle, located: &LocatedTex
                 diagnostics.push("compaction was blocked without a stated reason".to_string());
             } else {
                 diagnostics.extend(blockers);
+            }
+        }
+    }
+    if strict_zero_pad {
+        // The in-place apply may not zero any byte that another streamed object
+        // could still declare: before the padded fallback, every streamed
+        // reference in the bundle must be fully inventoried and disjoint from
+        // the target's whole old extent. The detached route keeps its
+        // historical, weaker fallback.
+        match plan_stream_zero_pad(bytes, bundle, node_index, path_id, target, stream_offset, stream_size) {
+            Ok(_) => {}
+            Err(blockers) => {
+                let detail = if blockers.is_empty() {
+                    "the zero-padded rewrite was blocked without a stated reason".to_string()
+                } else {
+                    blockers.join("; ")
+                };
+                return Err(invalid(&format!(
+                    "Unity streamed zero-padded rewrite is not provable in place: {detail}")));
             }
         }
     }
@@ -2096,7 +2175,7 @@ fn replace_streamed_texture(bytes: &[u8], bundle: &Bundle, located: &LocatedText
     };
     prove_shrink_chain(located.format, new_width, new_height, new_mips, &new_payload)?;
     let outcome = streamed_shrink_candidate(bytes, bundle, &located, node_index, path_id,
-        &new_payload, new_width, new_height, new_mips)?;
+        &new_payload, new_width, new_height, new_mips, false)?;
     for diagnostic in &outcome.diagnostics {
         println!("UNITYFS_STREAM_COMPACTION_BLOCKED|{node_index}|{path_id}|{diagnostic}");
     }
@@ -2467,25 +2546,74 @@ pub fn run(input: &Path, output: Option<&Path>, min_efficiency: f64) -> io::Resu
 // atomic-write conventions the loose asset pipeline uses
 // (`assets restore`/`assets finalize` handle the result unchanged).
 //
-// Integrity rule implemented here (and reported for every refusal):
-//   * the bundle's own 16-byte info-section uncompressed-data hash must be all
-//     zero; a nonzero value cannot be recomputed by this build, so the bundle
-//     is refused (the zero placeholder is preserved byte-for-byte);
-//   * a bundle whose game-relative path has an "aa" component (the Addressables
-//     content layout) or whose directory/ancestor inside the game root contains
-//     a `catalog.json`/`catalog.*.hash` file is refused because an Addressables
-//     catalogue may carry a bundle hash/CRC this build cannot recompute.
-// This is a layout rule, not universal proof: a catalogue stored elsewhere (or
-// a custom content directory) is not detectable here at all, which is stated
-// explicitly rather than guessed at.
+// Refusal rules (each is reported in the machine-readable output; a refused
+// bundle is never opened for writing):
+//   * NONZERO INFO-SECTION HASH: the bundle's 16-byte uncompressed-data hash
+//     must be the all-zero placeholder. A nonzero value cannot be recomputed by
+//     this build and its algorithm is unproven, so the bundle is refused rather
+//     than left with a stale hash. The zero placeholder is copied verbatim by
+//     every rebuild.
+//   * ADDRESSABLES / CATALOGUE LAYOUT: a case-insensitive "aa" path component,
+//     or a `catalog.json`, `catalog.hash`, `catalog*.json` or `catalog*.hash`
+//     file in the bundle's directory or any ancestor inside the game root,
+//     refuses the bundle. An Addressables catalogue can carry a per-bundle
+//     hash/CRC that this build cannot recompute. LIMIT: a catalogue stored
+//     outside the game root (a remote or custom service) is not detectable
+//     from the copy at all; this rule only proves the absence of the known
+//     in-tree layout, which is why it is documented as a layout rule.
+//   * UNVERIFIABLE REBUILD: any container parse/decode/encode failure, an
+//     inventory that cannot be proven complete or unambiguous, a field patch
+//     whose span does not hold the parsed value, a streamed layout whose
+//     references are not fully provable, or a bundle above the work limits
+//     fails the apply closed (an error, nothing installed). A single texture
+//     whose patches cannot be proven is skipped with its reason while the rest
+//     of the bundle may still apply, and the final bundle verification must
+//     still pass.
+//   * NO-GAIN TEXTURE: a re-encode that is not strictly smaller than the
+//     current payload is skipped (lossy work for nothing is not allowed). A
+//     rebuilt bundle that is not strictly smaller than the source is reported
+//     NO_GAIN and nothing is written, the same rule the lossless recompression
+//     export uses.
+//   * ALREADY OPTIMIZED / INTERRUPTED: an existing restorable copy or checksum
+//     sidecar means the bundle is never rewritten again until `assets restore`
+//     or `assets finalize` clears that state; either alone (an interrupted
+//     install) is treated the same way.
+//
+// LIMITS (stated, not solved):
+//   * stream ownership is proven only among the bundle's retained Texture2D
+//     objects. Non-texture owners (mesh/bulk/unknown class data) are NOT
+//     inventoried, so a streamed rewrite trusts that the bundle builder did not
+//     share the target's `.resS` bytes with another object class. The
+//     repository's Unity reference/ownership contract requires a complete owner
+//     ledger before relocating or deleting stream bytes; that ledger is not
+//     implemented here.
+//   * sprite/atlas/mesh/material consumers of a resized texture are not
+//     modeled: a downscale is verified byte-wise and codec-wise, but its
+//     visual/runtime compatibility is not validated.
+//   * a catalogue stored outside the game root (remote or custom service) is
+//     not detectable from the copy at all.
+// The retained backup plus `assets restore` is the recovery path for all of
+// these limits.
+//
+// BEHAVIOR: one apply pass reduces a texture by at most half relative to its
+// current declared size (the shared `effective_edge` budget). `assets restore`
+// returns to the retained original; after `assets finalize` the reduced size
+// becomes the new baseline, so a later apply can take the next step toward the
+// active cap. Keep the backup when the current state should stay final.
+//
+// The install itself is the shared `assets::install_verified_asset` sequence
+// and the pre-install proof is `verify_applied_bundle`.
 #[cfg(any(test, feature = "development-audits"))]
 pub(crate) mod apply {
     use super::*;
-    use crate::audit_io::{field, Source};
+    #[cfg(feature = "development-audits")]
+    use crate::audit_io::field;
+    use crate::audit_io::Source;
     use crate::texture_policy;
     use image::imageops::FilterType;
     use image_dds::{ImageFormat, Mipmaps, Quality, Surface as DdsSurface, SurfaceRgba8};
     use std::collections::BTreeMap;
+    #[cfg(feature = "development-audits")]
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Component, PathBuf};
 
@@ -2531,10 +2659,37 @@ pub(crate) mod apply {
         pub textures: Vec<AppliedTexture>,
     }
 
+    /// The declared Texture2D identity the final verification must find
+    /// unchanged for every texture the apply did not rewrite. The stream offset
+    /// is compared separately because a proven physical compaction may shift it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TextureIdentity {
+        width: u32,
+        height: u32,
+        format: u32,
+        mips: u32,
+        inline_bytes: usize,
+        stream_size: u64,
+        stream_path: String,
+        image_count: Option<u64>,
+        dimension: Option<u64>,
+    }
+
+    fn texture_identity(fields: &crate::unity_tree::TextureFields) -> TextureIdentity {
+        let texture = &fields.texture;
+        TextureIdentity {
+            width: texture.width, height: texture.height, format: texture.format,
+            mips: texture.mips, inline_bytes: texture.inline_bytes,
+            stream_size: texture.stream_size, stream_path: texture.stream_path.clone(),
+            image_count: fields.image_count, dimension: fields.dimension,
+        }
+    }
+
     #[derive(Debug, Clone)]
     struct OriginalTexture {
         node_index: usize,
         path_id: u64,
+        identity: TextureIdentity,
         inline: Option<(usize, usize)>,
         streamed: Option<(usize, u64, u64)>,
     }
@@ -2588,36 +2743,54 @@ pub(crate) mod apply {
     /// The stated rule for a bundle this build cannot apply safely. `Some` is a
     /// refusal reason, never a guess; `None` means the in-bundle hash is the
     /// zero placeholder and no Addressables marker was found in the layout.
-    fn integrity_refusal(root: &Path, relative: &Path, bundle: &Bundle) -> Option<String> {
+    /// The rules and their limits are documented in the module comment above.
+    fn integrity_refusal(root: &Path, relative: &Path, bundle: &Bundle) -> io::Result<Option<String>> {
         if bundle.info[..16].iter().any(|byte| *byte != 0) {
-            return Some(format!(
+            return Ok(Some(format!(
                 "{}: the 16-byte info-section uncompressed-data hash is nonzero, its algorithm is unproven and it cannot be recomputed",
-                crate::assets::ASSET_REFUSAL_HASH));
+                crate::assets::ASSET_REFUSAL_HASH)));
         }
         if relative.components().any(|component| matches!(component,
             Component::Normal(name) if name.eq_ignore_ascii_case("aa")))
         {
-            return Some(format!(
+            return Ok(Some(format!(
                 "{}: a game-relative path component is 'aa' (Addressables content layout); a catalogue may carry a bundle hash/CRC this build cannot recompute",
-                crate::assets::ASSET_REFUSAL_CATALOGUE));
+                crate::assets::ASSET_REFUSAL_CATALOGUE)));
         }
         let mut directory = relative.parent();
         while let Some(current) = directory {
-            for name in ["catalog.json", "catalog.hash", "catalog.json.hash"] {
-                let candidate = if current.as_os_str().is_empty() {
-                    root.join(name)
-                } else {
-                    root.join(current).join(name)
-                };
-                if candidate.exists() {
-                    return Some(format!(
+            crate::cancelled()?;
+            let dir = if current.as_os_str().is_empty() { root.to_path_buf() } else { root.join(current) };
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                // The game root always exists; a missing ancestor means the
+                // relative path was assembled oddly, which the asset install
+                // would refuse later. Keep walking to fail with the fact.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    directory = current.parent();
+                    continue;
+                }
+                // A directory that cannot be listed cannot prove the absence of
+                // a catalogue, so the bundle is refused rather than guessed at.
+                Err(error) => return Ok(Some(format!(
+                    "{}: cannot prove {} has no Addressables catalogue: {error}",
+                    crate::assets::ASSET_REFUSAL_CATALOGUE, dir.display()))),
+            };
+            for entry in entries {
+                crate::cancelled()?;
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                let catalogue = name == "catalog.json" || name == "catalog.hash"
+                    || (name.starts_with("catalog") && (name.ends_with(".json") || name.ends_with(".hash")));
+                if catalogue {
+                    return Ok(Some(format!(
                         "{}: Addressables catalogue file {} exists beside this bundle and may carry a hash/CRC this build cannot recompute",
-                        crate::assets::ASSET_REFUSAL_CATALOGUE, candidate.display()));
+                        crate::assets::ASSET_REFUSAL_CATALOGUE, entry.path().display())));
                 }
             }
             directory = current.parent();
         }
-        None
+        Ok(None)
     }
 
     /// Decode, downscale to the repository policy edge and re-encode one mip
@@ -2695,7 +2868,7 @@ pub(crate) mod apply {
                 meta.len(), MAX_TEXTURE_BUNDLE / (1024 * 1024)));
             return Ok(outcome);
         }
-        if crate::assets::backup_path(root, relative).exists() {
+        if crate::assets::has_recovery_state(root, relative) {
             outcome.status = ApplyStatus::AlreadyOptimized;
             return Ok(outcome);
         }
@@ -2708,7 +2881,7 @@ pub(crate) mod apply {
                 MAX_TEXTURE_BUNDLE / (1024 * 1024), MAX_TEXTURE_NODES));
             return Ok(outcome);
         }
-        if let Some(reason) = integrity_refusal(root, relative, &bundle) {
+        if let Some(reason) = integrity_refusal(root, relative, &bundle)? {
             outcome.status = ApplyStatus::Refused;
             outcome.refusal = Some(reason);
             return Ok(outcome);
@@ -2780,7 +2953,8 @@ pub(crate) mod apply {
                     } else { None };
                     let streamed = resolved_target.map(|target| (target, texture.stream_offset, texture.stream_size));
                     if inline.is_some() || streamed.is_some() {
-                        originals.push(OriginalTexture { node_index, path_id: *id, inline, streamed });
+                        originals.push(OriginalTexture { node_index, path_id: *id,
+                            identity: texture_identity(fields), inline, streamed });
                     }
                 }
                 if let Some(target) = resolved_target {
@@ -2904,7 +3078,7 @@ pub(crate) mod apply {
             let located_now = locate_texture(jobs[index].node_index, jobs[index].path_id, &current_bundle, &mut current_decoder)?;
             match streamed_shrink_candidate(&working, &current_bundle, &located_now,
                 jobs[index].node_index, jobs[index].path_id, &jobs[index].new_payload,
-                jobs[index].new_width, jobs[index].new_height, jobs[index].new_mips) {
+                jobs[index].new_width, jobs[index].new_height, jobs[index].new_mips, true) {
                 Ok(result) => {
                     jobs[index].compaction = result.mode == StreamedShrinkMode::Compacted;
                     working = result.candidate;
@@ -3110,42 +3284,63 @@ pub(crate) mod apply {
                 return Err(invalid(&format!("Unity bundle apply changed node {index} outside its declared patches")));
             }
         }
-        // Every retained texture payload in the source must re-extract from the
-        // candidate: applied ones equal their new payload and decode at their
-        // new dimensions; all others stay byte-identical.
+        // Every retained texture in the source must be accounted for by
+        // re-inventorying the candidate node bytes, not by trusting the shared
+        // selector: the applied target must re-parse at its new declared shape
+        // with exactly its new payload and decode at those dimensions; every
+        // other texture must keep its declared identity and its payload bytes,
+        // allowing only a proven stream-offset shift from a physical compaction.
+        // `original_slices` holds every inventoried SerializedFile node, so a
+        // recipe can always be compared structurally.
         let mut final_slices: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
-        let mut check_decoder = NodeDecoder::new(candidate, check_bundle);
-        check_decoder.decode_budget = APPLY_DECODE_BUDGET;
-        check_decoder.copy_budget = APPLY_COPY_BUDGET;
+        let mut final_inventories: BTreeMap<usize, crate::unity_serialized::BundleTextureInventory> = BTreeMap::new();
         for recipe in originals {
             crate::cancelled()?;
             if !final_slices.contains_key(&recipe.node_index) {
                 let node = &check_bundle.nodes[recipe.node_index];
-                final_slices.insert(recipe.node_index, check_decoder.read(node.offset, node.size)?);
+                let slice = new_decoder.read(node.offset, node.size)?;
+                final_inventories.insert(recipe.node_index, node_texture_inventory(&slice)?);
+                final_slices.insert(recipe.node_index, slice);
             }
             let final_slice = &final_slices[&recipe.node_index];
-            let located = match locate_texture_with_slice(recipe.node_index, recipe.path_id,
-                check_bundle, &mut check_decoder, Some(final_slice)) {
-                Ok(located) => located,
-                Err(error) if matches!(error.kind(), io::ErrorKind::InvalidData | io::ErrorKind::Unsupported) => {
-                    // The node bytes were already compared; a texture the shared
-                    // selection cannot re-locate cannot be claimed either way.
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            let final_payload = match &located.storage {
-                LocatedStorage::Inline { payload_start, payload_len, .. } =>
-                    located.slice[*payload_start..*payload_start + *payload_len].to_vec(),
-                LocatedStorage::Streamed { target, offset, size } => {
-                    let node = &check_bundle.nodes[*target];
-                    check_decoder.read(node.offset + *offset, *size)?
-                }
-            };
+            let inventory = &final_inventories[&recipe.node_index];
+            let candidate_fields = inventory.details.iter().find(|(id, _)| *id == recipe.path_id)
+                .map(|(_, fields)| fields)
+                .ok_or_else(|| invalid(&format!(
+                    "Unity bundle apply lost texture (node {} object {})", recipe.node_index, recipe.path_id)))?;
+            if candidate_fields.image_count != Some(1) || candidate_fields.dimension != Some(2) {
+                return Err(invalid(&format!(
+                    "Unity bundle apply changed an unrelated texture's image shape (node {} object {})",
+                    recipe.node_index, recipe.path_id)));
+            }
             let applied = jobs.iter().find(|job| job.node_index == recipe.node_index && job.path_id == recipe.path_id);
+            let texture = &candidate_fields.texture;
             match applied {
                 Some(job) => {
-                    let texture = &located.fields.texture;
+                    let final_payload = if job.inline {
+                        let record = inventory.object_records.iter().find(|record| record.id == recipe.path_id)
+                            .ok_or_else(|| invalid("Unity bundle apply lost the applied texture's object record"))?;
+                        let span = candidate_fields.spans.get("image data")
+                            .or_else(|| candidate_fields.spans.get("image data/Array"))
+                            .ok_or_else(|| invalid("Unity bundle apply lost the applied texture's inline span"))?;
+                        let (offset, len) = span.payload
+                            .ok_or_else(|| invalid("Unity bundle apply lost the applied texture's inline payload"))?;
+                        final_slice[record.start as usize + offset..record.start as usize + offset + len].to_vec()
+                    } else {
+                        // An earlier streamed target's compaction in the same
+                        // bundle may have shifted this target's declared offset
+                        // down by exactly the proven removals; the candidate must
+                        // declare the shifted value, not the source value.
+                        let (target, offset, _) = recipe.streamed
+                            .ok_or_else(|| invalid("Unity bundle apply lost the applied texture's stream extent"))?;
+                        let expected = shifted_offset(&StreamedRef {
+                            node_index: recipe.node_index, target, offset, field: None }, &removals)?;
+                        if texture.stream_offset != expected || texture.stream_size != job.new_payload.len() as u64 {
+                            return Err(invalid("Unity bundle apply moved the applied target's stream extent"));
+                        }
+                        let node = &check_bundle.nodes[target];
+                        new_decoder.read(node.offset + expected, texture.stream_size)?
+                    };
                     if final_payload != job.new_payload
                         || texture.width != job.new_width || texture.height != job.new_height
                         || texture.mips != job.new_mips || texture.format != job.format_id {
@@ -3162,21 +3357,42 @@ pub(crate) mod apply {
                     }
                 }
                 None => {
-                    let original_payload = match (recipe.inline, recipe.streamed) {
+                    if texture_identity(candidate_fields) != recipe.identity {
+                        return Err(invalid(&format!(
+                            "Unity bundle apply changed an unrelated texture's declared identity (node {} object {})",
+                            recipe.node_index, recipe.path_id)));
+                    }
+                    match (recipe.inline, recipe.streamed) {
                         (Some((start, len)), _) => {
-                            let slice = original_slices.get(&recipe.node_index)
+                            let source = original_slices.get(&recipe.node_index)
                                 .ok_or_else(|| invalid("Unity bundle apply lost an original SerializedFile slice"))?;
-                            slice[start..start + len].to_vec()
+                            if final_slice[start..start + len] != source[start..start + len] {
+                                return Err(invalid(&format!(
+                                    "Unity bundle apply changed an unrelated inline texture payload (node {} object {})",
+                                    recipe.node_index, recipe.path_id)));
+                            }
                         }
                         (None, Some((target, offset, size))) => {
-                            let node = &bundle.nodes[target];
-                            old_decoder.read(node.offset + offset, size)?
+                            // The identity comparison above keeps the declared
+                            // extent size; only a proven shift may move the
+                            // offset, and the shifted bytes must be identical.
+                            let reference = StreamedRef { node_index: recipe.node_index, target, offset, field: None };
+                            let expected = shifted_offset(&reference, &removals)?;
+                            if texture.stream_offset != expected {
+                                return Err(invalid(&format!(
+                                    "Unity bundle apply changed an unrelated texture's stream offset (node {} object {})",
+                                    recipe.node_index, recipe.path_id)));
+                            }
+                            let source = old_decoder.read(bundle.nodes[target].offset + offset, size)?;
+                            let node = &check_bundle.nodes[target];
+                            let candidate_bytes = new_decoder.read(node.offset + expected, size)?;
+                            if candidate_bytes != source {
+                                return Err(invalid(&format!(
+                                    "Unity bundle apply changed an unrelated streamed texture payload (node {} object {})",
+                                    recipe.node_index, recipe.path_id)));
+                            }
                         }
                         (None, None) => return Err(invalid("Unity bundle apply lost an original texture location")),
-                    };
-                    if final_payload != original_payload {
-                        return Err(invalid(&format!("Unity bundle apply changed an unrelated texture payload (node {} object {})",
-                            recipe.node_index, recipe.path_id)));
                     }
                 }
             }
@@ -3256,7 +3472,8 @@ pub(crate) mod apply {
         if !fs::symlink_metadata(root)?.file_type().is_dir() {
             return Err(invalid("Unity bundle apply requires a real game directory"));
         }
-        eprintln!("Unity bundle apply integrity rule: a bundle is refused when its info-section uncompressed-data hash is nonzero, or when its path has an 'aa' component / a catalog.json or catalog.hash exists in a directory above it inside the game root (an Addressables catalogue may carry a hash this build cannot recompute). A catalogue stored elsewhere is not detectable here.");
+        eprintln!("Unity bundle apply refusal rules: (1) a nonzero info-section uncompressed-data hash cannot be recomputed, so the bundle is refused; (2) an Addressables layout (a case-insensitive 'aa' component or a catalog.json/catalog.hash/catalog*.json/catalog*.hash file in an ancestor inside the game root) may carry a bundle hash this build cannot recompute, so it is refused (a catalogue stored outside the game root is not detectable here); (3) any rebuild or reference plan that cannot be proven fails closed and writes nothing, with per-texture reasons reported; (4) no-gain textures are skipped and a bundle that does not get strictly smaller is not written.");
+        eprintln!("Unity bundle apply limits: stream ownership is proven only among retained Texture2D objects (non-texture owners are not inventoried), sprite/atlas/mesh consumers of a resized texture are not modeled, runtime acceptance is not validated, and a catalogue stored outside the game root is not detectable. The retained backup plus 'assets restore' is the recovery path.");
         let _guard = crate::assets::lock_game_for_mutation(root)?;
         let tree = crate::Tree::for_asset_writes(root)?;
         let mut failures = 0usize;
@@ -4478,6 +4695,20 @@ mod tests {
         node[record.start as usize + offset..record.start as usize + offset + len].to_vec()
     }
 
+    /// The payload bytes the shared selector extracts for one texture in a
+    /// bundle node (inline or streamed). Used to prove the apply reports the
+    /// real before/after lengths.
+    fn located_payload(bytes: &[u8], bundle: &Bundle, node_index: usize, id: u64) -> Vec<u8> {
+        let mut decoder = NodeDecoder::new(bytes, bundle);
+        let located = locate_texture(node_index, id, bundle, &mut decoder).unwrap();
+        match &located.storage {
+            LocatedStorage::Inline { payload_start, payload_len, .. } =>
+                located.slice[*payload_start..*payload_start + *payload_len].to_vec(),
+            LocatedStorage::Streamed { target, offset, size } =>
+                decoder.read(bundle.nodes[*target].offset + *offset, *size).unwrap(),
+        }
+    }
+
     fn no_apply_debris(root: &Path) {
         let mut dirs = vec![root.to_path_buf()];
         while let Some(dir) = dirs.pop() {
@@ -4573,6 +4804,20 @@ mod tests {
         let backup = root.join(".bgc-assets-backup").join(&rel);
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert!(crate::assets::matches_recorded_checksum(&root, &rel).unwrap());
+        // Every reported size is real: the bundle sizes come from the source and
+        // installed files, and each texture's old/new length is the payload that
+        // actually extracts before and after.
+        assert_eq!(outcome.old_bytes, original.len() as u64);
+        assert_eq!(outcome.new_bytes, fs::metadata(&path).unwrap().len());
+        assert_eq!(outcome.new_bytes, installed.len() as u64);
+        for texture in &outcome.textures {
+            assert_eq!(located_payload(&original, &before, 0, texture.path_id).len() as u64,
+                texture.old_len, "reported old payload length must be real");
+            assert_eq!(located_payload(&installed, &after, 0, texture.path_id).len() as u64,
+                texture.new_len, "reported new payload length must be real");
+            assert_eq!(texture.old_len, old_stream as u64);
+            assert_eq!(texture.new_len, new_stream as u64);
+        }
         no_apply_debris(&root);
         // A second pass with the backup present is refused as already optimized.
         let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap()[0];
@@ -4629,6 +4874,15 @@ mod tests {
         fs::write(root.join("content/catalog.json"), b"{}").unwrap();
         fs::write(root.join("content/deep/game.bundle"), &clean).unwrap();
         let cat_rel = PathBuf::from("content/deep/game.bundle");
+        let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&cat_rel)).unwrap()[0];
+        assert_eq!(outcome.status, ApplyStatus::Refused, "{outcome:?}");
+        assert!(outcome.refusal.as_deref().unwrap().contains("catalogue"), "{:?}", outcome.refusal);
+        assert_eq!(fs::read(root.join(&cat_rel)).unwrap(), clean);
+        // Timestamped remote-catalogue names and case variants are detected in
+        // any ancestor directory: the layout proof must not depend on the exact
+        // local catalogue spelling.
+        fs::remove_file(root.join("content/catalog.json")).unwrap();
+        fs::write(root.join("content/Catalog_123.json"), b"{}").unwrap();
         let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&cat_rel)).unwrap()[0];
         assert_eq!(outcome.status, ApplyStatus::Refused, "{outcome:?}");
         assert!(outcome.refusal.as_deref().unwrap().contains("catalogue"), "{:?}", outcome.refusal);
@@ -4690,6 +4944,178 @@ mod tests {
         assert_eq!(fs::read(root.join(&stale_rel)).unwrap(), stale_bundle);
         assert!(!root.join(".bgc-assets-backup").exists());
         no_apply_debris(&root);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// One bundle with a 128x128 streamed DXT1 target (id 123) plus a second
+    /// streamed texture object (`extra`, id `extra_id`) in the same
+    /// SerializedFile and the same `.resS` node.
+    fn streamed_apply_fixture(extra: &[u8], extra_id: u64) -> Vec<u8> {
+        let old_len = chain_len(10, 128, 128);
+        let target = streamed_object_at(128, 128, 10, 0, old_len as u32, "CAB-test.resS");
+        let sf = serialized_objects(&[(123, target), (extra_id, extra.to_vec())]);
+        let stream = payload_of(old_len, 7);
+        let mut data = sf.clone();
+        data.extend_from_slice(&stream);
+        let nodes = [
+            (0u64, sf.len() as u64, 4u32, "CAB-test"),
+            (sf.len() as u64, stream.len() as u64, 0u32, "CAB-test.resS"),
+        ];
+        bundle_with_encoder(&data, &nodes, &[data.len()], 3, [0u8; 16], literal_lz4)
+    }
+
+    /// Run the apply on one bundle in a fresh copy and return the outcome plus
+    /// the unchanged on-disk bytes to compare against.
+    fn run_strict_stream_apply(name: &str, bundle: &[u8]) -> (crate::unityfs::apply::ApplyOutcome, Vec<u8>) {
+        let root = scratch(name);
+        fs::create_dir(root.join("content")).unwrap();
+        let rel = PathBuf::from("content/strict.bundle");
+        fs::write(root.join(&rel), bundle).unwrap();
+        let outcome = texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap().remove(0);
+        assert_eq!(outcome.status, ApplyStatus::NoGain, "{outcome:?}");
+        assert_eq!(outcome.applied, 0);
+        let on_disk = fs::read(root.join(&rel)).unwrap();
+        assert_eq!(on_disk, bundle, "a refused streamed apply must not change a byte");
+        assert!(!crate::assets::has_recovery_state(&root, &rel), "no recovery state may be created");
+        no_apply_debris(&root);
+        fs::remove_dir_all(root).unwrap();
+        (outcome, on_disk)
+    }
+
+    #[test]
+    fn unity_bundle_apply_refuses_zero_padding_beside_an_unproven_reference() {
+        // The target can only be applied in place through the zero-padded
+        // rewrite (physical compaction is blocked). An unresolved streamed
+        // reference elsewhere in the bundle could point into the target's old
+        // extent under a naming convention this build does not understand, so
+        // the strict apply refuses the padded route instead of zeroing bytes it
+        // cannot account for.
+        let unresolved = streamed_object_at(8, 8, 10, 5000, 1000, "/abs/missing.resS");
+        let bundle = streamed_apply_fixture(&unresolved, 124);
+        let (outcome, _) = run_strict_stream_apply("bgc-unity-apply-strict-unresolved", &bundle);
+        assert!(outcome.skips.iter().any(|skip| skip.contains("zero-padded rewrite is not provable")
+            && skip.contains("does not resolve")), "{:?}", outcome.skips);
+    }
+
+    #[test]
+    fn unity_bundle_apply_refuses_zero_padding_beside_an_opaque_texture() {
+        // A Texture2D object the inventory cannot parse (here: truncated object
+        // bytes, as any unsupported/over-budget texture) could own any stream
+        // range. Neither compaction nor the padded fallback is provable, so the
+        // target is skipped with its reason and the bundle stays byte-identical.
+        let opaque = vec![0u8; 8];
+        let bundle = streamed_apply_fixture(&opaque, 124);
+        let (outcome, _) = run_strict_stream_apply("bgc-unity-apply-strict-opaque", &bundle);
+        assert!(outcome.skips.iter().any(|skip| skip.contains("zero-padded rewrite is not provable")
+            && skip.contains("not retained")), "{:?}", outcome.skips);
+    }
+
+    #[test]
+    fn unity_bundle_apply_refuses_zero_padding_over_a_cross_node_alias() {
+        // A second SerializedFile node references the same `.resS` node with an
+        // extent that overlaps the target's tail. The target's own node cannot
+        // see that alias, and compaction removes those bytes, so both routes are
+        // unprovable: the strict plan refuses the padded rewrite rather than
+        // zeroing an aliased texture's bytes.
+        let old_len = chain_len(10, 128, 128);
+        let small_len = chain_len(10, 8, 8);
+        let first = serialized_objects(&[(123,
+            streamed_object_at(128, 128, 10, 0, old_len as u32, "CAB-test.resS"))]);
+        let second = serialized_objects(&[(200,
+            streamed_object_at(8, 8, 10, (old_len - small_len) as u64, small_len as u32, "CAB-test.resS"))]);
+        let stream = payload_of(old_len, 7);
+        let mut data = first.clone();
+        data.extend_from_slice(&second);
+        data.extend_from_slice(&stream);
+        let nodes = [
+            (0u64, first.len() as u64, 4u32, "CAB-one"),
+            (first.len() as u64, second.len() as u64, 4u32, "CAB-two"),
+            ((first.len() + second.len()) as u64, stream.len() as u64, 0u32, "CAB-test.resS"),
+        ];
+        let bundle = bundle_with_encoder(&data, &nodes, &[data.len()], 3, [0u8; 16], literal_lz4);
+        let (outcome, _) = run_strict_stream_apply("bgc-unity-apply-strict-alias", &bundle);
+        assert!(outcome.skips.iter().any(|skip| skip.contains("zero-padded rewrite is not provable")
+            && skip.contains("overlaps the zero-padded extent")), "{:?}", outcome.skips);
+    }
+
+    #[test]
+    fn unity_bundle_apply_compacts_two_streamed_targets_and_shifts_the_later_one() {
+        // Two streamed targets share one `.resS` node. Applying the first
+        // compacts its tail and shifts the second's declared offset down; the
+        // second is then located and compacted in the working bundle. The final
+        // verification must expect the shifted offset (a stale source-coordinate
+        // check must not reject the valid candidate).
+        let old_len = chain_len(10, 128, 128);
+        let new_len = chain_len(10, 64, 64);
+        let first = streamed_object_at(128, 128, 10, 0, old_len as u32, "CAB-test.resS");
+        let second = streamed_object_at(128, 128, 10, old_len as u64, old_len as u32, "CAB-test.resS");
+        let sf = serialized_objects(&[(123, first), (124, second)]);
+        let stream_start = sf.len();
+        let mut data = sf.clone();
+        data.extend_from_slice(&payload_of(old_len, 7));
+        data.extend_from_slice(&payload_of(old_len, 13));
+        let nodes = [
+            (0u64, sf.len() as u64, 4u32, "CAB-test"),
+            (stream_start as u64, (2 * old_len) as u64, 0u32, "CAB-test.resS"),
+        ];
+        let mut cuts = vec![stream_start + 100, stream_start + old_len + 1000, data.len()];
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut sizes = Vec::new();
+        let mut previous = 0usize;
+        for cut in cuts { sizes.push(cut - previous); previous = cut; }
+        let bundle = bundle_with_encoder(&data, &nodes, &sizes, 3, [0u8; 16], literal_lz4);
+        let root = scratch("bgc-unity-apply-multi-stream");
+        fs::create_dir(root.join("content")).unwrap();
+        let rel = PathBuf::from("content/multi.bundle");
+        fs::write(root.join(&rel), &bundle).unwrap();
+        let original = fs::read(root.join(&rel)).unwrap();
+        let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap()[0];
+        assert_eq!(outcome.status, ApplyStatus::Applied, "{outcome:?}");
+        assert_eq!(outcome.applied, 2);
+        assert_eq!(outcome.removed_decoded, 2 * (old_len - new_len) as u64);
+        let installed = fs::read(root.join(&rel)).unwrap();
+        assert!(installed.len() < original.len());
+        let after = parse(&installed).unwrap();
+        let mut decoder = NodeDecoder::new(&installed, &after);
+        for (id, expected_offset) in [(123u64, 0u64), (124, new_len as u64)] {
+            let located = locate_texture(0, id, &after, &mut decoder).unwrap();
+            let LocatedStorage::Streamed { target, offset, size } = located.storage else {
+                panic!("streamed storage expected for {id}")
+            };
+            assert_eq!((offset, size), (expected_offset, new_len as u64), "object {id}");
+            assert_eq!(decoder.read(after.nodes[target].offset + offset, size).unwrap().len(), new_len);
+            let (_, fields) = node_texture_inventory(
+                &decoder.read(after.nodes[0].offset, after.nodes[0].size).unwrap()).unwrap()
+                .details.into_iter().find(|(candidate, _)| *candidate == id).unwrap();
+            assert_eq!((fields.texture.width, fields.texture.height, fields.texture.mips), (64, 64, 7));
+        }
+        // `assets restore` returns the source byte-identically.
+        crate::assets::run("restore", "native", 0, &root).unwrap();
+        assert_eq!(fs::read(root.join(&rel)).unwrap(), original);
+        assert!(!crate::assets::has_recovery_state(&root, &rel));
+        no_apply_debris(&root);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unity_bundle_apply_install_failure_leaves_no_recovery_state() {
+        // Collide with the apply's private temp name so the install fails after
+        // the restorable copy exists. The original must stay live, the recovery
+        // state must be removed, and the colliding file (which this call did not
+        // create) must never be deleted.
+        let root = scratch("bgc-unity-apply-tmp-collision");
+        fs::create_dir(root.join("content")).unwrap();
+        let rel = PathBuf::from("content/test.bundle");
+        let bundle = apply_fixture();
+        fs::write(root.join(&rel), &bundle).unwrap();
+        let temp = root.join(format!("content/test.bundle.bgc-tmp-{}", std::process::id()));
+        fs::write(&temp, b"someone else's file").unwrap();
+        let error = texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error}");
+        assert_eq!(fs::read(root.join(&rel)).unwrap(), bundle, "the bundle must stay unchanged");
+        assert!(!crate::assets::has_recovery_state(&root, &rel), "no recovery state may survive");
+        assert_eq!(fs::read(&temp).unwrap(), b"someone else's file", "a colliding file must be left alone");
         fs::remove_dir_all(root).unwrap();
     }
 }

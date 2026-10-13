@@ -279,6 +279,15 @@ pub(crate) fn matches_recorded_checksum(root: &Path, relative: &Path) -> io::Res
     let backup = backup_path(root, relative);
     matches_expected(&live, &sidecar(&backup))
 }
+/// True when any recovery state exists for one game-relative asset: a
+/// restorable copy or its checksum sidecar. The Unity bundle apply treats
+/// either as already-optimized (or as an interrupted operation that needs
+/// review) and writes nothing, mirroring the packed-asset pass.
+#[cfg(any(test, feature = "development-audits"))]
+pub(crate) fn has_recovery_state(root: &Path, relative: &Path) -> bool {
+    let backup = backup_path(root, relative);
+    backup.exists() || sidecar(&backup).exists()
+}
 /// Name for a bundle that carries a nonzero uncompressed-data hash or sits in
 /// an Addressables catalogue layout; used by the Unity bundle apply to report
 /// exactly why a bundle is refused rather than written.
@@ -300,6 +309,16 @@ pub(crate) const ASSET_REFUSAL_CATALOGUE: &str = "Addressables catalogue layout"
 #[cfg(any(test, feature = "development-audits"))]
 pub(crate) fn install_verified_asset(tree: &super::Tree, root: &Path, relative: &Path,
     bytes: &[u8], level: u8) -> io::Result<(u64, u64)> {
+    install_verified_asset_inner(tree, root, relative, bytes, level, &|| Ok(()))
+}
+
+/// The same install sequence with an injectable failure boundary between the
+/// durable recovery state (backup, sidecar, staged temp file) and the commit
+/// rename. Production callers use `install_verified_asset`, which passes a
+/// no-op boundary; tests use this to prove the cleanup path.
+#[cfg(any(test, feature = "development-audits"))]
+fn install_verified_asset_inner(tree: &super::Tree, root: &Path, relative: &Path,
+    bytes: &[u8], level: u8, before_commit: &dyn Fn() -> io::Result<()>) -> io::Result<(u64, u64)> {
     if relative.as_os_str().is_empty()
         || relative.components().any(|c| !matches!(c, std::path::Component::Normal(_)))
     {
@@ -363,6 +382,7 @@ pub(crate) fn install_verified_asset(tree: &super::Tree, root: &Path, relative: 
         if !same_contents(&path, &backup)? {
             return Err(bad("asset changed while its replacement was staged"));
         }
+        before_commit()?;
         fs::rename(&tmp, &path)?;
         installed = true;
         File::open(path.parent().ok_or_else(|| bad("invalid asset path"))?)?.sync_all()?;
@@ -2370,6 +2390,37 @@ mod tests {
         run("restore", "native", 0, &root).unwrap();
         assert_eq!(fs::read(&path).unwrap(), original);
         assert!(!backup.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_asset_install_removes_staged_state_and_keeps_the_original() {
+        // The install sequence is the one the loose asset apply and the Unity
+        // bundle apply share. This injects a failure after the backup, sidecar
+        // and temp file are durable but before the commit rename and proves the
+        // cleanup contract: the live file stays the original and no recovery
+        // state or temporary file survives.
+        let root = fixture("install-failure-cleanup");
+        fs::create_dir(root.join("textures")).unwrap();
+        let rel = Path::new("textures/image.png");
+        let path = root.join(rel);
+        let original = b"original-bytes".to_vec();
+        fs::write(&path, &original).unwrap();
+        let tree = crate::Tree::for_asset_writes(&root).unwrap();
+        let error = install_verified_asset_inner(&tree, &root, rel, b"replacement-bytes", 1,
+            &|| Err(io::Error::new(io::ErrorKind::Other, "injected install failure"))).unwrap_err();
+        assert_eq!(error.to_string(), "injected install failure");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!has_recovery_state(&root, rel), "no backup or sidecar may survive a failed install");
+        let mut dirs = vec![root.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                assert!(!entry.file_name().to_string_lossy().contains(".bgc-tmp-"),
+                    "temporary file left behind in {}", dir.display());
+                if entry.file_type().unwrap().is_dir() { dirs.push(entry.path()); }
+            }
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
