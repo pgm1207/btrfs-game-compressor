@@ -325,6 +325,14 @@ fn compress(tree: &Tree, level: u8) -> io::Result<()> {
     let mut count = 0u64;
     let mut processed = 0u64;
     let mut progress = Instant::now();
+    // Machine-readable progress for a supervising UI: one line per second at
+    // most, with the total supplied by the caller (it measured the game).
+    let machine = env::var_os("BGC_PROGRESS").is_some();
+    let progress_total = env::var("BGC_PROGRESS_TOTAL")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let mut machine_tick = Instant::now();
     tree.walk(|path, read| {
         let file = tree.open(path, true)?;
         let meta = file.metadata()?;
@@ -335,12 +343,14 @@ fn compress(tree: &Tree, level: u8) -> io::Result<()> {
             eprintln!("Compressing {}", tree.display.join(path).display());
         }
         compress_file_progress(&file, path, level, |completed| {
+            let done = processed + completed;
             if progress.elapsed() >= Duration::from_secs(2) {
-                eprintln!(
-                    "Compression: {count} files complete, {} processed...",
-                    human(processed + completed)
-                );
+                eprintln!("Compression: {count} files complete, {} processed...", human(done));
                 progress = Instant::now();
+            }
+            if machine && machine_tick.elapsed() >= Duration::from_secs(1) {
+                eprintln!("PROGRESS|compress|{done}|{progress_total}");
+                machine_tick = Instant::now();
             }
         })?;
         count += 1;
@@ -348,6 +358,9 @@ fn compress(tree: &Tree, level: u8) -> io::Result<()> {
         Ok(())
     })?;
     eprintln!("Compressed {count} files.");
+    if machine {
+        eprintln!("PROGRESS|compress|{processed}|{progress_total}");
+    }
     Ok(())
 }
 
@@ -771,6 +784,9 @@ fn dedupe(tree: &Tree, parent: &Path) -> io::Result<()> {
                 hashed += tree.sector;
                 if hashed.is_multiple_of(1024 * 1024 * 1024) {
                     eprintln!("Hashed {} GiB...", hashed / (1024 * 1024 * 1024));
+                    if env::var_os("BGC_PROGRESS").is_some() {
+                        eprintln!("PROGRESS|dedupe|{hashed}|0");
+                    }
                 }
                 if records.len() == 262144 {
                     runs.push(scratch.flush(&mut records)?);

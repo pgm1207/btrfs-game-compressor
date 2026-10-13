@@ -112,6 +112,8 @@ OPT_DEDUPE=0
 OPT_RECHECK=0
 OPT_RUN=0
 OPT_NO_DEDUPE=0
+OPT_COMPACT=0
+COMPACT_QUERY=""
 OPT_ASSETS=0
 OPT_ASSET_PLAN_DIR=0
 ASSET_PLAN_DIR=""
@@ -199,8 +201,11 @@ OPTIONS
                           needs compressing, then deduplicate each game. Prompts
                           for nothing, never applies beta assets.
                           Honours exclude_games and max_size_mib.
-        --no-dedupe       with --run, stop after compression; the game is left
-                          waiting for a later dedupe pass
+        --no-dedupe       with --run or --compact, stop after compression; the
+                          game is left waiting for a later dedupe pass
+        --compact GAME    process one installed game end to end: compress it if
+                          needed, then deduplicate it. Prints COMPACT| lines for
+                          a supervising UI; exits 3 when the game is running.
         --assets GAME     preview [BETA] asset optimization for one game
         --asset-plan-dir DIR
                           read-only Balanced asset preview for any directory,
@@ -326,6 +331,7 @@ EXAMPLES
     $PROGNAME --dry-run --pending    what is still waiting to be compressed
     $PROGNAME --run                  headless pending-games pass (compress + dedupe)
     $PROGNAME --run --no-dedupe      compress now, deduplicate on a later pass
+    $PROGNAME --compact "Factorio"   one game end to end (compress if needed, then dedupe)
     $PROGNAME --dedupe               full-library maintenance scan (manual)
     $PROGNAME --recheck              refresh measurements without recompressing
     $PROGNAME --library /mnt/games   register a library outside Steam's VDF
@@ -383,6 +389,11 @@ parse_args() {
             --recheck)     OPT_RECHECK=1 ;;
             --run)         OPT_RUN=1 ;;
             --no-dedupe)   OPT_NO_DEDUPE=1 ;;
+            --compact)
+                [ -n "${2:-}" ] || { echo "$PROGNAME: --compact requires a game name or path" >&2; exit 2; }
+                OPT_COMPACT=1
+                COMPACT_QUERY="$2"
+                shift ;;
             --export-fmod)
                 [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] || {
                     echo "$PROGNAME: --export-fmod requires QUALITY FILE OUTPUT" >&2; exit 2;
@@ -563,6 +574,7 @@ parse_args() {
         "OPT_STATUS:--status:1"
         "OPT_DRY_RUN:--dry-run:0"
         "OPT_RUN:--run:0"
+        "OPT_COMPACT:--compact:0"
         "OPT_DEDUPE:--dedupe:0"
         "OPT_RECHECK:--recheck:0"
         "OPT_ASSETS:--assets:0"
@@ -622,8 +634,8 @@ parse_args() {
         echo "$PROGNAME: --pending only applies to --status or --dry-run" >&2
         exit 2
     fi
-    if [ "$OPT_NO_DEDUPE" -eq 1 ] && [ "$OPT_RUN" -ne 1 ]; then
-        echo "$PROGNAME: --no-dedupe only applies to --run" >&2
+    if [ "$OPT_NO_DEDUPE" -eq 1 ] && [ "$OPT_RUN" -ne 1 ] && [ "$OPT_COMPACT" -ne 1 ]; then
+        echo "$PROGNAME: --no-dedupe only applies to --run or --compact" >&2
         exit 2
     fi
     if [ "$OPT_YES" -eq 1 ] && [ "$OPT_UNINSTALL" -ne 1 ] && [ "$OPT_SUBMIT_RATIOS" -ne 1 ]; then
@@ -1549,6 +1561,87 @@ run_dedupe_paths() {
     printf 'Deduplication totals: %d scan(s) completed · %d skipped · %d failed · %s game data saved\n' \
         "$scanned" "$skipped" "$failed" "$saved_label"
     [ "$failed" -eq 0 ]
+}
+
+# One game, end to end, non-interactively: the same compression and dedupe steps
+# the batch runs, for a single install the caller names. Written for a
+# supervising UI that processes games one at a time and watches these lines:
+#   COMPACT|begin|NAME|PATH|BYTES
+#   COMPACT|phase|compress    COMPACT|phase|dedupe
+#   COMPACT|skip|NAME|REASON  COMPACT|fail|NAME|REASON
+#   COMPACT|done|NAME|STATUS|ZSTD_SAVED_BYTES|DEDUPE_OK
+# Exit status: 0 done or nothing to do, 1 failed, 3 skipped.
+cmd_compact() {
+    local query="$1" game="" matches=0 i index="" name status bytes
+    for i in "${!GAMES_PATH[@]}"; do
+        if [ "$query" = "${GAMES_PATH[$i]}" ] || [ "$query" = "${GAMES_NAME[$i]}" ]; then
+            game="${GAMES_PATH[$i]}"
+            matches=$(( matches + 1 ))
+        fi
+    done
+    if [ "$matches" -ne 1 ]; then
+        printf '%s: expected one installed game, found %d for %s\n' "$PROGNAME" "$matches" "$query" >&2
+        printf 'COMPACT|fail|%s|not-one-match\n' "$query"
+        return 2
+    fi
+    for i in "${!GAMES_PATH[@]}"; do
+        [ "${GAMES_PATH[$i]}" = "$game" ] && index="$i"
+    done
+    name="${GAMES_NAME[$index]}"
+    status="${GAMES_STATUS[$index]}"
+    bytes="${GAMES_BYTES[$index]:-0}"
+
+    require_btrfs
+    discover_running_games
+    if game_is_running "$game"; then
+        printf 'Skipped %s: it is running.\n' "$name" >&2
+        printf 'COMPACT|skip|%s|running\n' "$name"
+        return 3
+    fi
+    if [ "$status" = "COMPACTED" ]; then
+        printf 'COMPACT|skip|%s|already-compacted\n' "$name"
+        return 0
+    fi
+    printf 'COMPACT|begin|%s|%s|%s\n' "$name" "$game" "$bytes"
+
+    local rc=0 needs_compress=1 b_raw b_disk b_disk_bytes b_raw_bytes result s_t e_t
+    if [ "$status" = "COMPRESSED" ]; then
+        # Compression is current: only the dedupe pass is left.
+        needs_compress=0
+    fi
+    if [ "$needs_compress" -eq 1 ]; then
+        printf 'COMPACT|phase|compress\n'
+        b_raw=$(run_compsize "$game" || true)
+        b_disk=$(printf '%s\n' "$b_raw" | awk '/^TOTAL/ {print $3}')
+        [ -n "$b_disk" ] || b_disk="N/A"
+        b_disk_bytes=$(printf '%s\n' "$b_raw" | awk '/^TOTAL/ {print $6}')
+        b_raw_bytes=$(printf '%s\n' "$b_raw" | awk '/^TOTAL/ {print $7}')
+        s_t=$(date +%s)
+        result=$(compress_and_record "$name" "$game" "$b_disk_bytes" "$b_raw_bytes" "$(logical_game_bytes "$game")"); rc=$?
+        if [ "$rc" -ne 0 ]; then
+            printf 'Defragmentation failed for %s; leaving its saved state unchanged.\n' "$name" >&2
+            printf 'COMPACT|fail|%s|compress\n' "$name"
+            return 1
+        fi
+        e_t=$(( $(date +%s) - s_t ))
+        print_summary_block "$name" "$b_disk" "$result" "$game"
+        printf '    Finished in %ds\n' "$e_t"
+    fi
+
+    local dedupe_ok=0 saved="${COMPRESS_ZSTD_SAVED_BYTES:-0}" final=COMPRESSED
+    if [ "$OPT_NO_DEDUPE" -eq 0 ]; then
+        printf 'COMPACT|phase|dedupe\n'
+        run_dedupe_paths "DEDUPLICATION: $name" "$game"; rc=$?
+        case "$rc" in
+            130|143) printf 'COMPACT|fail|%s|interrupted\n' "$name"; return "$rc" ;;
+        esac
+        if [ "$rc" -eq 0 ] && [ "${DEDUPE_COMPLETION_RECORDED:-0}" -eq 1 ]; then
+            dedupe_ok=1
+            final=COMPACTED
+        fi
+    fi
+    printf 'COMPACT|done|%s|%s|%s|%s\n' "$name" "$final" "${saved:-0}" "$dedupe_ok"
+    return 0
 }
 
 cmd_dedupe() {
@@ -5136,6 +5229,12 @@ fi
 if [ "$OPT_ENGINES" -eq 1 ]; then
     discover_data
     cmd_engines
+    exit $?
+fi
+
+if [ "$OPT_COMPACT" -eq 1 ]; then
+    discover_data
+    cmd_compact "$COMPACT_QUERY"
     exit $?
 fi
 

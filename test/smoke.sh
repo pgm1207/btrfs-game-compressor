@@ -1335,6 +1335,54 @@ PATH="$OLD_PATH"
 rm -rf "$FL"
 
 # ---------------------------------------------------------------------------
+group "Per-game compaction"
+
+# --compact processes exactly one game and prints the machine lines a
+# supervising UI watches. The inert backend fails the compression itself, which
+# is how the failure path is observed.
+CL="$WORK/compact library/steamapps/common"
+mkdir -p "$CL/OnlyGame"
+dd if=/dev/zero of="$CL/OnlyGame/data" bs=1M count=8 2>/dev/null
+echo "$CL" > "$HOME/.config/btrfs-game-compressor/custom_libraries.txt"
+mkdir -p "$WORK/compact-shim"
+cat > "$WORK/compact-shim/stat" <<'SHIM'
+#!/bin/sh
+if [ "$1" = "-f" ] && [ "$3" = "%T" ]; then echo btrfs; else exec /usr/bin/stat "$@"; fi
+SHIM
+chmod +x "$WORK/compact-shim/stat"
+PATH="$WORK/compact-shim:$PATH"
+
+out=$("$PROG" --compact NoSuchGame --no-color < /dev/null 2>&1); rc=$?
+check_rc "--compact rejects an unknown game" 2 $rc
+check_contains "--compact reports the failed lookup" "COMPACT|fail|NoSuchGame|not-one-match" "$out"
+out=$("$PROG" --compact < /dev/null 2>&1); rc=$?
+check_rc "--compact requires a game name" 2 $rc
+check_contains "--compact explains the usage" "requires a game name or path" "$out"
+out=$("$PROG" --compact OnlyGame --status < /dev/null 2>&1); rc=$?
+check_rc "--compact cannot be combined with another mode" 2 $rc
+
+: > "$HOME/.local/state/btrfs-game-compressor/compressed_games.db"
+: > "$HOME/.local/state/btrfs-game-compressor/dedupe_completed.db"
+out=$("$PROG" --compact OnlyGame --no-dedupe --no-color < /dev/null 2>&1); rc=$?
+check_rc "--compact exits 1 when the pass fails" 1 $rc
+check_contains "--compact announces the game" "COMPACT|begin|OnlyGame|" "$out"
+check_contains "--compact moves to the compression phase" "COMPACT|phase|compress" "$out"
+check_contains "--compact reports the failure" "COMPACT|fail|OnlyGame|compress" "$out"
+
+# A game whose compression and dedupe are current is skipped, never rewritten.
+{
+    echo "$CL/OnlyGame|OnlyGame|$(date +%s)|8M|4M|4M|50|8|4"
+} > "$HOME/.local/state/btrfs-game-compressor/compressed_games.db"
+printf '%s|%s\n' "$(date +%s%N)" "$CL/OnlyGame" > "$HOME/.local/state/btrfs-game-compressor/dedupe_completed.db"
+out=$("$PROG" --compact OnlyGame --no-color < /dev/null 2>&1); rc=$?
+check_rc "--compact skips an already compacted game" 0 $rc
+check_contains "--compact says why it skipped" "COMPACT|skip|OnlyGame|already-compacted" "$out"
+: > "$HOME/.local/state/btrfs-game-compressor/dedupe_completed.db"
+
+PATH="$OLD_PATH"
+rm -rf "$CL"
+
+# ---------------------------------------------------------------------------
 group "Community ratio table"
 
 # The parser has to work on the exact shape the repository stores and on the

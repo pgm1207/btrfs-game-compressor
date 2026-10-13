@@ -17,6 +17,16 @@
   every pass reports how many games its filters held back.
 - Document both filters and `--run` in `--help`, the man page and the README,
   and cover selection, config validation and the mode rules in the smoke suite.
+- Add `--compact GAME`: process one installed game end to end (compress if it is
+  stale, then deduplicate), printing machine-readable `COMPACT|` lines (begin,
+  phase, skip, fail, done) for a supervising UI. Exit 3 when the game is
+  running, 1 on failure, 0 when done or nothing is left to do. This is what
+  lets a UI run game by game with a state and a bar per game.
+- The bundled backend now emits `PROGRESS|` lines while it works when
+  `BGC_PROGRESS=1` is set in the environment: `PROGRESS|compress|DONE|TOTAL`
+  once a second during compression (TOTAL comes from `BGC_PROGRESS_TOTAL`, which
+  the caller measured) and `PROGRESS|dedupe|HASHED|0` once a GiB while hashing.
+  Existing output is unchanged; the lines are additive and off by default.
 
 ### Development routes
 

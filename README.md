@@ -1170,6 +1170,10 @@ btrfs-game-compressor --run
 # compress now, leave every game's deduplication for a later pass
 btrfs-game-compressor --run --no-dedupe
 
+# one game end to end (compress if needed, then deduplicate); prints COMPACT|
+# lines for a supervising UI and exits 3 when the game is running
+btrfs-game-compressor --compact "Factorio"
+
 # deduplicate all discovered Btrfs Steam libraries and measure the result
 btrfs-game-compressor --dedupe
 

@@ -63,13 +63,22 @@ re\-run.
 .TP
 .B \-\-no\-dedupe
 With
-.BR \-\-run ,
+.BR \-\-run " or " \-\-compact ,
 stop after compression. Games whose compression is already current are not
 queued, and a compressed game stays marked
 .B COMPRESSED
 until a later dedupe pass (or
 .BR \-\-dedupe )
 completes it.
+.TP
+.BI \-\-compact " GAME"
+Process one installed game end to end: compress it if its compression is stale,
+then deduplicate it. Written for a supervising UI that runs games one at a time;
+it prints machine\-readable
+.B COMPACT|
+lines (begin, phase, skip, fail, done) on standard output and exits \fB3\fR when
+the game is running, \fB1\fR on failure and \fB0\fR when it is done or has
+nothing left to do. GAME is an exact name or full install path.
 .TP
 .BI \-\-assets " GAME"
 Preview beta asset optimization for one installed game at the configured
