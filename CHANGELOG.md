@@ -17,13 +17,13 @@
   rename and parent sync; `assets restore` returns the source byte-identically
   and `assets finalize` drops the backup. Refusal rules (each reported per
   bundle/texture, never guessed at): a nonzero 16-byte info-section
-  uncompressed-data hash cannot be recomputed; an Addressables layout (a
-  case-insensitive `aa` path component or a `catalog*.json`/`catalog*.hash`
-  file beside or above the bundle inside the game root) may carry a catalogue
-  hash that cannot be recomputed; any bundle, inventory, field patch, streamed
-  reference plan or size comparison that cannot be fully proven fails closed
-  (a whole-bundle error, or a skipped texture with its reason); and no-gain
-  textures or bundles are never written. Before installing, the candidate is
+  uncompressed-data hash cannot be recomputed; a bundle that belongs to an
+  Addressables catalogue is only written when the catalogue's per-bundle values
+  are proven and updatable (see the catalogue bullet below); any bundle,
+  inventory, field patch, streamed reference plan or size comparison that
+  cannot be fully proven fails closed (a whole-bundle error, or a skipped
+  texture with its reason); and no-gain textures or bundles are never written.
+  Before installing, the candidate is
   re-parsed and compared against the source node by node, every other retained
   texture identity and payload is re-extracted and required byte-identical, and
   each applied target must re-extract and decode at its new declared
@@ -32,13 +32,58 @@
   41,914,711 bytes installed (-12,006,633 bytes); `assets restore` returned the
   original sha256 byte-identically, `assets finalize` removed the backup, and
   sample skipped-texture DDS exports were sha256-identical before and after.
-  The `aa/` layout that Cocoon ships is refused with the bundle unchanged.
   Limits: stream ownership is proven only among the bundle's retained Texture2D
   objects (non-texture owners are not inventoried), sprite/atlas/mesh consumers
   of a resized texture are not modeled, runtime acceptance is not validated,
   and a catalogue stored outside the game root is not detectable. Requires the
   `development-audits` Cargo feature; no automatic routing and no installed
   apply.
+
+- Add Addressables content-catalogue updating to the gated in-place Unity
+  bundle apply, so bundles under an `aa/` layout are no longer refused
+  wholesale. The catalogue scheme was calibrated on the real Cocoon catalogue
+  (Unity 2020.3.48f1 / Addressables 1.18.19 / SBP 1.19.2, 98 bundles): every
+  stored value reproduced exactly from the shipped bundle bytes and the
+  catalogue's own dependency sets. Proven scheme: `m_Crc` is the CRC32 (IEEE)
+  of the concatenated LZ4-decoded payload; `m_Hash` is
+  `MD5(ContentHash || dependency names)` where `ContentHash` is MD5 over the
+  per-node MD5s (a SerializedFile from its header data offset, every other node
+  whole), each dependency name being the dependency bundle's `m_BundleName`
+  plus `.bundle`, sorted; `m_BundleSize` is the file length. Before any write
+  the apply locates the one `catalog*.json` under the game root that names the
+  bundle, reproduces the target bundle's stored `m_Crc`/`m_Hash`/`m_BundleSize`
+  **and one second untouched bundle's** values exactly (the scheme's MD5,
+  content-slice, resource-order and dependency-set rules are all fixed by that
+  match), recomputes the new values from the verified candidate bytes, and
+  rewrites only the target entry's UTF-16 options blob (and, when the blob
+  changes length, the entry table's extra-data offsets); a sibling
+  `catalog*.hash` is updated only when its stored 32-hex value can be
+  reproduced from the catalogue text first. The catalogue and its hash file are
+  installed through the same backup/sidecar/atomic/fsync sequence as the
+  bundle, so `assets restore` returns the bundle and both catalogue files
+  byte-identically and `assets finalize` drops all backups. Refused when: the
+  catalogue cannot be found although the layout indicates one; more than one
+  catalogue names the bundle, or a catalogue that cannot be parsed or whose
+  sibling hash file is malformed sits in an ancestor directory; the catalogue
+  is not a regular in-tree file, already has recovery state, or changed between
+  read and write; the JSON/binary tables, the target entry or its options blob
+  cannot be parsed; `m_Crc`, `m_Hash` or `m_BundleSize` cannot be reproduced
+  from at least two untouched bundles (or `m_Hash` matches more than one
+  dependency-set candidate); no second untouched bundle exists for the second
+  calibration; or the hash file's value cannot be reproduced. Real check on a
+  copy of Cocoon's `aa/` tree: bundle `03f3…bundle` (4,031,793 bytes) applied
+  to 3,955,472 bytes with entry 0 rewritten (CRC 4,240,464,593 →
+  2,794,075,012; hash `c2bd4174…` → `84cd4ab2…`; size → 3,955,472), bundle
+  `0476…bundle` (9,105,216 → 9,039,171 bytes, entry 1, hash `59da4d32…` →
+  `f2330c25…`) both independently reproduced from the installed bytes by a
+  separate Python implementation; `assets restore` returned the bundle and the
+  catalogue byte-identically (sha256-identical to the pristine game) and
+  `assets finalize` left no backup. Limits: MD5 only (`useV2Hasher=false`, the
+  Unity 2020.x default; a SpookyHash hasher or a hash-file variant that does
+  not reproduce is refused), the catalogue-to-bundle match uses the internal
+  id's final component, runtime acceptance is not validated, and the bundle and
+  catalogue installs are two adjacent atomic renames rather than one
+  transaction.
 
 - Add the gated, export-only `unityfs-texture-export NODE_INDEX:PATH_ID INPUT
   OUTPUT` route. It writes a standalone DDS from one ordinary Unity SerializedFile

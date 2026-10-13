@@ -20,6 +20,8 @@ mod texture;
 mod engines;
 mod unityfs;
 mod unity_serialized;
+#[cfg(any(test, feature = "development-audits"))]
+mod addressables;
 mod unity_tree;
 mod unreal_legacy;
 mod unreal_modern;

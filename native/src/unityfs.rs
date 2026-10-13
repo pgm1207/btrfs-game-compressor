@@ -2553,14 +2553,21 @@ pub fn run(input: &Path, output: Option<&Path>, min_efficiency: f64) -> io::Resu
 //     this build and its algorithm is unproven, so the bundle is refused rather
 //     than left with a stale hash. The zero placeholder is copied verbatim by
 //     every rebuild.
-//   * ADDRESSABLES / CATALOGUE LAYOUT: a case-insensitive "aa" path component,
-//     or a `catalog.json`, `catalog.hash`, `catalog*.json` or `catalog*.hash`
-//     file in the bundle's directory or any ancestor inside the game root,
-//     refuses the bundle. An Addressables catalogue can carry a per-bundle
-//     hash/CRC that this build cannot recompute. LIMIT: a catalogue stored
-//     outside the game root (a remote or custom service) is not detectable
-//     from the copy at all; this rule only proves the absence of the known
-//     in-tree layout, which is why it is documented as a layout rule.
+//   * ADDRESSABLES CATALOGUE: when the bundle belongs to a content catalogue,
+//     the catalogue's per-bundle values are proven from the shipped bytes
+//     before anything is written and the catalogue is updated through the same
+//     recovery machinery as the bundle. The bundle is refused when the
+//     catalogue cannot be found although the `aa` layout (or a catalogue file
+//     in an ancestor directory) indicates one; when more than one catalogue
+//     covers it; when the catalogue is not a regular in-tree file; when its
+//     JSON/binary tables or the target entry cannot be parsed; when its stored
+//     `m_Crc`/`m_Hash`/`m_BundleSize` cannot be reproduced from at least two
+//     untouched bundles of that catalogue; when the dependency-set derivation
+//     is ambiguous; when a sibling `catalog*.hash` exists whose value cannot be
+//     reproduced; when the catalogue already carries recovery state; or when
+//     the catalogue changed between read and write. A catalogue stored outside
+//     the game root is not detectable from the copy at all. See the
+//     `addressables` module for the exact proven scheme.
 //   * UNVERIFIABLE REBUILD: any container parse/decode/encode failure, an
 //     inventory that cannot be proven complete or unambiguous, a field patch
 //     whose span does not hold the parsed value, a streamed layout whose
@@ -2575,9 +2582,9 @@ pub fn run(input: &Path, output: Option<&Path>, min_efficiency: f64) -> io::Resu
 //     NO_GAIN and nothing is written, the same rule the lossless recompression
 //     export uses.
 //   * ALREADY OPTIMIZED / INTERRUPTED: an existing restorable copy or checksum
-//     sidecar means the bundle is never rewritten again until `assets restore`
-//     or `assets finalize` clears that state; either alone (an interrupted
-//     install) is treated the same way.
+//     sidecar for the bundle or its catalogue means the file is never rewritten
+//     again until `assets restore` or `assets finalize` clears that state;
+//     either alone (an interrupted install) is treated the same way.
 //
 // LIMITS (stated, not solved):
 //   * stream ownership is proven only among the bundle's retained Texture2D
@@ -2592,6 +2599,10 @@ pub fn run(input: &Path, output: Option<&Path>, min_efficiency: f64) -> io::Resu
 //     visual/runtime compatibility is not validated.
 //   * a catalogue stored outside the game root (remote or custom service) is
 //     not detectable from the copy at all.
+//   * the catalogue update and the bundle install are two adjacent atomic
+//     renames under the same game lock, not one transaction: an error between
+//     them leaves recoverable state and is reported, and `assets restore`
+//     returns both files.
 // The retained backup plus `assets restore` is the recovery path for all of
 // these limits.
 //
@@ -2608,6 +2619,7 @@ pub(crate) mod apply {
     use super::*;
     #[cfg(feature = "development-audits")]
     use crate::audit_io::field;
+    use crate::addressables::{self, BundleOptions, Catalogue};
     use crate::audit_io::Source;
     use crate::texture_policy;
     use image::imageops::FilterType;
@@ -2645,6 +2657,22 @@ pub(crate) mod apply {
         pub mode: &'static str,
     }
 
+    /// One proven Addressables catalogue rewrite that accompanied the bundle
+    /// apply: the target entry's old and new values plus the recovery facts.
+    #[derive(Debug, Clone)]
+    pub(crate) struct CatalogueUpdate {
+        pub relative: PathBuf,
+        pub entry: usize,
+        pub old: BundleOptions,
+        pub new_crc: u32,
+        pub new_hash: String,
+        pub new_size: u64,
+        /// Game-relative bundles whose stored catalogue values were reproduced
+        /// exactly from the shipped bytes before this write (at least two).
+        pub calibrated: Vec<PathBuf>,
+        pub hash_file: Option<PathBuf>,
+    }
+
     #[derive(Debug)]
     pub(crate) struct ApplyOutcome {
         pub relative: PathBuf,
@@ -2657,6 +2685,7 @@ pub(crate) mod apply {
         pub removed_decoded: u64,
         pub skips: Vec<String>,
         pub textures: Vec<AppliedTexture>,
+        pub catalogue: Option<CatalogueUpdate>,
     }
 
     /// The declared Texture2D identity the final verification must find
@@ -2742,55 +2771,340 @@ pub(crate) mod apply {
 
     /// The stated rule for a bundle this build cannot apply safely. `Some` is a
     /// refusal reason, never a guess; `None` means the in-bundle hash is the
-    /// zero placeholder and no Addressables marker was found in the layout.
-    /// The rules and their limits are documented in the module comment above.
-    fn integrity_refusal(root: &Path, relative: &Path, bundle: &Bundle) -> io::Result<Option<String>> {
+    /// zero placeholder. The Addressables catalogue rules live in
+    /// `plan_catalogue`, which needs the bundle path as well.
+    fn integrity_refusal(bundle: &Bundle) -> Option<String> {
         if bundle.info[..16].iter().any(|byte| *byte != 0) {
-            return Ok(Some(format!(
+            return Some(format!(
                 "{}: the 16-byte info-section uncompressed-data hash is nonzero, its algorithm is unproven and it cannot be recomputed",
-                crate::assets::ASSET_REFUSAL_HASH)));
+                crate::assets::ASSET_REFUSAL_HASH));
         }
-        if relative.components().any(|component| matches!(component,
-            Component::Normal(name) if name.eq_ignore_ascii_case("aa")))
-        {
-            return Ok(Some(format!(
-                "{}: a game-relative path component is 'aa' (Addressables content layout); a catalogue may carry a bundle hash/CRC this build cannot recompute",
-                crate::assets::ASSET_REFUSAL_CATALOGUE)));
-        }
-        let mut directory = relative.parent();
-        while let Some(current) = directory {
+        None
+    }
+
+    /// What the bundle's Addressables catalogue situation requires before the
+    /// apply may write: nothing (no catalogue layout), a refusal, or the one
+    /// catalogue that covers the bundle.
+    enum CataloguePlan {
+        None,
+        Refused(String),
+        Update { catalogue: Box<Catalogue>, entry: usize },
+    }
+
+    /// Locate the catalogue that covers one bundle. The catalogue must be the
+    /// only one under the game root that names this bundle; an unparseable
+    /// catalogue in an ancestor directory, a malformed sibling hash file or a
+    /// bundle not covered by any catalogue while the layout suggests one is
+    /// refused. A catalogue elsewhere in the game root that neither covers the
+    /// bundle nor sits above it is treated as unrelated.
+    fn plan_catalogue(root: &Path, relative: &Path) -> io::Result<CataloguePlan> {
+        let found = match addressables::discover(root) {
+            Ok(found) => found,
+            Err(error) => return Ok(CataloguePlan::Refused(format!(
+                "{}: cannot prove the game root's catalogue layout: {error}",
+                crate::assets::ASSET_REFUSAL_CATALOGUE))),
+        };
+        let mut json_count = 0usize;
+        let mut covering: Vec<Catalogue> = Vec::new();
+        let mut relevant_error: Option<String> = None;
+        for candidate in found.iter().filter(|candidate| candidate.json) {
             crate::cancelled()?;
-            let dir = if current.as_os_str().is_empty() { root.to_path_buf() } else { root.join(current) };
-            let entries = match fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                // The game root always exists; a missing ancestor means the
-                // relative path was assembled oddly, which the asset install
-                // would refuse later. Keep walking to fail with the fact.
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    directory = current.parent();
+            json_count += 1;
+            let relevant = addressables::catalogue_in_ancestor(std::slice::from_ref(candidate), relative);
+            let hash_file = match addressables::find_hash_file(root, &found, &candidate.relative) {
+                Ok(hash_file) => hash_file,
+                Err(error) => {
+                    if relevant {
+                        relevant_error = Some(format!("{}: {}: {error}",
+                            crate::assets::ASSET_REFUSAL_CATALOGUE, candidate.relative.display()));
+                    }
                     continue;
                 }
-                // A directory that cannot be listed cannot prove the absence of
-                // a catalogue, so the bundle is refused rather than guessed at.
-                Err(error) => return Ok(Some(format!(
-                    "{}: cannot prove {} has no Addressables catalogue: {error}",
-                    crate::assets::ASSET_REFUSAL_CATALOGUE, dir.display()))),
             };
-            for entry in entries {
-                crate::cancelled()?;
-                let entry = entry?;
-                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-                let catalogue = name == "catalog.json" || name == "catalog.hash"
-                    || (name.starts_with("catalog") && (name.ends_with(".json") || name.ends_with(".hash")));
-                if catalogue {
-                    return Ok(Some(format!(
-                        "{}: Addressables catalogue file {} exists beside this bundle and may carry a hash/CRC this build cannot recompute",
-                        crate::assets::ASSET_REFUSAL_CATALOGUE, entry.path().display())));
+            match addressables::load(root, &candidate.relative, hash_file) {
+                Ok(catalogue) if catalogue.covers(relative) => covering.push(catalogue),
+                Ok(_) => {}
+                Err(error) => {
+                    if relevant {
+                        relevant_error = Some(format!("{}: {} cannot be parsed: {error}",
+                            crate::assets::ASSET_REFUSAL_CATALOGUE, candidate.relative.display()));
+                    }
                 }
             }
-            directory = current.parent();
         }
-        Ok(None)
+        if let Some(reason) = relevant_error { return Ok(CataloguePlan::Refused(reason)); }
+        if covering.len() > 1 {
+            return Ok(CataloguePlan::Refused(format!(
+                "{}: {} catalogues under the game root name this bundle; the covering catalogue is ambiguous",
+                crate::assets::ASSET_REFUSAL_CATALOGUE, covering.len())));
+        }
+        if covering.is_empty() {
+            if addressables::has_aa_component(relative) || addressables::catalogue_in_ancestor(&found, relative) {
+                return Ok(CataloguePlan::Refused(format!(
+                    "{}: the 'aa' content layout indicates a catalogue, but {} catalogue file(s) under the game root name this bundle, so its hash/CRC cannot be updated",
+                    crate::assets::ASSET_REFUSAL_CATALOGUE,
+                    if json_count == 0 { "no".to_string() } else { "none of the".to_string() })));
+            }
+            return Ok(CataloguePlan::None);
+        }
+        let catalogue = covering.remove(0);
+        let Some(entry) = catalogue.target_entry(relative) else {
+            return Ok(CataloguePlan::Refused(format!(
+                "{}: {} names this bundle more than once or not at all; the target entry is ambiguous",
+                crate::assets::ASSET_REFUSAL_CATALOGUE, catalogue.relative.display())));
+        };
+        Ok(CataloguePlan::Update { catalogue: Box::new(catalogue), entry })
+    }
+
+    /// CRC32 (IEEE) over the concatenated decoded UnityFS blocks: the bundle's
+    /// uncompressed content exactly as Unity's own asset bundle CRC defines it.
+    fn decoded_crc32(source: &[u8], bundle: &Bundle) -> io::Result<u32> {
+        let mut hasher = crc32fast::Hasher::new();
+        for block in &bundle.blocks {
+            crate::cancelled()?;
+            let encoded = source.get(block.offset..block.offset + block.encoded)
+                .ok_or_else(|| invalid("UnityFS block exceeds its source during catalogue CRC"))?;
+            let decoded = decode(encoded, block.decoded, (block.flags & 0x3f) as u32)?;
+            hasher.update(&decoded);
+        }
+        Ok(hasher.finalize())
+    }
+
+    /// Feed one decoded bundle range into an MD5 hasher without materialising
+    /// the whole range; only blocks that intersect the range are decoded.
+    fn range_md5(source: &[u8], bundle: &Bundle, start: u64, size: u64, md5: &mut crate::md5::Md5) -> io::Result<()> {
+        let end = start.checked_add(size).ok_or_else(|| invalid("catalogue hash range overflow"))?;
+        if end > bundle.decoded { return Err(invalid("catalogue hash range exceeds the decoded bundle")); }
+        let mut block_start = 0u64;
+        for block in &bundle.blocks {
+            crate::cancelled()?;
+            let block_end = block_start + block.decoded as u64;
+            if block_end > start && block_start < end {
+                let encoded = source.get(block.offset..block.offset + block.encoded)
+                    .ok_or_else(|| invalid("UnityFS block exceeds its source during catalogue hashing"))?;
+                let decoded = decode(encoded, block.decoded, (block.flags & 0x3f) as u32)?;
+                let from = start.max(block_start) - block_start;
+                let to = end.min(block_end) - block_start;
+                md5.update(&decoded[from as usize..to as usize]);
+            }
+            block_start = block_end;
+            if block_start >= end { break; }
+        }
+        Ok(())
+    }
+
+    /// SBP's `ContentHash` for one bundle: MD5 over the per-resource-file MD5s
+    /// in node order. A SerializedFile hashes from its header data offset to the
+    /// end of the node; every other node hashes whole. The caller proves this
+    /// model against the catalogue's stored value before any write.
+    fn bundle_content_hash(source: &[u8], bundle: &Bundle) -> io::Result<[u8; 16]> {
+        let mut digests: Vec<[u8; 16]> = Vec::with_capacity(bundle.nodes.len());
+        for node in &bundle.nodes {
+            crate::cancelled()?;
+            let mut digest = crate::md5::Md5::new();
+            if node.flags == 4 {
+                let mut decoder = NodeDecoder::new(source, bundle);
+                decoder.decode_budget = APPLY_DECODE_BUDGET;
+                decoder.copy_budget = APPLY_COPY_BUDGET;
+                let header = decoder.read(node.offset, node.size.min(64))?;
+                let data = crate::unity_serialized::data_offset(&header)?;
+                if data > node.size { return Err(invalid("SerializedFile data offset exceeds its catalogue node")); }
+                range_md5(source, bundle, node.offset + data, node.size - data, &mut digest)?;
+            } else {
+                range_md5(source, bundle, node.offset, node.size, &mut digest)?;
+            }
+            digests.push(digest.finalize());
+        }
+        Ok(Catalogue::content_hash(&digests))
+    }
+
+    /// One bundle's catalogue proof: the stored values reproduced from the
+    /// shipped bytes plus the dependency list that made the hash match.
+    enum Calibration {
+        Proven(BundleOptions, Vec<Vec<u8>>),
+        Refused(String),
+    }
+
+    /// Reproduce one untouched bundle's `m_Crc`, `m_BundleSize` and `m_Hash`
+    /// from its bytes. `m_Hash` is only accepted when exactly one dependency-set
+    /// candidate (including the empty set) reproduces it, so the dependency
+    /// list used for the post-apply recomputation is proven, not guessed.
+    fn calibrate_bundle(catalogue: &Catalogue, entry: usize, relative: &Path,
+        source: &[u8], bundle: &Bundle) -> Calibration {
+        let options = match catalogue.options(entry) {
+            Ok(options) => options,
+            Err(error) => return Calibration::Refused(format!(
+                "{}: {} entry {entry} options cannot be parsed: {error}",
+                crate::assets::ASSET_REFUSAL_CATALOGUE, relative.display())),
+        };
+        let crc = match decoded_crc32(source, bundle) {
+            Ok(crc) => crc,
+            Err(error) => return Calibration::Refused(format!(
+                "{}: {} content CRC cannot be computed: {error}",
+                crate::assets::ASSET_REFUSAL_CATALOGUE, relative.display())),
+        };
+        if crc != options.crc {
+            return Calibration::Refused(format!(
+                "{}: {} stored m_Crc {} is not the CRC32 of the uncompressed content (recomputed {crc}); the catalogue scheme is unproven",
+                crate::assets::ASSET_REFUSAL_CATALOGUE, relative.display(), options.crc));
+        }
+        if source.len() as u64 != options.size {
+            return Calibration::Refused(format!(
+                "{}: {} stored m_BundleSize {} is not the file size {}; the catalogue scheme is unproven",
+                crate::assets::ASSET_REFUSAL_CATALOGUE, relative.display(), options.size, source.len()));
+        }
+        if options.hash.is_empty() { return Calibration::Proven(options, Vec::new()); }
+        let content = match bundle_content_hash(source, bundle) {
+            Ok(content) => content,
+            Err(error) => return Calibration::Refused(format!(
+                "{}: {} content hash cannot be computed: {error}",
+                crate::assets::ASSET_REFUSAL_CATALOGUE, relative.display())),
+        };
+        let candidates = catalogue.dependency_candidates(entry);
+        let mut matched: Vec<Vec<Vec<u8>>> = Vec::new();
+        for dependencies in &candidates {
+            if addressables::hex128(&Catalogue::projected_hash(&content, dependencies)) == options.hash {
+                matched.push(dependencies.clone());
+            }
+        }
+        match matched.len() {
+            1 => Calibration::Proven(options, matched.remove(0)),
+            0 => Calibration::Refused(format!(
+                "{}: {} stored m_Hash {} cannot be reproduced from the shipped bytes and {} dependency candidate(s); refusing to guess",
+                crate::assets::ASSET_REFUSAL_CATALOGUE, relative.display(), options.hash, candidates.len())),
+            count => Calibration::Refused(format!(
+                "{}: {} stored m_Hash is reproduced by {count} different dependency-set candidates; refusing to guess",
+                crate::assets::ASSET_REFUSAL_CATALOGUE, relative.display())),
+        }
+    }
+
+    /// Everything prepared and verified before the bundle install: the rebuilt
+    /// catalogue bytes and, when present, its recomputed sibling hash file.
+    struct PreparedCatalogue {
+        relative: PathBuf,
+        original: Vec<u8>,
+        bytes: Vec<u8>,
+        entry: usize,
+        old: BundleOptions,
+        new_crc: u32,
+        new_hash: String,
+        new_size: u64,
+        calibrated: Vec<PathBuf>,
+        hash_file: Option<(PathBuf, Vec<u8>)>,
+    }
+
+    /// Calibrate the catalogue on the target bundle and one other untouched
+    /// bundle it covers, then recompute the target entry from the rebuilt
+    /// bundle bytes and prove the new catalogue before anything is installed.
+    fn prepare_catalogue(root: &Path, relative: &Path, catalogue: &Catalogue, entry: usize,
+        source: &[u8], bundle: &Bundle, working: &[u8]) -> io::Result<Result<PreparedCatalogue, String>> {
+        if crate::assets::has_recovery_state(root, &catalogue.relative) {
+            return Ok(Err(format!(
+                "{}: {} already has restorable recovery state; run 'assets restore' or 'assets finalize' first",
+                crate::assets::ASSET_REFUSAL_CATALOGUE, catalogue.relative.display())));
+        }
+        let (old, dependencies) = match calibrate_bundle(catalogue, entry, relative, source, bundle) {
+            Calibration::Proven(options, dependencies) => (options, dependencies),
+            Calibration::Refused(reason) => return Ok(Err(reason)),
+        };
+        let mut calibrated = vec![relative.to_path_buf()];
+        // The second untouched bundle proves the same scheme independently.
+        // Candidates are tried smallest first, so the cost stays bounded and a
+        // candidate whose shape this model cannot reproduce does not block a
+        // provable one behind it.
+        let mut candidates: Vec<(u64, PathBuf)> = Vec::new();
+        for candidate in catalogue.covered_paths(4096) {
+            if candidate == relative { continue; }
+            let path = root.join(&candidate);
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if !meta.file_type().is_file() || meta.len() > MAX_TEXTURE_BUNDLE { continue; }
+            if crate::assets::has_recovery_state(root, &candidate) { continue; }
+            candidates.push((meta.len(), candidate));
+        }
+        candidates.sort_unstable();
+        let mut last_refusal: Option<String> = None;
+        for (_, control_relative) in candidates.into_iter().take(16) {
+            crate::cancelled()?;
+            let mut control_source = Source::open(&root.join(&control_relative), MAX_TEXTURE_BUNDLE, APPLY_READ_BUDGET)?;
+            let control_bytes = control_source.read_at(0, control_source.len() as usize)?;
+            let control_bundle = match parse(&control_bytes) { Ok(parsed) => parsed, Err(_) => continue };
+            let Some(control_entry) = catalogue.target_entry(&control_relative) else { continue };
+            match calibrate_bundle(catalogue, control_entry, &control_relative, &control_bytes, &control_bundle) {
+                Calibration::Proven(_, _) => { calibrated.push(control_relative); break; }
+                Calibration::Refused(reason) => last_refusal = Some(reason),
+            }
+        }
+        if calibrated.len() < 2 {
+            return Ok(Err(match last_refusal {
+                Some(reason) => reason,
+                None => format!(
+                    "{}: {} covers no second untouched bundle within the work limits, so the catalogue scheme cannot be calibrated twice",
+                    crate::assets::ASSET_REFUSAL_CATALOGUE, catalogue.relative.display()),
+            }));
+        }
+        // Reproduce the sibling catalog*.hash before the catalogue may change.
+        let hash_variant = match catalogue.hash_file {
+            Some(_) => match catalogue.calibrate_hash_file() {
+                Ok(variant) => Some(variant),
+                Err(error) => return Ok(Err(format!(
+                    "{}: {}: {error}", crate::assets::ASSET_REFUSAL_CATALOGUE,
+                    catalogue.hash_file.as_ref().unwrap().relative.display()))),
+            },
+            None => None,
+        };
+        // Recompute the target entry from the verified candidate bytes.
+        let check_bundle = parse(working)?;
+        let new_crc = decoded_crc32(working, &check_bundle)?;
+        let new_size = working.len() as u64;
+        let new_hash = if old.hash.is_empty() {
+            String::new()
+        } else {
+            let content = bundle_content_hash(working, &check_bundle)?;
+            addressables::hex128(&Catalogue::projected_hash(&content, &dependencies))
+        };
+        let expected = BundleOptions {
+            hash: new_hash.clone(), crc: new_crc, size: new_size,
+            bundle_name: old.bundle_name.clone(),
+        };
+        let new_bytes = match catalogue.rebuild(entry, new_crc, &new_hash, new_size) {
+            Ok(bytes) => bytes,
+            Err(error) => return Ok(Err(format!(
+                "{}: {} entry {entry} cannot be rebuilt: {error}",
+                crate::assets::ASSET_REFUSAL_CATALOGUE, catalogue.relative.display()))),
+        };
+        if let Err(error) = catalogue.verify_rebuilt(entry, &new_bytes, &expected) {
+            return Err(error);
+        }
+        // The file must still be exactly what was parsed; a concurrent change
+        // must never be overwritten with a stale rebuild.
+        if fs::read(root.join(&catalogue.relative))? != catalogue.bytes() {
+            return Ok(Err(format!(
+                "{}: {} changed after it was read; refusing to write a stale catalogue",
+                crate::assets::ASSET_REFUSAL_CATALOGUE, catalogue.relative.display())));
+        }
+        let hash_file = match (hash_variant, catalogue.hash_file.as_ref()) {
+            (Some(variant), Some(file)) => {
+                let bytes = catalogue.recompute_hash_file(variant, &new_bytes)?;
+                Some((file.relative.clone(), bytes))
+            }
+            _ => None,
+        };
+        Ok(Ok(PreparedCatalogue {
+            relative: catalogue.relative.clone(),
+            original: catalogue.bytes().to_vec(),
+            bytes: new_bytes,
+            entry,
+            old,
+            new_crc,
+            new_hash,
+            new_size,
+            calibrated,
+            hash_file,
+        }))
     }
 
     /// Decode, downscale to the repository policy edge and re-encode one mip
@@ -2848,7 +3162,7 @@ pub(crate) mod apply {
         let mut outcome = ApplyOutcome {
             relative: relative.to_path_buf(), status: ApplyStatus::NoGain, refusal: None,
             applied: 0, skipped: 0, old_bytes: 0, new_bytes: 0, removed_decoded: 0,
-            skips: Vec::new(), textures: Vec::new(),
+            skips: Vec::new(), textures: Vec::new(), catalogue: None,
         };
         if relative.as_os_str().is_empty()
             || relative.components().any(|component| !matches!(component, Component::Normal(_)))
@@ -2881,11 +3195,19 @@ pub(crate) mod apply {
                 MAX_TEXTURE_BUNDLE / (1024 * 1024), MAX_TEXTURE_NODES));
             return Ok(outcome);
         }
-        if let Some(reason) = integrity_refusal(root, relative, &bundle)? {
+        if let Some(reason) = integrity_refusal(&bundle) {
             outcome.status = ApplyStatus::Refused;
             outcome.refusal = Some(reason);
             return Ok(outcome);
         }
+        let catalogue_plan = match plan_catalogue(root, relative)? {
+            CataloguePlan::Refused(reason) => {
+                outcome.status = ApplyStatus::Refused;
+                outcome.refusal = Some(reason);
+                return Ok(outcome);
+            }
+            plan => plan,
+        };
 
         // ---- selection ---------------------------------------------------
         let mut decoder = NodeDecoder::new(&bytes, &bundle);
@@ -3103,6 +3425,21 @@ pub(crate) mod apply {
             &refs, &originals, &original_slices)?;
         source.unchanged()?;
 
+        // ---- prove and prepare the catalogue update before any write -----
+        let prepared = match &catalogue_plan {
+            CataloguePlan::Update { catalogue, entry } => {
+                match prepare_catalogue(root, relative, catalogue, *entry, &bytes, &bundle, &working)? {
+                    Ok(prepared) => Some(prepared),
+                    Err(reason) => {
+                        outcome.status = ApplyStatus::Refused;
+                        outcome.refusal = Some(reason);
+                        return Ok(outcome);
+                    }
+                }
+            }
+            _ => None,
+        };
+
         // ---- install with the loose-asset safety sequence ----------------
         let (_, installed_len) = crate::assets::install_verified_asset(tree, root, relative, &working, level)?;
         let readback = fs::read(&path)?;
@@ -3119,10 +3456,50 @@ pub(crate) mod apply {
         let installed_bundle = parse(&readback)?;
         verify_installed_payloads(&readback, &installed_bundle, &applied)?;
 
+        // ---- install the proven catalogue through the same machinery -----
+        let catalogue_update = match prepared {
+            Some(prepared) => {
+                let (_, _) = crate::assets::install_verified_asset(
+                    tree, root, &prepared.relative, &prepared.bytes, level)?;
+                if fs::read(root.join(&prepared.relative))? != prepared.bytes {
+                    return Err(invalid("installed Addressables catalogue differs from the verified candidate"));
+                }
+                if !crate::assets::matches_recorded_checksum(root, &prepared.relative)? {
+                    return Err(invalid("installed Addressables catalogue does not match its recorded checksum"));
+                }
+                let backup = crate::assets::backup_path(root, &prepared.relative);
+                if fs::read(&backup)? != prepared.original {
+                    return Err(invalid("restorable copy differs from the source Addressables catalogue"));
+                }
+                let hash_file = match &prepared.hash_file {
+                    Some((relative, bytes)) => {
+                        let (_, _) = crate::assets::install_verified_asset(tree, root, relative, bytes, level)?;
+                        if fs::read(root.join(relative))? != *bytes {
+                            return Err(invalid("installed Addressables catalogue hash differs from the verified candidate"));
+                        }
+                        Some(relative.clone())
+                    }
+                    None => None,
+                };
+                Some(CatalogueUpdate {
+                    relative: prepared.relative,
+                    entry: prepared.entry,
+                    old: prepared.old,
+                    new_crc: prepared.new_crc,
+                    new_hash: prepared.new_hash,
+                    new_size: prepared.new_size,
+                    calibrated: prepared.calibrated,
+                    hash_file,
+                })
+            }
+            None => None,
+        };
+
         outcome.status = ApplyStatus::Applied;
         outcome.applied = applied.len();
         outcome.skipped += rejected.len();
         outcome.new_bytes = installed_len;
+        outcome.catalogue = catalogue_update;
         outcome.removed_decoded = applied.iter()
             .filter(|job| !job.inline && job.compaction).map(|job| job.orig_stream_size - job.new_payload.len() as u64).sum();
         outcome.textures = applied.iter().map(|job| AppliedTexture {
@@ -3472,8 +3849,8 @@ pub(crate) mod apply {
         if !fs::symlink_metadata(root)?.file_type().is_dir() {
             return Err(invalid("Unity bundle apply requires a real game directory"));
         }
-        eprintln!("Unity bundle apply refusal rules: (1) a nonzero info-section uncompressed-data hash cannot be recomputed, so the bundle is refused; (2) an Addressables layout (a case-insensitive 'aa' component or a catalog.json/catalog.hash/catalog*.json/catalog*.hash file in an ancestor inside the game root) may carry a bundle hash this build cannot recompute, so it is refused (a catalogue stored outside the game root is not detectable here); (3) any rebuild or reference plan that cannot be proven fails closed and writes nothing, with per-texture reasons reported; (4) no-gain textures are skipped and a bundle that does not get strictly smaller is not written.");
-        eprintln!("Unity bundle apply limits: stream ownership is proven only among retained Texture2D objects (non-texture owners are not inventoried), sprite/atlas/mesh consumers of a resized texture are not modeled, runtime acceptance is not validated, and a catalogue stored outside the game root is not detectable. The retained backup plus 'assets restore' is the recovery path.");
+        eprintln!("Unity bundle apply refusal rules: (1) a nonzero info-section uncompressed-data hash cannot be recomputed, so the bundle is refused; (2) when the bundle belongs to an Addressables catalogue, the catalogue's stored m_Crc/m_Hash/m_BundleSize are reproduced from at least two untouched bundles before the write and only a proven target entry is updated; a missing, ambiguous, unparseable, changed, already-backed-up or unreproducible catalogue (including a sibling catalog*.hash that cannot be reproduced) refuses the bundle (a catalogue stored outside the game root is not detectable here); (3) any rebuild or reference plan that cannot be proven fails closed and writes nothing, with per-texture reasons reported; (4) no-gain textures are skipped and a bundle that does not get strictly smaller is not written.");
+        eprintln!("Unity bundle apply limits: stream ownership is proven only among retained Texture2D objects (non-texture owners are not inventoried), sprite/atlas/mesh consumers of a resized texture are not modeled, runtime acceptance is not validated, a catalogue stored outside the game root is not detectable, and the bundle and catalogue installs are two adjacent atomic renames rather than one transaction. The retained backups plus 'assets restore' are the recovery path; 'assets finalize' drops both.");
         let _guard = crate::assets::lock_game_for_mutation(root)?;
         let tree = crate::Tree::for_asset_writes(root)?;
         let mut failures = 0usize;
@@ -3506,6 +3883,17 @@ pub(crate) mod apply {
                 texture.format, crate::unity_tree::format_name(texture.format),
                 texture.old_mips, texture.new_mips, texture.old_len, texture.new_len,
                 texture.storage, texture.mode);
+        }
+        if let Some(update) = &outcome.catalogue {
+            let calibrated = update.calibrated.iter()
+                .map(|path| String::from_utf8_lossy(path.as_os_str().as_encoded_bytes()).into_owned())
+                .collect::<Vec<_>>().join(",");
+            println!("UNITYFS_TEXTURE_APPLY_CATALOGUE|{name}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                field(update.relative.as_os_str().as_bytes()), update.entry,
+                update.old.crc, update.new_crc, update.old.hash, update.new_hash,
+                update.old.size, update.new_size,
+                update.hash_file.as_ref().map(|path| field(path.as_os_str().as_bytes())).unwrap_or_default(),
+                field(calibrated.as_bytes()));
         }
         match outcome.status {
             ApplyStatus::Applied => println!("UNITYFS_TEXTURE_APPLY|APPLIED|{name}|{}|{}|{}|{}|{}",
@@ -4887,6 +5275,294 @@ mod tests {
         assert_eq!(outcome.status, ApplyStatus::Refused, "{outcome:?}");
         assert!(outcome.refusal.as_deref().unwrap().contains("catalogue"), "{:?}", outcome.refusal);
         assert_eq!(fs::read(root.join(&cat_rel)).unwrap(), clean);
+        assert!(!root.join(".bgc-assets-backup").exists());
+        no_apply_debris(&root);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // ---- Addressables catalogue update path --------------------------------
+
+    const GAME_REL: &str = "aa/StandaloneWindows64/game.bundle";
+    const SHARED_REL: &str = "aa/StandaloneWindows64/shared.bundle";
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// The proven per-bundle catalogue values recomputed from a bundle's bytes:
+    /// CRC32 over the decoded payload and the SBP `ContentHash`.
+    fn catalogue_values(bytes: &[u8]) -> (u32, [u8; 16]) {
+        let bundle = parse(bytes).unwrap();
+        let mut crc = crc32fast::Hasher::new();
+        for block in &bundle.blocks {
+            let decoded = decode(&bytes[block.offset..block.offset + block.encoded],
+                block.decoded, (block.flags & 0x3f) as u32).unwrap();
+            crc.update(&decoded);
+        }
+        let mut digests = Vec::new();
+        let mut decoder = NodeDecoder::new(bytes, &bundle);
+        decoder.decode_budget = 1 << 40;
+        decoder.copy_budget = 1 << 40;
+        for node in &bundle.nodes {
+            if node.flags == 4 {
+                let header = decoder.read(node.offset, node.size.min(64)).unwrap();
+                let data = crate::unity_serialized::data_offset(&header).unwrap();
+                digests.push(crate::md5::digest(&decoder.read(node.offset + data, node.size - data).unwrap()));
+            } else {
+                digests.push(crate::md5::digest(&decoder.read(node.offset, node.size).unwrap()));
+            }
+        }
+        (crc.finalize(), crate::addressables::Catalogue::content_hash(&digests))
+    }
+
+    fn bundle_hash(content: &[u8; 16], dependencies: &[&str]) -> [u8; 16] {
+        let mut md5 = crate::md5::Md5::new();
+        md5.update(content);
+        for dependency in dependencies { md5.update(dependency.as_bytes()); }
+        md5.finalize()
+    }
+
+    /// A synthetic Addressables catalogue that covers `game.bundle` and
+    /// `shared.bundle`: an asset entry makes the game bundle depend on the
+    /// shared one, while an asset entry that only names the shared bundle keeps
+    /// the shared bundle's own dependency list empty. The stored values are the
+    /// proven scheme's own outputs (so calibration must succeed) unless
+    /// `game_override` injects a wrong value. Returns the catalogue bytes.
+    fn write_synthetic_catalogue(root: &Path, game: &[u8], shared: &[u8],
+        game_override: Option<(String, u32, u64)>, hash_file: bool) -> Vec<u8> {
+        write_synthetic_catalogue_with(root, game, shared, game_override, hash_file, false)
+    }
+
+    /// The same fixture with the game bundle entry optionally duplicated, which
+    /// makes its internal id ambiguous.
+    fn write_synthetic_catalogue_with(root: &Path, game: &[u8], shared: &[u8],
+        game_override: Option<(String, u32, u64)>, hash_file: bool, duplicate_game: bool) -> Vec<u8> {
+        use crate::addressables::fixtures::{catalogue_json, FixtureEntry};
+        let (game_crc, game_content) = catalogue_values(game);
+        let (shared_crc, shared_content) = catalogue_values(shared);
+        let (game_hash, game_crc, game_size) = match game_override {
+            Some((hash, crc, size)) => (hash, crc, size),
+            None => (hex(&bundle_hash(&game_content, &["shared.bundle"])), game_crc, game.len() as u64),
+        };
+        let game_entry = || FixtureEntry {
+            internal_id: r"{RuntimePath}\StandaloneWindows64\game.bundle".into(),
+            bundle_name: "sandbox".into(), hash: game_hash.clone(), crc: game_crc,
+            size: game_size, dependencies: vec![],
+        };
+        let mut entries = vec![game_entry(),
+            FixtureEntry { internal_id: r"{RuntimePath}\StandaloneWindows64\shared.bundle".into(),
+                bundle_name: "shared".into(), hash: hex(&bundle_hash(&shared_content, &[])),
+                crc: shared_crc, size: shared.len() as u64, dependencies: vec![] },
+            FixtureEntry { internal_id: "Assets/thing".into(), bundle_name: String::new(),
+                hash: String::new(), crc: 0, size: 0, dependencies: vec![0, 1] },
+            FixtureEntry { internal_id: "Assets/other".into(), bundle_name: String::new(),
+                hash: String::new(), crc: 0, size: 0, dependencies: vec![1] },
+        ];
+        if duplicate_game {
+            let duplicate = FixtureEntry {
+                internal_id: entries[0].internal_id.clone(),
+                bundle_name: entries[0].bundle_name.clone(),
+                hash: entries[0].hash.clone(), crc: entries[0].crc,
+                size: entries[0].size, dependencies: vec![],
+            };
+            entries.insert(1, duplicate);
+        }
+        let json = catalogue_json(&entries);
+        fs::create_dir_all(root.join("aa/StandaloneWindows64")).unwrap();
+        fs::write(root.join("aa/catalog.json"), &json).unwrap();
+        if hash_file {
+            let mut md5 = crate::md5::Md5::new();
+            md5.update(&json);
+            fs::write(root.join("aa/catalog.hash"), hex(&md5.finalize())).unwrap();
+        }
+        json
+    }
+
+    fn catalogue_round_root(name: &str) -> (PathBuf, Vec<u8>, Vec<u8>, Vec<u8>) {
+        let root = scratch(name);
+        let game = apply_fixture();
+        let shared = apply_fixture();
+        fs::create_dir_all(root.join("aa/StandaloneWindows64")).unwrap();
+        fs::write(root.join(GAME_REL), &game).unwrap();
+        fs::write(root.join(SHARED_REL), &shared).unwrap();
+        let catalogue = write_synthetic_catalogue(&root, &game, &shared, None, true);
+        (root, game, shared, catalogue)
+    }
+
+    #[test]
+    fn unity_bundle_apply_updates_proves_and_restores_an_addressables_catalogue() {
+        let (root, game, shared, catalogue) = catalogue_round_root("bgc-unity-catalogue-round");
+        let original_hash_file = fs::read(root.join("aa/catalog.hash")).unwrap();
+        let rel = PathBuf::from(GAME_REL);
+        let outcomes = texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap();
+        let outcome = &outcomes[0];
+        assert_eq!(outcome.status, ApplyStatus::Applied, "{outcome:?}");
+        let update = outcome.catalogue.as_ref().expect("a catalogue update");
+        assert_eq!(update.relative, PathBuf::from("aa/catalog.json"));
+        assert_eq!(update.entry, 0);
+        assert_eq!(update.calibrated.len(), 2, "{:?}", update.calibrated);
+        assert_eq!(update.calibrated[0], rel);
+        // The reported new values are the recomputation from the installed bytes,
+        // and the same dependency list the calibration proved.
+        let installed = fs::read(root.join(GAME_REL)).unwrap();
+        let (crc, content) = catalogue_values(&installed);
+        assert_eq!(crc, update.new_crc);
+        assert_eq!(hex(&bundle_hash(&content, &["shared.bundle"])), update.new_hash);
+        assert_eq!(installed.len() as u64, update.new_size);
+        // The catalogue parses, carries exactly those values and left the other
+        // bundle's entry untouched.
+        let parsed = crate::addressables::load(&root, Path::new("aa/catalog.json"), None).unwrap();
+        let options = parsed.options(0).unwrap();
+        assert_eq!((options.crc, options.hash.as_str(), options.size),
+            (update.new_crc, update.new_hash.as_str(), update.new_size));
+        assert_eq!(options.bundle_name, "sandbox");
+        assert_eq!(parsed.options(1).unwrap().crc, catalogue_values(&shared).0);
+        // The sibling hash file is recomputed with the same proven variant.
+        let new_catalogue = fs::read(root.join("aa/catalog.json")).unwrap();
+        let mut md5 = crate::md5::Md5::new();
+        md5.update(&new_catalogue);
+        assert_eq!(fs::read(root.join("aa/catalog.hash")).unwrap(), hex(&md5.finalize()).into_bytes());
+        // Every restorable copy is byte-identical to its source.
+        let backup = root.join(".bgc-assets-backup");
+        assert_eq!(fs::read(backup.join(GAME_REL)).unwrap(), game);
+        // The untouched calibration bundle was never installed, so it has no
+        // restorable copy: only the target bundle and the catalogue do.
+        assert!(!backup.join(SHARED_REL).exists());
+        assert_eq!(fs::read(backup.join("aa/catalog.json")).unwrap(), catalogue);
+        assert_eq!(fs::read(backup.join("aa/catalog.hash")).unwrap(), original_hash_file);
+        assert!(crate::assets::matches_recorded_checksum(&root, &rel).unwrap());
+        assert!(crate::assets::matches_recorded_checksum(&root, Path::new("aa/catalog.json")).unwrap());
+        // `assets restore` returns the target bundle and both catalogue
+        // files byte-identically.
+        crate::assets::run("restore", "native", 0, &root).unwrap();
+        assert_eq!(fs::read(root.join(GAME_REL)).unwrap(), game);
+        assert_eq!(fs::read(root.join(SHARED_REL)).unwrap(), shared);
+        assert_eq!(fs::read(root.join("aa/catalog.json")).unwrap(), catalogue);
+        assert_eq!(fs::read(root.join("aa/catalog.hash")).unwrap(), original_hash_file);
+        // Re-apply, then `assets finalize` keeps both transformed files and
+        // drops both backups.
+        assert_eq!(texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap()[0].status,
+            ApplyStatus::Applied);
+        let transformed = fs::read(root.join(GAME_REL)).unwrap();
+        let transformed_catalogue = fs::read(root.join("aa/catalog.json")).unwrap();
+        crate::assets::run("finalize", "native", 0, &root).unwrap();
+        assert_eq!(fs::read(root.join(GAME_REL)).unwrap(), transformed);
+        assert_eq!(fs::read(root.join("aa/catalog.json")).unwrap(), transformed_catalogue);
+        assert!(!root.join(".bgc-assets-backup").exists());
+        no_apply_debris(&root);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unity_bundle_apply_recomputes_a_utf16_catalogue_hash() {
+        // A catalogue whose JSON text contains a non-ASCII character is hashed
+        // over its UTF-16LE bytes by Addressables; the variant must be detected
+        // from the stored hash file and reused for the rewrite.
+        let (root, game, _shared, _) = catalogue_round_root("bgc-unity-catalogue-utf16");
+        let json = String::from_utf8(fs::read(root.join("aa/catalog.json")).unwrap()).unwrap()
+            .replace("Assets/thing", "Assets/caf\u{e9}");
+        assert!(!json.is_ascii());
+        let json = json.into_bytes();
+        fs::write(root.join("aa/catalog.json"), &json).unwrap();
+        let mut md5 = crate::md5::Md5::new();
+        md5.update(&utf16_bytes(std::str::from_utf8(&json).unwrap()));
+        let expected_hash = hex(&md5.finalize());
+        fs::write(root.join("aa/catalog.hash"), &expected_hash).unwrap();
+        let rel = PathBuf::from(GAME_REL);
+        let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap()[0];
+        assert_eq!(outcome.status, ApplyStatus::Applied, "{outcome:?}");
+        let new_json = fs::read(root.join("aa/catalog.json")).unwrap();
+        let mut md5 = crate::md5::Md5::new();
+        md5.update(&utf16_bytes(std::str::from_utf8(&new_json).unwrap()));
+        assert_eq!(fs::read(root.join("aa/catalog.hash")).unwrap(), hex(&md5.finalize()).into_bytes());
+        // The pre-apply state is recoverable byte-identically, including the
+        // UTF-16 hash file.
+        crate::assets::run("restore", "native", 0, &root).unwrap();
+        assert_eq!(fs::read(root.join("aa/catalog.json")).unwrap(), json);
+        assert_eq!(fs::read(root.join("aa/catalog.hash")).unwrap(), expected_hash.into_bytes());
+        assert_eq!(fs::read(root.join(GAME_REL)).unwrap(), game);
+        no_apply_debris(&root);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn utf16_bytes(text: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        for unit in text.encode_utf16() { out.extend_from_slice(&unit.to_le_bytes()); }
+        out
+    }
+
+    #[test]
+    fn unity_bundle_apply_refuses_unprovable_catalogues_without_writing() {
+        let (root, game, shared, catalogue) = catalogue_round_root("bgc-unity-catalogue-refusal");
+        let rel = PathBuf::from(GAME_REL);
+        let (crc, _) = catalogue_values(&game);
+        // (a) A stored m_Hash that the shipped bytes cannot reproduce.
+        write_synthetic_catalogue(&root, &game, &shared,
+            Some(("0".repeat(32), crc, game.len() as u64)), false);
+        let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap()[0];
+        assert_eq!(outcome.refusal.as_deref().unwrap().contains("m_Hash"), true, "{:?}", outcome.refusal);
+        assert_eq!(fs::read(root.join(GAME_REL)).unwrap(), game);
+        // (b) A stored m_Crc that is not the uncompressed-content CRC.
+        write_synthetic_catalogue(&root, &game, &shared,
+            Some((hex(&bundle_hash(&catalogue_values(&game).1, &["shared.bundle"])), crc.wrapping_add(1), game.len() as u64)), false);
+        let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap()[0];
+        assert!(outcome.refusal.as_deref().unwrap().contains("m_Crc"), "{:?}", outcome.refusal);
+        // (c) A stored m_BundleSize that is not the file length.
+        write_synthetic_catalogue(&root, &game, &shared,
+            Some((hex(&bundle_hash(&catalogue_values(&game).1, &["shared.bundle"])), crc, game.len() as u64 + 1)), false);
+        let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap()[0];
+        assert!(outcome.refusal.as_deref().unwrap().contains("m_BundleSize"), "{:?}", outcome.refusal);
+        // Nothing may have been written by any refusal: no recovery state and no
+        // temporary files.
+        assert!(!root.join(".bgc-assets-backup").exists());
+        no_apply_debris(&root);
+        // (d) An ambiguous duplicate internal id for the same bundle.
+        write_synthetic_catalogue_with(&root, &game, &shared, None, false, true);
+        let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap()[0];
+        assert!(outcome.refusal.as_deref().unwrap().contains("ambiguous"), "{:?}", outcome.refusal);
+        // (e) Two different catalogues under the game root both name the bundle.
+        fs::write(root.join("aa/catalog.json"), &catalogue).unwrap();
+        fs::create_dir_all(root.join("other")).unwrap();
+        fs::write(root.join("other/catalog_remote.json"), &catalogue).unwrap();
+        let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap()[0];
+        assert!(outcome.refusal.as_deref().unwrap().contains("ambiguous"), "{:?}", outcome.refusal);
+        fs::remove_file(root.join("other/catalog_remote.json")).unwrap();
+        // (f) A sibling catalog*.hash whose value cannot be reproduced.
+        fs::write(root.join("aa/catalog.hash"), "f".repeat(32)).unwrap();
+        let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap()[0];
+        assert!(outcome.refusal.as_deref().unwrap().contains("hash file"), "{:?}", outcome.refusal);
+        // (g) The `aa` layout without any catalogue.
+        fs::remove_file(root.join("aa/catalog.json")).unwrap();
+        fs::remove_file(root.join("aa/catalog.hash")).unwrap();
+        let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap()[0];
+        assert!(outcome.refusal.as_deref().unwrap().contains("aa"), "{:?}", outcome.refusal);
+        assert_eq!(fs::read(root.join(GAME_REL)).unwrap(), game);
+        assert!(!root.join(".bgc-assets-backup").exists());
+        no_apply_debris(&root);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unity_bundle_apply_refuses_a_catalogue_without_a_second_bundle_to_verify() {
+        // A catalogue that covers only the target bundle cannot be calibrated
+        // twice, so the apply refuses rather than trusting a single sample.
+        let root = scratch("bgc-unity-catalogue-single");
+        let game = apply_fixture();
+        fs::create_dir_all(root.join("aa/StandaloneWindows64")).unwrap();
+        fs::write(root.join(GAME_REL), &game).unwrap();
+        let (crc, content) = catalogue_values(&game);
+        use crate::addressables::fixtures::{catalogue_json, FixtureEntry};
+        let json = catalogue_json(&[FixtureEntry {
+            internal_id: r"{RuntimePath}\StandaloneWindows64\game.bundle".into(),
+            bundle_name: "sandbox".into(), hash: hex(&bundle_hash(&content, &[])),
+            crc, size: game.len() as u64, dependencies: vec![],
+        }]);
+        fs::write(root.join("aa/catalog.json"), &json).unwrap();
+        let rel = PathBuf::from(GAME_REL);
+        let outcome = &texture_apply(64, 1, &root, std::slice::from_ref(&rel)).unwrap()[0];
+        assert_eq!(outcome.status, ApplyStatus::Refused, "{outcome:?}");
+        assert!(outcome.refusal.as_deref().unwrap().contains("second untouched bundle"), "{:?}", outcome.refusal);
+        assert_eq!(fs::read(root.join(GAME_REL)).unwrap(), game);
         assert!(!root.join(".bgc-assets-backup").exists());
         no_apply_debris(&root);
         fs::remove_dir_all(root).unwrap();

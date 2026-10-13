@@ -62,6 +62,16 @@ pub fn plausible(bytes: &[u8]) -> bool {
         && bytes[16] <= 1 && bytes[17..20] == [0; 3]
 }
 fn header(bytes: &[u8], length: u64) -> io::Result<Header> {
+    let header = header_prefix(bytes)?;
+    if header.size != length { return Err(bad("invalid Unity file/metadata/data bounds")); }
+    Ok(header)
+}
+
+/// Parse and validate a SerializedFile header without requiring the declared
+/// file size to equal the bytes currently available: callers that hold only the
+/// header prefix (the Addressables proof reads a bounded prefix before hashing
+/// the node) still get every internal bound checked.
+fn header_prefix(bytes: &[u8]) -> io::Result<Header> {
     if !plausible(bytes) { return Err(bad("unsupported Unity SerializedFile header (requires v17–22)")); }
     let mut c = Cursor { bytes, pos: 0, big: true };
     let mut metadata = c.u32()? as u64;
@@ -75,12 +85,20 @@ fn header(bytes: &[u8], length: u64) -> io::Result<Header> {
         if c.u64()? != 0 { return Err(bad("unknown Unity v22 header extension")); }
     }
     let start = c.pos as u64;
-    if size != length || metadata == 0 || metadata > MAX_METADATA
+    if metadata == 0 || metadata > MAX_METADATA
         || start.checked_add(metadata).is_none_or(|end| end > data)
         || data > size || data % 4 != 0 {
         return Err(bad("invalid Unity file/metadata/data bounds"));
     }
     Ok(Header { version, metadata, data, size, start, big })
+}
+
+/// The SerializedFile header's absolute object-data offset, validated against
+/// the header's own bounds. Used by the Addressables catalogue proof, which
+/// hashes a serialized node from this offset to its end (SBP's `ContentHash`).
+#[cfg(any(test, feature = "development-audits"))]
+pub(crate) fn data_offset(bytes: &[u8]) -> io::Result<u64> {
+    Ok(header_prefix(bytes)?.data)
 }
 
 fn serialized_type(c: &mut Cursor<'_>, version: u32, trees: bool, reference: bool) -> io::Result<i32> {

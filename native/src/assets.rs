@@ -27,6 +27,10 @@ use std::{
 };
 
 const BACKUP: &str = ".bgc-assets-backup";
+/// The same directory name exposed to the Addressables catalogue walk, which
+/// must never mistake a restorable copy for a live catalogue.
+#[cfg(any(test, feature = "development-audits"))]
+pub(crate) const BACKUP_DIR: &str = BACKUP;
 const NOFOLLOW: i32 = libc::O_NOFOLLOW;
 const MAX_INPUT: u64 = 512 * 1024 * 1024;
 const MAX_PIXELS: u64 = 80_000_000;
