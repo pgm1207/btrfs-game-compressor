@@ -475,6 +475,7 @@ pub struct BundleTextureInventory {
     pub opaque: Vec<(u64, &'static str)>,
     pub unretained: u64,
 }
+#[derive(Clone)]
 pub struct TextureObjectRecord {
     pub id: u64, pub start: u64, pub size: u64,
     pub table_start: u64, pub table_end: u64, pub type_index: usize,
